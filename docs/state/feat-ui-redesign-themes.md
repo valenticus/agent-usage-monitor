@@ -27,16 +27,14 @@
 
 ## Git state
 - Branch: `feat/ui-redesign-themes`
-- HEAD before handoff commit: `fbcec82c4db1972470b31324d8c567fd5adeee42`
-- Initial implementation commit `4ecae916c0c781ffede0ddfdc52d3af9459e74d3` is pushed. The first artifact-path correction was pushed; a second correction for the staging step working directory is now pending commit/push. `docs/state/main.md` remains untracked and untouched.
+- HEAD before handoff commit: `34e7beeb90a5a06efba0313442a5fa13ab08911f`
+- Implementation is on `feat/ui-redesign-themes`, with CI fix commit `34e7beeb90a5a06efba0313442a5fa13ab08911f` pushed. `docs/state/main.md` remains untracked and untouched.
 
 ## Decisions and limitations
 - Nook's asset notice identifies Lucide/Simple Icons and Nook-owned assets but does not grant rights to redistribute OpenAI or Anthropic trademarks. AUM supports user-provided local artwork and does not substitute fabricated marks.
 - Pixel-level review at 100%, 125%, and 150% scaling was not reliable in the available desktop capture; those scales still need manual visual QA.
-- GitHub Actions run `44807116604` passed formatting, Clippy, workspace tests, and the Windows build but artifact staging ran from the repository root and could not find the executable. Run `44808553804` had the same staging failure. The staging step now sets `working-directory: rust`, copies from `target/debug`, and uses parent paths for LICENSE/README; follow-up CI is pending.
+- GitHub Actions run `44809779950` passed formatting, workspace Clippy, workspace tests, Windows build, and artifact upload. Earlier runs `44807116604` and `44808553804` failed only during artifact staging; setting `working-directory: rust` fixed the path. Windows artifact ID `14666196352` is available until 2026-12-04.
 
 ## Next actions
-1. Review and stage only the related implementation paths explicitly.
-2. Commit and push this feature branch (not main), then inspect its single GitHub Actions run.
-3. Resolve any remote CI failures, rerunning only as needed, and provide the successful Windows artifact URL.
-4. Perform manual visual review at 100%, 125%, and 150% Windows scaling, and integrate provider artwork only after redistribution permission is confirmed.
+1. Perform manual visual review at 100%, 125%, and 150% Windows scaling.
+2. Integrate official provider artwork only after redistribution permission is confirmed.
