@@ -1,0 +1,28 @@
+[package]
+name = "agent-usage-monitor-ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+agent-usage-monitor-core = { path = "../agent-monitor-core" }
+slint.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+windows-sys.workspace = true
+raw-window-handle.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[[bin]]
+name = "agent-usage-monitor"
+path = "src/main.rs"

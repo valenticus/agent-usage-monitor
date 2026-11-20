@@ -1,0 +1,31 @@
+name: Rust CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+        working-directory: rust
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: rust
+      - name: Run tests
+        run: cargo test --workspace
+        working-directory: rust
+      - name: Build
+        run: cargo build --workspace
+        working-directory: rust

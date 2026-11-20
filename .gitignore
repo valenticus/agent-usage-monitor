@@ -1,0 +1,14 @@
+/target/
+**/target/
+**/bin/
+**/obj/
+.vs/
+*.exe
+*.dll
+*.pdb
+*.res
+*.log
+*.tmp
+.env
+.env.*
+!.env.example

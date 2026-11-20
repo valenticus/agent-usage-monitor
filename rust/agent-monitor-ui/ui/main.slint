@@ -1,0 +1,336 @@
+import { Button, ComboBox, ScrollView, Switch } from "std-widgets.slint";
+
+component QuotaRow inherits Rectangle {
+    in property <string> label;
+    in property <string> remaining;
+    in property <string> reset;
+    in property <float> value;
+    in property <bool> available;
+    in property <bool> light;
+    background: transparent;
+    height: 26px;
+    Text { x: 0px; y: 0px; width: 52px; height: 20px; text: root.label; color: root.light ? #66717e : #9ba8b7; font-size: 10px; vertical-alignment: center; }
+    Rectangle {
+        x: 56px; y: 7px; width: 102px; height: 7px; border-radius: 4px;
+        background: root.light ? #e0e5ea : #293440;
+        Rectangle {
+            x: 0px; y: 0px;
+            width: root.available ? parent.width * min(100, max(0, root.value)) / 100 : 0px;
+            height: parent.height; border-radius: 4px;
+            background: {
+                if (!root.available) { root.light ? #aab3bc : #46515d }
+                else if (root.value <= 10) { #e35c65 }
+                else if (root.value <= 25) { #dca743 }
+                else { #51ae7c }
+            }
+        }
+    }
+    Text { x: 164px; y: 0px; width: 44px; height: 20px; text: root.remaining; color: root.light ? #202a35 : #eff3f7; font-size: 12px; font-weight: 650; horizontal-alignment: right; vertical-alignment: center; }
+    Text { x: 214px; y: 0px; width: 122px; height: 20px; text: root.reset; color: root.light ? #66717e : #8794a3; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+}
+
+component ProviderSection inherits Rectangle {
+    in property <string> provider-name;
+    in property <string> provider-initial;
+    in property <string> five-label;
+    in property <string> weekly-label;
+    in property <string> plan-label;
+    in property <string> state-label;
+    in property <color> state-color;
+    in property <string> five-remaining;
+    in property <string> five-reset;
+    in property <float> five-value;
+    in property <bool> five-available;
+    in property <string> weekly-remaining;
+    in property <string> weekly-reset;
+    in property <float> weekly-value;
+    in property <bool> weekly-available;
+    in property <bool> light;
+    background: transparent;
+    height: 78px;
+    Rectangle { x: 0px; y: 2px; width: 18px; height: 18px; border-radius: 5px; background: root.light ? #e5ebf2 : #273341; border-color: root.light ? #cbd4de : #3b4a5c; border-width: 1px;
+        Text { width: parent.width; height: parent.height; text: root.provider-initial; color: root.light ? #41566d : #d4deea; font-size: 8px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+    }
+    Text { x: 24px; y: 0px; width: 70px; height: 22px; text: root.provider-name; color: root.light ? #1b2631 : #edf1f6; font-size: 13px; font-weight: 650; vertical-alignment: center; }
+    Text { x: 98px; y: 1px; width: 156px; height: 20px; text: root.state-label; color: root.state-color; font-size: 9px; vertical-alignment: center; overflow: elide; }
+    Text { x: 258px; y: 1px; width: 78px; height: 20px; text: root.plan-label; color: root.light ? #65717d : #a0acb9; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
+    QuotaRow { x: 0px; y: 25px; width: 336px; label: root.five-label; remaining: root.five-remaining; reset: root.five-reset; value: root.five-value; available: root.five-available; light: root.light; }
+    QuotaRow { x: 0px; y: 51px; width: 336px; label: root.weekly-label; remaining: root.weekly-remaining; reset: root.weekly-reset; value: root.weekly-value; available: root.weekly-available; light: root.light; }
+}
+
+export component MainWindow inherits Window {
+    in property <bool> demo-mode: false;
+    in property <bool> light-theme: false;
+    in property <bool> codex-enabled: true;
+    in property <bool> claude-enabled: true;
+    in property <string> codex-plan: "Unknown plan";
+    in property <string> codex-status: "Loading";
+    in property <color> codex-status-color: #98a3af;
+    in property <string> codex-five-remaining: "—";
+    in property <string> codex-five-reset: "Reset unknown";
+    in property <float> codex-five-value: 0;
+    in property <bool> codex-five-available: false;
+    in property <string> codex-weekly-remaining: "—";
+    in property <string> codex-weekly-reset: "Reset unknown";
+    in property <float> codex-weekly-value: 0;
+    in property <bool> codex-weekly-available: false;
+    in property <string> claude-plan: "Unknown plan";
+    in property <string> claude-status: "Waiting";
+    in property <color> claude-status-color: #98a3af;
+    in property <string> claude-five-remaining: "—";
+    in property <string> claude-five-reset: "Reset unknown";
+    in property <float> claude-five-value: 0;
+    in property <bool> claude-five-available: false;
+    in property <string> claude-weekly-remaining: "—";
+    in property <string> claude-weekly-reset: "Reset unknown";
+    in property <float> claude-weekly-value: 0;
+    in property <bool> claude-weekly-available: false;
+    in property <string> five-label: "5 hours";
+    in property <string> weekly-label: "Weekly";
+    in property <string> demo-label: "Demo · sample values";
+    in property <string> settings-label: "Settings";
+    in property <string> disabled-label: "Monitoring disabled";
+    callback open-settings();
+
+    title: "Agent Usage Monitor";
+    width: 370px;
+    height: (codex-enabled && claude-enabled) ? 208px : ((codex-enabled || claude-enabled) ? 118px : 78px);
+    no-frame: true;
+    background: transparent;
+    default-font-family: "Segoe UI";
+    default-font-size: 12px;
+
+    Rectangle {
+        x: 1px; y: 1px; width: parent.width - 2px; height: parent.height - 2px;
+        background: root.light-theme ? #f8fafc : #111923;
+        border-color: root.light-theme ? #cbd2da : #2b3541;
+        border-width: 1px; border-radius: 14px;
+    }
+    Text { x: parent.width - 80px; y: 8px; width: 48px; height: 20px; text: root.settings-label; color: root.light-theme ? #4e5a66 : #a5b0bd; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; TouchArea { clicked => { root.open-settings(); } } }
+    Text { x: parent.width - 34px; y: 7px; width: 22px; height: 22px; text: "×"; color: root.light-theme ? #596572 : #aab5c1; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; TouchArea { clicked => { root.close(); } } }
+    if root.demo-mode: Text { x: 16px; y: 7px; width: 230px; height: 20px; text: root.demo-label; color: #bc8128; font-size: 9px; vertical-alignment: center; }
+
+    ProviderSection {
+        x: 16px; y: 27px; width: 336px; visible: root.codex-enabled;
+        provider-name: "Codex"; provider-initial: "CX"; plan-label: root.codex-plan; state-label: root.codex-status; state-color: root.codex-status-color;
+        five-label: root.five-label; weekly-label: root.weekly-label;
+        five-remaining: root.codex-five-remaining; five-reset: root.codex-five-reset; five-value: root.codex-five-value; five-available: root.codex-five-available;
+        weekly-remaining: root.codex-weekly-remaining; weekly-reset: root.codex-weekly-reset; weekly-value: root.codex-weekly-value; weekly-available: root.codex-weekly-available;
+        light: root.light-theme;
+    }
+    Rectangle { x: 16px; y: 107px; width: parent.width - 32px; height: 1px; visible: root.codex-enabled && root.claude-enabled; background: root.light-theme ? #d9dfe5 : #293440; }
+    ProviderSection {
+        x: 16px; y: root.codex-enabled ? 117px : 27px; width: 336px; visible: root.claude-enabled;
+        provider-name: "Claude"; provider-initial: "CL"; plan-label: root.claude-plan; state-label: root.claude-status; state-color: root.claude-status-color;
+        five-label: root.five-label; weekly-label: root.weekly-label;
+        five-remaining: root.claude-five-remaining; five-reset: root.claude-five-reset; five-value: root.claude-five-value; five-available: root.claude-five-available;
+        weekly-remaining: root.claude-weekly-remaining; weekly-reset: root.claude-weekly-reset; weekly-value: root.claude-weekly-value; weekly-available: root.claude-weekly-available;
+        light: root.light-theme;
+    }
+    if !root.codex-enabled && !root.claude-enabled: Text { x: 16px; y: 27px; width: parent.width - 32px; height: 24px; text: root.disabled-label; color: root.light-theme ? #687581 : #98a4b1; horizontal-alignment: center; vertical-alignment: center; }
+}
+
+export component SettingsWindow inherits Window {
+    in property <bool> light-theme: false;
+    in-out property <int> selected-tab: 0;
+    in property <bool> codex-enabled: true;
+    in property <bool> claude-enabled: true;
+    in property <bool> alerts-enabled: true;
+    in property <bool> exhausted-alerts-enabled: true;
+    in property <bool> include-weekly: true;
+    in-out property <int> theme-index: 0;
+    in-out property <int> language-index: 0;
+    in-out property <int> warning-index: 0;
+    in-out property <int> critical-index: 1;
+    in-out property <int> duration-index: 1;
+    in property <[string]> theme-options: ["System", "Dark", "Light"];
+    in property <[string]> language-options: ["System", "Українська", "English", "Polski"];
+    in property <[string]> warning-options: ["25%", "30%", "40%", "50%", "75%", "100%"];
+    in property <[string]> critical-options: ["5%", "10%", "15%", "20%"];
+    in property <[string]> duration-options: ["4 sec", "8 sec", "12 sec", "20 sec", "30 sec"];
+    in property <string> title-label: "Settings";
+    in property <string> general-label: "General";
+    in property <string> notifications-label: "Notifications";
+    in property <string> about-label: "About";
+    in property <string> appearance-label: "Appearance";
+    in property <string> providers-label: "Providers";
+    in property <string> theme-name-label: "Theme";
+    in property <string> language-name-label: "Language";
+    in property <string> codex-description: "Checking the local Codex app-server";
+    in property <string> claude-description: "Enable the status-line bridge to receive session data";
+    in property <string> codex-state: "Waiting for data";
+    in property <string> claude-state: "Unavailable";
+    in property <string> alerts-description: "Show a Windows notification when a limit is low";
+    in property <string> warning-name-label: "Warn when remaining quota reaches";
+    in property <string> critical-name-label: "Critical when remaining quota reaches";
+    in property <string> exhausted-name-label: "Notify when quota is exhausted";
+    in property <string> weekly-name-label: "Include weekly quota alerts";
+    in property <string> duration-name-label: "Notification duration";
+    in property <string> about-product: "Agent Usage Monitor";
+    in property <string> about-tagline: "Usage at a glance. Local by design.";
+    in property <string> about-version: "Version 0.1.0";
+    in property <string> about-author: "Author: Valentyn Fetisov";
+    in property <string> about-repository: "GitHub repository";
+    in property <string> about-license: "License: MIT (package metadata)";
+    in property <string> about-third-party: "Third-party: Slint Community Edition";
+    in property <string> source-note: "Claude quota data requires an explicitly configured Claude Code status-line command. AUM does not change Claude settings.";
+    callback select-tab(int);
+    callback theme-selected(string);
+    callback language-selected(string);
+    callback warning-selected(string);
+    callback critical-selected(string);
+    callback duration-selected(string);
+    callback toggle-alerts();
+    callback toggle-exhausted-alerts();
+    callback toggle-weekly();
+    callback toggle-codex();
+    callback toggle-claude();
+    callback open-repository();
+    callback close-settings();
+
+    title: "Agent Usage Monitor — Settings";
+    preferred-width: 620px;
+    preferred-height: 480px;
+    min-width: 560px;
+    min-height: 440px;
+    default-font-family: "Segoe UI";
+    default-font-size: 13px;
+    background: root.light-theme ? #f3f6fa : #10161f;
+
+    Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: root.light-theme ? #f3f6fa : #10161f;
+    }
+    Rectangle {
+        x: 0px; y: 0px; width: 184px; height: parent.height;
+        background: root.light-theme ? #edf1f6 : #151d28;
+    }
+    Text {
+        x: 24px; y: 24px; width: 136px; height: 48px;
+        text: "AUM"; font-size: 20px; font-weight: 700;
+        color: root.light-theme ? #1b2633 : #f1f4f8;
+        vertical-alignment: center;
+    }
+    Text {
+        x: 24px; y: 68px; width: 136px; height: 34px;
+        text: root.title-label; font-size: 12px;
+        color: root.light-theme ? #5e6a78 : #9aa8b7;
+        vertical-alignment: center; wrap: word-wrap;
+    }
+    for tab[index] in [root.general-label, root.notifications-label, root.about-label] : Button {
+        x: 12px; y: 128px + index * 48px; width: 160px; height: 40px;
+        text: tab; checkable: true; checked: root.selected-tab == index;
+        clicked => { root.select-tab(index); }
+    }
+    Rectangle { x: 184px; y: 0px; width: 1px; height: parent.height; background: root.light-theme ? #d9e0e8 : #293340; }
+
+    if root.selected-tab == 0 : ScrollView {
+        x: 208px; y: 20px; width: parent.width - 232px; height: parent.height - 40px;
+        VerticalLayout {
+            width: parent.width;
+            spacing: 8px;
+            alignment: start;
+            Text { text: root.general-label; font-size: 24px; font-weight: 650; color: root.light-theme ? #1b2633 : #f1f4f8; }
+            Text { text: root.appearance-label; font-size: 14px; font-weight: 650; color: root.light-theme ? #344252 : #cad3de; }
+            VerticalLayout {
+                width: parent.width; spacing: 4px; alignment: start;
+                HorizontalLayout {
+                    height: 36px;
+                    Text { text: root.theme-name-label; color: root.light-theme ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; }
+                    ComboBox { width: 180px; model: root.theme-options; current-index <=> root.theme-index; selected(value) => { root.theme-selected(value); } }
+                }
+                HorizontalLayout {
+                    height: 36px;
+                    Text { text: root.language-name-label; color: root.light-theme ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; }
+                    ComboBox { width: 180px; model: root.language-options; current-index <=> root.language-index; selected(value) => { root.language-selected(value); } }
+                }
+            }
+            Text { text: root.providers-label; font-size: 14px; font-weight: 650; color: root.light-theme ? #344252 : #cad3de; }
+            Rectangle {
+                width: parent.width; height: 76px; border-radius: 8px;
+                background: root.light-theme ? #ffffff : #19232f;
+                border-color: root.light-theme ? #dce3eb : #2a3746; border-width: 1px;
+                Text { x: 16px; y: 14px; width: 125px; height: 24px; text: "Codex"; font-weight: 650; color: root.light-theme ? #202c39 : #edf2f7; vertical-alignment: center; }
+                Text { x: 16px; y: 40px; width: parent.width - 92px; height: 28px; text: root.codex-state + " · " + root.codex-description; color: root.light-theme ? #5d6976 : #9eacbb; font-size: 11px; vertical-alignment: center; wrap: word-wrap; }
+                Switch { x: parent.width - 70px; y: 16px; checked: root.codex-enabled; toggled => { root.toggle-codex(); } }
+            }
+            Rectangle {
+                width: parent.width; height: 96px; border-radius: 8px;
+                background: root.light-theme ? #ffffff : #19232f;
+                border-color: root.light-theme ? #dce3eb : #2a3746; border-width: 1px;
+                Text { x: 16px; y: 14px; width: 125px; height: 24px; text: "Claude"; font-weight: 650; color: root.light-theme ? #202c39 : #edf2f7; vertical-alignment: center; }
+                Text { x: 16px; y: 40px; width: parent.width - 92px; height: 48px; text: root.claude-state + " · " + root.claude-description; color: root.light-theme ? #5d6976 : #9eacbb; font-size: 11px; vertical-alignment: center; wrap: word-wrap; }
+                Switch { x: parent.width - 70px; y: 16px; checked: root.claude-enabled; toggled => { root.toggle-claude(); } }
+            }
+            Text { text: root.source-note; color: root.light-theme ? #687584 : #8998a8; font-size: 11px; wrap: word-wrap; vertical-stretch: 0; }
+        }
+    }
+    if root.selected-tab == 1 : ScrollView {
+        x: 208px; y: 20px; width: parent.width - 232px; height: parent.height - 40px;
+        VerticalLayout {
+            width: parent.width; spacing: 8px; alignment: start;
+            Text { text: root.notifications-label; font-size: 24px; font-weight: 650; color: root.light-theme ? #1b2633 : #f1f4f8; }
+            Rectangle {
+                width: parent.width; height: 76px; border-radius: 8px;
+                background: root.light-theme ? #ffffff : #19232f;
+                border-color: root.light-theme ? #dce3eb : #2a3746; border-width: 1px;
+                Text { x: 16px; y: 12px; width: parent.width - 90px; height: 24px; text: root.notifications-label; font-weight: 650; color: root.light-theme ? #202c39 : #edf2f7; vertical-alignment: center; }
+                Text { x: 16px; y: 38px; width: parent.width - 90px; height: 24px; text: root.alerts-description; color: root.light-theme ? #687584 : #9eacbb; font-size: 11px; vertical-alignment: center; wrap: word-wrap; }
+                Switch { x: parent.width - 70px; y: 26px; checked: root.alerts-enabled; toggled => { root.toggle-alerts(); } }
+            }
+            Rectangle {
+                width: parent.width; height: 240px; border-radius: 8px;
+                background: root.light-theme ? #ffffff : #19232f;
+                border-color: root.light-theme ? #dce3eb : #2a3746; border-width: 1px;
+                VerticalLayout {
+                    x: 16px; y: 8px; width: parent.width - 32px; spacing: 5px;
+                    HorizontalLayout {
+                        height: 42px;
+                        Text { text: root.warning-name-label; color: root.light-theme ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                        ComboBox { width: 104px; model: root.warning-options; current-index <=> root.warning-index; selected(value) => { root.warning-selected(value); } }
+                    }
+                    HorizontalLayout {
+                        height: 42px;
+                        Text { text: root.critical-name-label; color: root.light-theme ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                        ComboBox { width: 104px; model: root.critical-options; current-index <=> root.critical-index; selected(value) => { root.critical-selected(value); } }
+                    }
+                    HorizontalLayout {
+                        height: 38px;
+                        Text { text: root.exhausted-name-label; color: root.light-theme ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                        Switch { checked: root.exhausted-alerts-enabled; toggled => { root.toggle-exhausted-alerts(); } }
+                    }
+                    HorizontalLayout {
+                        height: 38px;
+                        Text { text: root.weekly-name-label; color: root.light-theme ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+                        Switch { checked: root.include-weekly; toggled => { root.toggle-weekly(); } }
+                    }
+                    HorizontalLayout {
+                        height: 38px;
+                        Text { text: root.duration-name-label; color: root.light-theme ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; }
+                        ComboBox { width: 104px; model: root.duration-options; current-index <=> root.duration-index; selected(value) => { root.duration-selected(value); } }
+                    }
+                }
+            }
+        }
+    }
+    if root.selected-tab == 2 : VerticalLayout {
+        x: 208px; y: 20px; width: parent.width - 232px; height: parent.height - 40px; spacing: 10px; alignment: start;
+        Text { text: root.about-label; font-size: 24px; font-weight: 650; color: root.light-theme ? #1b2633 : #f1f4f8; }
+        Rectangle {
+            width: parent.width; height: 282px; border-radius: 10px;
+            background: root.light-theme ? #ffffff : #19232f;
+            border-color: root.light-theme ? #dce3eb : #2a3746; border-width: 1px;
+            VerticalLayout {
+                x: 24px; y: 20px; width: parent.width - 48px; spacing: 8px; alignment: start;
+                Text { text: root.about-product; color: root.light-theme ? #202c39 : #edf2f7; font-size: 20px; font-weight: 700; }
+                Text { text: "AUM"; color: root.light-theme ? #316cb4 : #8cb8f2; font-size: 14px; font-weight: 700; }
+                Text { text: root.about-tagline; color: root.light-theme ? #657281 : #a1afbe; wrap: word-wrap; }
+                Text { text: root.about-version; color: root.light-theme ? #344252 : #dbe2eb; }
+                Text { text: root.about-author; color: root.light-theme ? #344252 : #dbe2eb; }
+                Button { text: root.about-repository; primary: false; clicked => { root.open-repository(); } }
+                Text { text: root.about-license; color: root.light-theme ? #687584 : #9eacbb; font-size: 11px; wrap: word-wrap; }
+                Text { text: root.about-third-party; color: root.light-theme ? #687584 : #9eacbb; font-size: 11px; wrap: word-wrap; }
+            }
+        }
+    }
+}

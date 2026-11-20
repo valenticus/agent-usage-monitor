@@ -1,0 +1,21 @@
+[package]
+name = "agent-usage-monitor-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tempfile.workspace = true
+windows-sys.workspace = true
+
+[[bin]]
+name = "agent-usage-monitor-claude-bridge"
+path = "src/bin/claude_status_line_bridge.rs"
