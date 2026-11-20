@@ -27,13 +27,13 @@
 
 ## Git state
 - Branch: `feat/ui-redesign-themes`
-- HEAD before handoff commit: `4ecae916c0c781ffede0ddfdc52d3af9459e74d3`
-- Initial implementation commit `4ecae916c0c781ffede0ddfdc52d3af9459e74d3` is pushed. Artifact-path correction commit is committed locally and pending push. `docs/state/main.md` remains untracked and untouched.
+- HEAD before handoff commit: `fbcec82c4db1972470b31324d8c567fd5adeee42`
+- Initial implementation commit `4ecae916c0c781ffede0ddfdc52d3af9459e74d3` is pushed. The first artifact-path correction was pushed; a second correction for the staging step working directory is now pending commit/push. `docs/state/main.md` remains untracked and untouched.
 
 ## Decisions and limitations
 - Nook's asset notice identifies Lucide/Simple Icons and Nook-owned assets but does not grant rights to redistribute OpenAI or Anthropic trademarks. AUM supports user-provided local artwork and does not substitute fabricated marks.
 - Pixel-level review at 100%, 125%, and 150% scaling was not reliable in the available desktop capture; those scales still need manual visual QA.
-- First GitHub Actions run `44807116604` passed format, Clippy, workspace tests, and Windows build, then failed during artifact staging: cache configured target output at repository-root `target/`, but workflow copied from `rust/target/`. Workflow source path is corrected to `../target/debug/agent-usage-monitor.exe`; a follow-up CI run is pending.
+- GitHub Actions run `44807116604` passed formatting, Clippy, workspace tests, and the Windows build but artifact staging ran from the repository root and could not find the executable. Run `44808553804` had the same staging failure. The staging step now sets `working-directory: rust`, copies from `target/debug`, and uses parent paths for LICENSE/README; follow-up CI is pending.
 
 ## Next actions
 1. Review and stage only the related implementation paths explicitly.

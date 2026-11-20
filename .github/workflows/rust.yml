@@ -51,9 +51,10 @@ jobs:
 
       - name: Stage runnable application
         shell: pwsh
+        working-directory: rust
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item ../target/debug/agent-usage-monitor.exe dist/agent-usage-monitor.exe
+          Copy-Item target/debug/agent-usage-monitor.exe dist/agent-usage-monitor.exe
           Copy-Item ../LICENSE dist/LICENSE
           Copy-Item ../README.md dist/README.md
 
