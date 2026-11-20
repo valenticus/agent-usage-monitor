@@ -1,6 +1,33 @@
 # Agent Usage Monitor (AUM)
 
-A Windows desktop quota monitor built with Rust and Slint. The workspace contains a provider-neutral core, Codex app-server integration, an opt-in Claude Code status-line bridge, and the native Windows UI.
+**A lightweight, open-source Windows desktop monitor for AI coding-assistant usage, built with Rust and Slint.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-15243D?style=flat&labelColor=15243D)](LICENSE) ![Platform: Windows](https://img.shields.io/badge/Platform-Windows-15243D?style=flat&labelColor=15243D) ![Rust](https://img.shields.io/badge/Rust-Slint-15243D?style=flat&labelColor=15243D)
+
+> **Development status:** Active development. A polished release, screenshots, and installation packages will be published when ready. Until then, follow the source-build instructions below; feature availability and integrations may change.
+
+Agent Usage Monitor helps developers keep an eye on their AI coding-assistant usage without repeatedly switching away from their workflow. It combines a provider-neutral monitoring core with a small native Windows interface and local, privacy-conscious settings.
+
+## What it does
+
+- **Codex:** reads rate-limit information using the experimental `codex app-server` interface, with initial refresh and periodic updates in live mode.
+- **Claude Code (opt-in):** receives only supported usage windows from Claude Code's documented status-line input through a local bridge. It never silently edits an existing status-line configuration.
+- **At a glance:** remaining percentages and independent reset countdowns, with unavailable or stale data clearly distinguished from valid values.
+- **Windows integration:** notification-area tray icon, compact quota popup, Settings window, and notification alerts.
+- **Personalization:** dark, light, and system themes; Ukrainian, English, and Polish localization.
+- **Local-first:** saves settings and alert state under the user's application data directory. It does not store authentication credentials or tokens.
+
+### Current limitations
+
+This is a **development build, not a finished public release**. Quota-driven tray-icon refresh is not yet connected, high-DPI screenshot comparisons remain outstanding, and integration availability depends on upstream provider interfaces. Claude Code usage is session-driven and may be missing or stale. No promises of stable installation packages or released binaries are implied.
+
+## License & reuse
+
+This project is released under the **[MIT License](LICENSE)**.
+
+You may **use, copy, modify, merge, publish, distribute, sublicense, and sell** copies of the software, including in commercial projects, subject to the license terms. **You must retain the original copyright notice and MIT permission notice** in copies or substantial portions of the software.
+
+Copyright © 2026 **Valentyn Fetisov**. The software is provided **“AS IS”**, without warranty. MIT permits reuse; it does not require derivatives to be open-source. Third-party dependencies, trademarks, and provider assets may have separate conditions.
 
 ## Build and run
 
