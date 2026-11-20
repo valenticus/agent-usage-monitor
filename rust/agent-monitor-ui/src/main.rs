@@ -1,5 +1,7 @@
 mod adapter;
+mod claude_refresher;
 mod localization;
+mod provider_icons;
 mod settings;
 mod theme;
 #[allow(dead_code)] // Pure quota renderer is tested; the native tray icon is currently static.
@@ -182,6 +184,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let window = MainWindow::new()?;
     let settings_window = SettingsWindow::new()?;
+    window.set_refresh_enabled(use_live);
     window
         .window()
         .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
@@ -210,6 +213,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 show_settings_centered(&panel);
             }
         }
+    });
+    let (refresh_sender, refresh_receiver) = mpsc::channel(1);
+    window.on_refresh_requested(move || {
+        let _ = refresh_sender.try_send(());
     });
     settings_window.window().on_close_requested({
         let panel = settings_window.as_weak();
@@ -283,6 +290,22 @@ fn main() -> Result<(), slint::PlatformError> {
             &current,
         );
         move || save_setting_change(&values, toggle_claude)
+    });
+    settings_window.on_toggle_claude_cli_refresh({
+        let values = callback_context(
+            &config,
+            &settings_path,
+            &locale,
+            &settings_sender,
+            &window,
+            &settings_window,
+            &current,
+        );
+        move || {
+            save_setting_change(&values, |settings| {
+                settings.claude_cli_refresh_enabled = !settings.claude_cli_refresh_enabled
+            })
+        }
     });
     settings_window.on_toggle_alerts({
         let values = callback_context(
@@ -395,8 +418,8 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(windows)]
     let (native_tray, tray_events) = match tray::NativeTray::start(lock_locale(&locale)) {
         Ok(result) => result,
-        Err(_) => {
-            eprintln!("Windows tray initialization failed; the application will exit.");
+        Err(error) => {
+            eprintln!("Windows tray initialization failed: {error}. The application will exit.");
             return Ok(());
         }
     };
@@ -469,6 +492,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 worker_token,
                 claude_bridge_enabled,
                 settings_receiver,
+                refresh_receiver,
             ));
         }))
     } else {
@@ -503,6 +527,13 @@ fn main() -> Result<(), slint::PlatformError> {
         Duration::from_secs(2),
         move || {
             let settings = lock_settings(&theme_config);
+            let accent = theme::system_accent_color();
+            if let Some(window) = theme_window.upgrade() {
+                window.set_accent_color(accent);
+            }
+            if let Some(panel) = theme_panel.upgrade() {
+                panel.set_accent_color(accent);
+            }
             if settings.theme_mode != ThemeMode::System {
                 return;
             }
@@ -665,20 +696,21 @@ async fn run_live_workers<P>(
     cancellation: CancellationToken,
     claude_bridge_enabled: bool,
     settings: watch::Receiver<AppSettings>,
+    refresh_requests: mpsc::Receiver<()>,
 ) where
     P: RateLimitProvider + 'static,
 {
-    if !claude_bridge_enabled {
-        refresh_loop(provider, context, cancellation, settings).await;
-        return;
-    }
     let (sender, mut receiver) = mpsc::channel::<ClaudeStatusLineSnapshot>(4);
+    let (cli_sender, mut cli_receiver) =
+        mpsc::channel::<agent_usage_monitor_core::ClaudeUsageSnapshot>(2);
     let claude_window = context.window.clone();
     let claude_snapshot = context.current.clone();
     let claude_config = context.config.clone();
     let claude_locale = context.locale.clone();
     let claude_cancellation = cancellation.clone();
     let claude_settings = settings.clone();
+    let cli_settings = settings.clone();
+    let pipe_wait_cancellation = cancellation.clone();
     let claude_alerts = context.alerts.clone();
     let claude_settings_window = context.settings_window.clone();
     let claude_notifier = context.notifier.clone();
@@ -687,13 +719,34 @@ async fn run_live_workers<P>(
         loop {
             tokio::select! {
                 _ = claude_cancellation.cancelled() => break,
-                snapshot = receiver.recv() => {
-                    let Some(snapshot) = snapshot else { break };
+                snapshot = receiver.recv(), if claude_bridge_enabled => {
+                    let Some(snapshot) = snapshot else { continue };
                     if !claude_settings.borrow().claude_enabled { continue; }
                     let provider = snapshot.to_provider_snapshot();
                     state.record_success(provider.limits, None, snapshot.snapshot_at);
                     let updated = if let Ok(mut current) = claude_snapshot.lock() {
                         *current = current.replace_claude(state.snapshot().clone(), snapshot);
+                        Some(current.clone())
+                    } else { None };
+                    if let Some(updated) = updated {
+                        if let Ok(mut alert_runtime) = claude_alerts.lock() {
+                            let events = alert_runtime.refresh(&updated, &lock_settings(&claude_config), now_unix());
+                            deliver_alerts(&claude_notifier, events, lock_locale(&claude_locale));
+                        }
+                        if let Some(window) = claude_window.upgrade() { apply_current(&window, &updated, &claude_config, &claude_locale); }
+                        if let Some(panel) = claude_settings_window.upgrade() {
+                            let settings = lock_settings(&claude_config);
+                            update_settings_window(&panel, &settings, lock_locale(&claude_locale), system_light(&settings), &updated, now_unix());
+                        }
+                    }
+                }
+                usage = cli_receiver.recv() => {
+                    let Some(usage) = usage else { continue };
+                    if !claude_settings.borrow().claude_enabled
+                        || !claude_settings.borrow().claude_cli_refresh_enabled
+                    { continue; }
+                    let updated = if let Ok(mut current) = claude_snapshot.lock() {
+                        *current = current.merge_claude_usage(usage);
                         Some(current.clone())
                     } else { None };
                     if let Some(updated) = updated {
@@ -720,6 +773,10 @@ async fn run_live_workers<P>(
     let pipe_locale = context.locale.clone();
     let pipe_cancellation = cancellation.clone();
     let pipe_updates = async move {
+        if !claude_bridge_enabled {
+            pipe_wait_cancellation.cancelled().await;
+            return;
+        }
         if run_claude_status_pipe(sender, pipe_cancellation.clone())
             .await
             .is_err()
@@ -746,8 +803,15 @@ async fn run_live_workers<P>(
             pipe_cancellation.cancelled().await;
         }
     };
-    let codex = refresh_loop(provider, context, cancellation, settings);
-    tokio::join!(codex, claude_updates, pipe_updates);
+    let codex = refresh_loop(
+        provider,
+        context,
+        cancellation.clone(),
+        settings,
+        refresh_requests,
+    );
+    let cli = claude_refresher::run(cli_settings, cli_sender, cancellation);
+    tokio::join!(codex, claude_updates, pipe_updates, cli);
 }
 
 async fn refresh_loop<P>(
@@ -755,6 +819,7 @@ async fn refresh_loop<P>(
     context: WorkerUiContext,
     cancellation: CancellationToken,
     mut settings: watch::Receiver<AppSettings>,
+    mut refresh_requests: mpsc::Receiver<()>,
 ) where
     P: RateLimitProvider + 'static,
 {
@@ -778,6 +843,10 @@ async fn refresh_loop<P>(
                 } else { enabled = next; }
             },
             _ = interval.tick(), if enabled => {
+                refresh_codex(&provider, &mut state, &context, &cancellation).await;
+            }
+            request = refresh_requests.recv(), if enabled => {
+                if request.is_none() { break; }
                 refresh_codex(&provider, &mut state, &context, &cancellation).await;
             }
         }
@@ -855,22 +924,32 @@ fn update_settings_window(
     use slint::SharedString;
     window.set_codex_enabled(settings.codex_enabled);
     window.set_claude_enabled(settings.claude_enabled);
+    window.set_claude_cli_refresh_enabled(settings.claude_cli_refresh_enabled);
+    let icons = provider_icons::local();
+    window.set_codex_icon(icons.codex.clone().unwrap_or_default());
+    window.set_codex_icon_available(icons.codex.is_some());
+    window.set_claude_icon(icons.claude.clone().unwrap_or_default());
+    window.set_claude_icon_available(icons.claude.is_some());
     window.set_alerts_enabled(settings.alerts_enabled);
     window.set_exhausted_alerts_enabled(settings.exhausted_alerts_enabled);
     window.set_include_weekly(settings.include_weekly);
-    window.set_light_theme(light);
+    window.set_theme_kind(adapter::theme_kind(settings.theme_mode, light));
+    window.invoke_apply_theme_palette();
+    window.set_accent_color(theme::system_accent_color());
     window.set_theme_options(
         [
             SharedString::from(labels.system),
-            SharedString::from(labels.dark),
+            SharedString::from(labels.graphite),
+            SharedString::from(labels.navy),
             SharedString::from(labels.light),
         ]
         .into(),
     );
     window.set_theme_index(match settings.theme_mode {
         ThemeMode::System => 0,
-        ThemeMode::Dark => 1,
-        ThemeMode::Light => 2,
+        ThemeMode::Graphite => 1,
+        ThemeMode::Navy => 2,
+        ThemeMode::Light => 3,
     });
     window.set_language_options(
         [
@@ -950,13 +1029,15 @@ fn update_settings_window(
     window.set_duration_name_label(labels.duration.into());
     window.set_alerts_description(labels.alerts_description.into());
     window.set_source_note(labels.claude_note.into());
-    window.set_about_product("Agent Usage Monitor".into());
+    window.set_about_product("AgentUsageMonitor".into());
     window.set_about_tagline(labels.about_tagline.into());
-    window.set_about_version(format!("{} {}", labels.version, env!("CARGO_PKG_VERSION")).into());
-    window.set_about_author(format!("{} {}", labels.author, env!("CARGO_PKG_AUTHORS")).into());
+    window.set_claude_refresh_label(labels.claude_refresh.into());
+    window.set_claude_refresh_description(labels.claude_refresh_description.into());
+    window.set_about_version(format!("{}  {}", labels.version, env!("CARGO_PKG_VERSION")).into());
+    window.set_about_author(format!("{}  Valentyn Fetisov", labels.author).into());
     window.set_about_repository(labels.repository.into());
     window.set_about_license(labels.license.into());
-    window.set_about_third_party(labels.third_party.into());
+    window.set_about_technologies(labels.technologies.into());
 }
 
 fn show_settings_centered(window: &SettingsWindow) {
@@ -1047,7 +1128,7 @@ fn apply_popup_taskbar_style(window: &MainWindow) -> bool {
 
 fn system_light(settings: &AppSettings) -> bool {
     match settings.theme_mode {
-        ThemeMode::Dark => false,
+        ThemeMode::Graphite | ThemeMode::Navy => false,
         ThemeMode::Light => true,
         ThemeMode::System => theme::system_prefers_light(),
     }
@@ -1075,8 +1156,10 @@ fn popup_visible_after_toggle(currently_visible: bool) -> bool {
 }
 fn set_theme(settings: &mut AppSettings, value: &str, locale: Locale) {
     let labels = locale.settings();
-    settings.theme_mode = if value == labels.dark {
-        ThemeMode::Dark
+    settings.theme_mode = if value == labels.graphite {
+        ThemeMode::Graphite
+    } else if value == labels.navy {
+        ThemeMode::Navy
     } else if value == labels.light {
         ThemeMode::Light
     } else {
@@ -1156,7 +1239,11 @@ mod tests {
     #[test]
     fn explicit_theme_modes_resolve_without_system_theme_ambiguity() {
         assert!(!system_light(&AppSettings {
-            theme_mode: ThemeMode::Dark,
+            theme_mode: ThemeMode::Graphite,
+            ..Default::default()
+        }));
+        assert!(!system_light(&AppSettings {
+            theme_mode: ThemeMode::Navy,
             ..Default::default()
         }));
         assert!(system_light(&AppSettings {
@@ -1177,8 +1264,10 @@ mod tests {
     #[test]
     fn appearance_combos_select_persistable_theme_and_language_values() {
         let mut settings = AppSettings::default();
-        set_theme(&mut settings, "Темна", Locale::Uk);
-        assert_eq!(settings.theme_mode, ThemeMode::Dark);
+        set_theme(&mut settings, "Графітова", Locale::Uk);
+        assert_eq!(settings.theme_mode, ThemeMode::Graphite);
+        set_theme(&mut settings, "Темно-синя", Locale::Uk);
+        assert_eq!(settings.theme_mode, ThemeMode::Navy);
         set_theme(&mut settings, "Світла", Locale::Uk);
         assert_eq!(settings.theme_mode, ThemeMode::Light);
         set_theme(&mut settings, "Системна", Locale::Uk);

@@ -1,6 +1,6 @@
 use agent_usage_monitor_core::{
-    ClaudeStatusLineSnapshot, ProviderError, ProviderSnapshot, ProviderStatus, RateLimitSnapshot,
-    RateLimitWindow,
+    ClaudeStatusLineSnapshot, ClaudeUsageSnapshot, ProviderError, ProviderSnapshot, ProviderStatus,
+    RateLimitSnapshot, RateLimitWindow,
 };
 
 use crate::MainWindow;
@@ -38,7 +38,7 @@ pub struct UiSnapshot {
     demo: bool,
     loading: bool,
     claude_bridge_enabled: bool,
-    claude_status_line: Option<ClaudeStatusLineSnapshot>,
+    claude_usage: ClaudeUsageSnapshot,
 }
 
 impl UiSnapshot {
@@ -208,7 +208,7 @@ impl UiSnapshot {
             demo: true,
             loading: false,
             claude_bridge_enabled: false,
-            claude_status_line: None,
+            claude_usage: ClaudeUsageSnapshot::default(),
         }
     }
 
@@ -218,7 +218,7 @@ impl UiSnapshot {
             demo: false,
             loading: false,
             claude_bridge_enabled: false,
-            claude_status_line: None,
+            claude_usage: ClaudeUsageSnapshot::default(),
         }
     }
 
@@ -228,7 +228,7 @@ impl UiSnapshot {
             demo: false,
             loading: true,
             claude_bridge_enabled,
-            claude_status_line: None,
+            claude_usage: ClaudeUsageSnapshot::default(),
         }
     }
 
@@ -241,12 +241,24 @@ impl UiSnapshot {
 
     pub fn replace_claude(
         &self,
-        claude: ProviderSnapshot,
+        _claude: ProviderSnapshot,
         claude_status_line: ClaudeStatusLineSnapshot,
     ) -> Self {
         let mut next = self.clone();
-        replace_provider(&mut next.providers, claude);
-        next.claude_status_line = Some(claude_status_line);
+        next.claude_usage
+            .merge(claude_status_line.to_usage_snapshot());
+        if let Some(provider) = next.claude_usage.to_provider_snapshot() {
+            replace_provider(&mut next.providers, provider);
+        }
+        next
+    }
+
+    pub fn merge_claude_usage(&self, usage: ClaudeUsageSnapshot) -> Self {
+        let mut next = self.clone();
+        next.claude_usage.merge(usage);
+        if let Some(provider) = next.claude_usage.to_provider_snapshot() {
+            replace_provider(&mut next.providers, provider);
+        }
         next
     }
 
@@ -351,27 +363,18 @@ pub fn apply_config(
     window.set_five_label(locale.popup().five_hour.into());
     window.set_weekly_label(locale.popup().weekly.into());
     window.set_demo_label(locale.popup().demo.into());
-    window.set_settings_label(
-        match locale {
-            Locale::Uk => "Налаштування",
-            Locale::En => "Settings",
-            Locale::Pl => "Ustawienia",
-        }
-        .into(),
-    );
-    window.set_disabled_label(
-        match locale {
-            Locale::Uk => "Моніторинг вимкнено",
-            Locale::En => "Monitoring disabled",
-            Locale::Pl => "Monitorowanie wyłączone",
-        }
-        .into(),
-    );
-    window.set_light_theme(match settings.theme_mode {
-        crate::settings::ThemeMode::Dark => false,
-        crate::settings::ThemeMode::Light => true,
-        crate::settings::ThemeMode::System => system_light,
-    });
+    window.set_settings_label(locale.popup().settings.into());
+    window.set_disabled_label(locale.popup().monitoring_disabled.into());
+    window.set_usage_title_label(locale.popup().usage_title.into());
+    window.set_refresh_label(locale.popup().refresh.into());
+    window.set_theme_kind(theme_kind(settings.theme_mode, system_light));
+    window.invoke_apply_theme_palette();
+    window.set_accent_color(crate::theme::system_accent_color());
+    let icons = crate::provider_icons::local();
+    window.set_codex_icon(icons.codex.clone().unwrap_or_default());
+    window.set_codex_icon_available(icons.codex.is_some());
+    window.set_claude_icon(icons.claude.clone().unwrap_or_default());
+    window.set_claude_icon_available(icons.claude.is_some());
     apply_provider(
         window,
         ProviderView::Codex,
@@ -382,6 +385,15 @@ pub fn apply_config(
         ProviderView::Claude,
         provider_ui_for_locale(snapshot, "claude", now, locale),
     );
+}
+
+pub(crate) fn theme_kind(mode: crate::settings::ThemeMode, system_light: bool) -> i32 {
+    match mode {
+        crate::settings::ThemeMode::System if system_light => 2,
+        crate::settings::ThemeMode::System | crate::settings::ThemeMode::Graphite => 0,
+        crate::settings::ThemeMode::Navy => 1,
+        crate::settings::ThemeMode::Light => 2,
+    }
 }
 
 #[cfg(test)]
@@ -456,34 +468,29 @@ fn provider_ui_for_locale(snapshot: &UiSnapshot, id: &str, now: i64, locale: Loc
         (strings.unavailable.into(), rgb(0x9a, 0xa5, 0xb2))
     };
     let limit = provider.limits.first();
-    let claude_data = (id == "claude")
-        .then_some(snapshot.claude_status_line.as_ref())
-        .flatten();
+    let claude_data = (id == "claude").then_some(&snapshot.claude_usage);
     let plan = limit
         .and_then(|limit| limit.plan_type.as_deref())
         .map(short_plan)
-        .unwrap_or_else(|| {
-            match locale {
-                Locale::Uk => "План невідомий",
-                Locale::En => "Unknown plan",
-                Locale::Pl => "Nieznany plan",
-            }
-            .into()
-        });
+        .unwrap_or_default();
     ProviderUi {
         plan,
         status,
         status_color: color,
         five: window_ui(
             limit.and_then(|limit| limit.primary.as_ref()),
-            claude_data.and_then(|data| data.five_hour_reset_at),
+            claude_data
+                .and_then(|data| data.five_hour.as_ref())
+                .and_then(|window| window.resets_at),
             now,
             has_last_good,
             locale,
         ),
         weekly: window_ui(
             limit.and_then(|limit| limit.secondary.as_ref()),
-            claude_data.and_then(|data| data.weekly_reset_at),
+            claude_data
+                .and_then(|data| data.weekly.as_ref())
+                .and_then(|window| window.resets_at),
             now,
             has_last_good,
             locale,
@@ -494,7 +501,7 @@ fn provider_ui_for_locale(snapshot: &UiSnapshot, id: &str, now: i64, locale: Loc
 impl ProviderUi {
     fn unavailable() -> Self {
         Self {
-            plan: "План невідомий".into(),
+            plan: String::new(),
             status: "Недоступно".into(),
             status_color: rgb(0x9a, 0xa5, 0xb2),
             five: WindowView::missing(),
@@ -588,7 +595,7 @@ fn short_plan(value: &str) -> String {
     if chars.next().is_some() {
         format!("{prefix}…")
     } else if prefix.is_empty() {
-        "План невідомий".into()
+        String::new()
     } else {
         prefix
     }
@@ -633,6 +640,17 @@ fn apply_provider(window: &MainWindow, provider: ProviderView, value: ProviderUi
 mod tests {
     use super::*;
 
+    #[test]
+    fn theme_kind_maps_all_four_modes_and_resolves_system_preference() {
+        use crate::settings::ThemeMode;
+
+        assert_eq!(theme_kind(ThemeMode::Graphite, true), 0);
+        assert_eq!(theme_kind(ThemeMode::Navy, true), 1);
+        assert_eq!(theme_kind(ThemeMode::Light, false), 2);
+        assert_eq!(theme_kind(ThemeMode::System, false), 0);
+        assert_eq!(theme_kind(ThemeMode::System, true), 2);
+    }
+
     fn snapshot(
         status: ProviderStatus,
         last: Option<i64>,
@@ -657,7 +675,7 @@ mod tests {
             demo: false,
             loading: false,
             claude_bridge_enabled: false,
-            claude_status_line: None,
+            claude_usage: ClaudeUsageSnapshot::default(),
         }
     }
 

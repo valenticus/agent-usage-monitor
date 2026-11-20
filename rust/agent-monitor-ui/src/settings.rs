@@ -12,7 +12,9 @@ const ALERT_STATE_MIGRATION_LIMIT: u64 = 1024 * 1024;
 pub enum ThemeMode {
     #[default]
     System,
-    Dark,
+    Graphite,
+    #[serde(alias = "dark")]
+    Navy,
     Light,
 }
 
@@ -34,6 +36,7 @@ pub struct AppSettings {
     pub language: Language,
     pub codex_enabled: bool,
     pub claude_enabled: bool,
+    pub claude_cli_refresh_enabled: bool,
     pub alerts_enabled: bool,
     pub warning_threshold: u8,
     pub critical_threshold: u8,
@@ -50,6 +53,7 @@ impl Default for AppSettings {
             language: Language::System,
             codex_enabled: true,
             claude_enabled: true,
+            claude_cli_refresh_enabled: false,
             alerts_enabled: true,
             warning_threshold: 25,
             critical_threshold: 10,
@@ -242,6 +246,7 @@ mod tests {
     fn defaults_match_approved_provider_and_alert_settings() {
         let settings = AppSettings::default();
         assert!(settings.codex_enabled && settings.claude_enabled && settings.alerts_enabled);
+        assert!(!settings.claude_cli_refresh_enabled);
         assert_eq!(
             (settings.warning_threshold, settings.critical_threshold),
             (25, 10)
@@ -252,11 +257,19 @@ mod tests {
     }
 
     #[test]
+    fn legacy_dark_theme_setting_migrates_to_navy() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"schema_version":1,"theme_mode":"dark"}"#).unwrap();
+        assert_eq!(settings.theme_mode, ThemeMode::Navy);
+    }
+
+    #[test]
     fn settings_round_trip_atomically_and_older_missing_fields_use_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let settings = AppSettings {
             codex_enabled: false,
+            claude_cli_refresh_enabled: true,
             language: Language::Polish,
             ..Default::default()
         };
@@ -266,6 +279,7 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert!(!loaded.codex_enabled);
         assert!(loaded.claude_enabled);
+        assert!(!loaded.claude_cli_refresh_enabled);
         assert_eq!(loaded.warning_threshold, 25);
     }
 

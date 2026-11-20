@@ -154,7 +154,14 @@ pub async fn send_claude_status_snapshot(snapshot: &ClaudeStatusLineSnapshot) ->
         ClientOptions::new().open(CLAUDE_PIPE_NAME)
     })
     .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "pipe connection timed out"))??;
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "monitor unavailable"))?
+    .map_err(|error| {
+        if matches!(error.kind(), io::ErrorKind::NotFound) {
+            io::Error::new(io::ErrorKind::NotFound, "monitor unavailable")
+        } else {
+            error
+        }
+    })?;
     pipe.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
     pipe.write_all(&bytes).await?;
     pipe.flush().await?;

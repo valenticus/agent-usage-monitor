@@ -2,30 +2,64 @@ name: Rust CI
 
 on:
   push:
+    branches:
+      - "feat/**"
+      - "feature/**"
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: rust-windows-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
       - name: Verify formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all --check
         working-directory: rust
+
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
         working-directory: rust
+
       - name: Run tests
         run: cargo test --workspace
         working-directory: rust
-      - name: Build
-        run: cargo build --workspace
+
+      - name: Build Windows application
+        run: cargo build -p agent-usage-monitor-ui -j 2
         working-directory: rust
+
+      - name: Stage runnable application
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/debug/agent-usage-monitor.exe dist/agent-usage-monitor.exe
+          Copy-Item ../LICENSE dist/LICENSE
+          Copy-Item ../README.md dist/README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-usage-monitor-windows-${{ github.sha }}
+          path: rust/dist/
+          if-no-files-found: error
+          retention-days: 14

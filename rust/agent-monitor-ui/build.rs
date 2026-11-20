@@ -24,6 +24,8 @@ fn embed_windows_icon() -> Result<(), String> {
     let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is missing")?);
     let icon = output.join("aum-two-column.ico");
     std::fs::write(&icon, build_icon()).map_err(|error| error.to_string())?;
+    println!("cargo:rustc-env=AUM_ICON_PATH={}", icon.display());
+    println!("cargo:rerun-if-changed=build.rs");
     let resource = output.join("aum-icon.rc");
     let resource_path = icon.to_string_lossy().replace('\\', "\\\\");
     std::fs::write(&resource, format!("1 ICON \"{resource_path}\"\r\n"))

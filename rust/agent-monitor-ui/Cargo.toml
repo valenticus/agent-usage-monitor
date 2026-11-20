@@ -18,6 +18,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 windows-sys.workspace = true
+chrono.workspace = true
 raw-window-handle.workspace = true
 
 [build-dependencies]

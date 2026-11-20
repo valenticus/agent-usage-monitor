@@ -147,12 +147,14 @@ fn create_tray_window() -> Result<
     ),
     String,
 > {
+    use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Shell::{
         NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, Shell_NotifyIconW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, HWND_MESSAGE, LoadIconW, RegisterClassW, WNDCLASSW,
+        CreateWindowExW, HWND_MESSAGE, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE,
+        LR_LOADFROMFILE, LoadIconW, LoadImageW, RegisterClassW, WNDCLASSW,
     };
 
     let class_name: Vec<u16> = "AgentUsageMonitor.TrayWindow\0".encode_utf16().collect();
@@ -167,7 +169,10 @@ fn create_tray_window() -> Result<
         ..Default::default()
     };
     if unsafe { RegisterClassW(&class) } == 0 {
-        return Err("could not register the tray message window".into());
+        return Err(format!(
+            "RegisterClassW failed with Windows error {}",
+            unsafe { GetLastError() }
+        ));
     }
     let window = unsafe {
         CreateWindowExW(
@@ -186,11 +191,40 @@ fn create_tray_window() -> Result<
         )
     };
     if window.is_null() {
-        return Err("could not create the tray message window".into());
+        return Err(format!(
+            "CreateWindowExW failed with Windows error {}",
+            unsafe { GetLastError() }
+        ));
     }
-    let icon = unsafe { LoadIconW(instance, std::ptr::without_provenance::<u16>(1)) };
+    let mut icon = unsafe { LoadIconW(instance, std::ptr::without_provenance::<u16>(1)) };
     if icon.is_null() {
-        return Err("the embedded AUM icon resource is missing".into());
+        if let Some(path) = option_env!("AUM_ICON_PATH") {
+            let icon_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            icon = unsafe {
+                LoadImageW(
+                    std::ptr::null_mut(),
+                    icon_path.as_ptr(),
+                    IMAGE_ICON,
+                    0,
+                    0,
+                    LR_LOADFROMFILE | LR_DEFAULTSIZE,
+                ) as _
+            };
+        }
+    }
+    if icon.is_null() {
+        icon = unsafe {
+            LoadIconW(
+                std::ptr::null_mut(),
+                std::ptr::without_provenance::<u16>(IDI_APPLICATION as usize),
+            )
+        };
+    }
+    if icon.is_null() {
+        return Err(format!(
+            "LoadIconW and generated ICO fallback failed with Windows error {}",
+            unsafe { GetLastError() }
+        ));
     }
     let mut data = tray_data(window, icon);
     let tip = "Agent Usage Monitor".encode_utf16().collect::<Vec<_>>();
@@ -198,7 +232,10 @@ fn create_tray_window() -> Result<
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = TRAY_CALLBACK;
     if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
-        return Err("Windows did not accept the AUM notification-area icon".into());
+        return Err(format!(
+            "Shell_NotifyIconW(NIM_ADD) failed with Windows error {}",
+            unsafe { GetLastError() }
+        ));
     }
     Ok((window, icon, class_name, instance))
 }

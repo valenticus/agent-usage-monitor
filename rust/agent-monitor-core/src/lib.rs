@@ -3,6 +3,7 @@
 mod alerts;
 mod claude_pipe;
 mod claude_status_line;
+mod claude_usage;
 mod codex;
 mod models;
 mod provider;
@@ -14,6 +15,9 @@ pub use alerts::{
 };
 pub use claude_pipe::{CLAUDE_PIPE_NAME, run_claude_status_pipe, send_claude_status_snapshot};
 pub use claude_status_line::ClaudeStatusLineSnapshot;
+pub use claude_usage::{
+    ClaudeUsageSnapshot, ClaudeUsageSource, ClaudeUsageWindow, parse_claude_cli_usage,
+};
 pub use codex::{CodexAppServerClient, CodexClientConfig, CodexRateLimitProvider};
 pub use models::{
     ProviderError, ProviderSnapshot, ProviderStatus, RateLimitSnapshot, RateLimitWindow,

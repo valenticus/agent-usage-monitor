@@ -45,6 +45,7 @@ impl Locale {
     pub fn popup(self) -> PopupStrings {
         match self {
             Self::Uk => PopupStrings {
+                usage_title: "Ліміти агентів",
                 five_hour: "5 год",
                 weekly: "Тиждень",
                 waiting: "Очікування",
@@ -54,8 +55,12 @@ impl Locale {
                 unavailable: "Недоступно",
                 reset_unknown: "Скидання невідоме",
                 demo: "Демо · приклад",
+                settings: "Налаштування",
+                refresh: "Оновити Codex",
+                monitoring_disabled: "Моніторинг вимкнено",
             },
             Self::En => PopupStrings {
+                usage_title: "Agent usage",
                 five_hour: "5 hours",
                 weekly: "Weekly",
                 waiting: "Waiting",
@@ -65,8 +70,12 @@ impl Locale {
                 unavailable: "Unavailable",
                 reset_unknown: "Reset unknown",
                 demo: "Demo · sample",
+                settings: "Settings",
+                refresh: "Refresh Codex",
+                monitoring_disabled: "Monitoring disabled",
             },
             Self::Pl => PopupStrings {
+                usage_title: "Limity agentów",
                 five_hour: "5 godz.",
                 weekly: "Tydzień",
                 waiting: "Oczekiwanie",
@@ -76,6 +85,9 @@ impl Locale {
                 unavailable: "Niedostępne",
                 reset_unknown: "Nieznany reset",
                 demo: "Demo · próbka",
+                settings: "Ustawienia",
+                refresh: "Odśwież Codex",
+                monitoring_disabled: "Monitorowanie wyłączone",
             },
         }
     }
@@ -101,28 +113,30 @@ impl Locale {
                 duration: "Тривалість вікна",
                 alerts_description: "Показувати сповіщення Windows, коли ліміт майже вичерпано",
                 claude_note: "Дані Claude потребують явно налаштованої команди Claude Code status line. AUM не змінює параметри Claude.",
+                claude_refresh: "Фонове оновлення Claude",
+                claude_refresh_description: "Отримувати ліміти через Claude CLI без активного сеансу.",
                 about_tagline: "Ліміти під рукою. Дані залишаються локальними.",
                 version: "Версія",
-                author: "Автор:",
+                author: "Автор",
                 repository: "Репозиторій GitHub",
-                license: "Ліцензія в метаданих пакета: MIT; файл LICENSE не включено",
-                third_party: "Сторонні компоненти: Slint Community Edition",
+                license: "Ліцензія MIT",
+                technologies: "Технології: Rust · Slint · Tokio",
                 on: "Увімкнено",
                 off: "Вимкнено",
                 integration: "Стан інтеграції",
                 system: "Системна",
-                dark: "Темна",
+                graphite: "Графітова",
+                navy: "Темно-синя",
                 light: "Світла",
                 system_language: "Системна",
                 popup_seconds: "с",
-                about_third: "Сторонній компонент: Slint Community Edition",
             },
             Self::En => SettingsStrings {
                 title: "Settings",
-                general: "GENERAL",
-                providers: "PROVIDERS",
-                notifications: "NOTIFICATIONS",
-                about: "ABOUT",
+                general: "General",
+                providers: "Providers",
+                notifications: "Notifications",
+                about: "About",
                 appearance: "Appearance",
                 theme: "Theme",
                 language: "Language",
@@ -135,29 +149,31 @@ impl Locale {
                 weekly: "Weekly limits",
                 duration: "Popup duration",
                 alerts_description: "Show a Windows notification when a limit is running low",
-                claude_note: "Claude quota data requires an explicitly configured Claude Code status-line command. AUM does not change Claude settings.",
+                claude_note: "The status line updates during a Claude session. Optional CLI refresh works in the background. AUM does not change Claude settings.",
+                claude_refresh: "Background Claude refresh",
+                claude_refresh_description: "Retrieve quota windows with Claude CLI, even without an active session.",
                 about_tagline: "Usage at a glance. Local by design.",
                 version: "Version",
-                author: "Author:",
+                author: "Author",
                 repository: "GitHub repository",
-                license: "Package metadata: MIT; no LICENSE file is included",
-                third_party: "Third-party: Slint Community Edition",
+                license: "MIT license",
+                technologies: "Technologies: Rust · Slint · Tokio",
                 on: "On",
                 off: "Off",
                 integration: "Integration status",
                 system: "System",
-                dark: "Dark",
+                graphite: "Graphite",
+                navy: "Navy",
                 light: "Light",
                 system_language: "System",
                 popup_seconds: "sec",
-                about_third: "Third-party: Slint Community Edition",
             },
             Self::Pl => SettingsStrings {
                 title: "Ustawienia",
-                general: "OGÓLNE",
-                providers: "DOSTAWCY",
-                notifications: "POWIADOMIENIA",
-                about: "O PROGRAMIE",
+                general: "Ogólne",
+                providers: "Dostawcy",
+                notifications: "Powiadomienia",
+                about: "O programie",
                 appearance: "Wygląd",
                 theme: "Motyw",
                 language: "Język",
@@ -170,22 +186,24 @@ impl Locale {
                 weekly: "Limity tygodniowe",
                 duration: "Czas okna",
                 alerts_description: "Pokazuj powiadomienia Windows przy niskim limicie",
-                claude_note: "Dane Claude wymagają jawnie skonfigurowanej komendy Claude Code status line. AUM nie zmienia ustawień Claude.",
+                claude_note: "Status line aktualizuje dane podczas sesji Claude. Opcjonalne odświeżanie CLI działa w tle. AUM nie zmienia ustawień Claude.",
+                claude_refresh: "Odświeżanie Claude w tle",
+                claude_refresh_description: "Pobieraj limity przez Claude CLI także bez aktywnej sesji.",
                 about_tagline: "Limity pod ręką. Dane pozostają lokalne.",
                 version: "Wersja",
-                author: "Autor:",
+                author: "Autor",
                 repository: "Repozytorium GitHub",
-                license: "Metadane pakietu: MIT; plik LICENSE nie jest dołączony",
-                third_party: "Komponenty zewnętrzne: Slint Community Edition",
+                license: "Licencja MIT",
+                technologies: "Technologie: Rust · Slint · Tokio",
                 on: "Wł.",
                 off: "Wył.",
                 integration: "Status integracji",
                 system: "Systemowy",
-                dark: "Ciemny",
+                graphite: "Grafitowy",
+                navy: "Granatowy",
                 light: "Jasny",
                 system_language: "Systemowy",
                 popup_seconds: "s",
-                about_third: "Komponent zewnętrzny: Slint Community Edition",
             },
         }
     }
@@ -193,6 +211,7 @@ impl Locale {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PopupStrings {
+    pub usage_title: &'static str,
     pub five_hour: &'static str,
     pub weekly: &'static str,
     pub waiting: &'static str,
@@ -202,6 +221,9 @@ pub struct PopupStrings {
     pub unavailable: &'static str,
     pub reset_unknown: &'static str,
     pub demo: &'static str,
+    pub settings: &'static str,
+    pub refresh: &'static str,
+    pub monitoring_disabled: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,21 +246,23 @@ pub struct SettingsStrings {
     pub duration: &'static str,
     pub alerts_description: &'static str,
     pub claude_note: &'static str,
+    pub claude_refresh: &'static str,
+    pub claude_refresh_description: &'static str,
     pub about_tagline: &'static str,
     pub version: &'static str,
     pub author: &'static str,
     pub repository: &'static str,
     pub license: &'static str,
-    pub third_party: &'static str,
+    pub technologies: &'static str,
     pub on: &'static str,
     pub off: &'static str,
     pub integration: &'static str,
     pub system: &'static str,
-    pub dark: &'static str,
+    pub graphite: &'static str,
+    pub navy: &'static str,
     pub light: &'static str,
     pub system_language: &'static str,
     pub popup_seconds: &'static str,
-    pub about_third: &'static str,
 }
 
 #[cfg(test)]
@@ -264,6 +288,8 @@ mod tests {
                 strings.about,
                 strings.appearance,
                 strings.theme,
+                strings.graphite,
+                strings.navy,
                 strings.language,
                 strings.alerts,
                 strings.warning,
@@ -278,14 +304,24 @@ mod tests {
                 strings.author,
                 strings.repository,
                 strings.license,
-                strings.third_party,
                 strings.on,
                 strings.off,
                 strings.integration,
-                strings.about_third,
+                strings.claude_refresh,
+                strings.claude_refresh_description,
+                strings.technologies,
             ] {
                 assert!(!value.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn all_popup_locales_have_a_title_and_refresh_label() {
+        for locale in [Locale::Uk, Locale::En, Locale::Pl] {
+            let strings = locale.popup();
+            assert!(!strings.usage_title.is_empty());
+            assert!(!strings.refresh.is_empty());
         }
     }
 }
