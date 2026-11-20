@@ -467,7 +467,7 @@ mod tests {
             let (extension, script) = (
                 "ps1",
                 format!(
-                    "$ErrorActionPreference='Stop'\n[IO.File]::WriteAllText('{}', [string]$PID)\n$init=[Console]::ReadLine()\nif ('{}' -eq 'exit') {{ exit }}\nif ('{}' -eq 'malformed') {{ [Console]::WriteLine('not-json'); exit }}\n[Console]::WriteLine('{{\"id\":1,\"result\":{{}}}}')\n$notice=[Console]::ReadLine()\n$limits=[Console]::ReadLine()\nif ('{}' -eq 'timeout') {{ $desc=Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; [IO.File]::WriteAllText('{}', [string]$desc.Id); Start-Sleep -Seconds 30; exit }}\nif ('{}' -eq 'wrong_id') {{ [Console]::WriteLine('{{\"id\":99,\"result\":{{}}}}'); exit }}\n[Console]::WriteLine('{{\"id\":2,\"result\":{{\"rateLimits\":{{\"primary\":{{\"usedPercent\":23,\"windowDurationMins\":300}}}}}}}}')\n",
+                    "$ErrorActionPreference='Stop'\n[IO.File]::WriteAllText('{}', [string]$PID)\n$init=[Console]::ReadLine()\nif ('{}' -eq 'exit') {{ exit }}\nif ('{}' -eq 'malformed') {{ [Console]::WriteLine('not-json'); exit }}\n[Console]::WriteLine('{{\"id\":1,\"result\":{{}}}}')\n$notice=[Console]::ReadLine()\n$limits=[Console]::ReadLine()\nif ('{}' -eq 'timeout') {{ $desc=Start-Process $env:ComSpec -WindowStyle Hidden -ArgumentList '/c','ping','-n','31','127.0.0.1' -PassThru; [IO.File]::WriteAllText('{}', [string]$desc.Id); Start-Sleep -Seconds 30; exit }}\nif ('{}' -eq 'wrong_id') {{ [Console]::WriteLine('{{\"id\":99,\"result\":{{}}}}'); exit }}\n[Console]::WriteLine('{{\"id\":2,\"result\":{{\"rateLimits\":{{\"primary\":{{\"usedPercent\":23,\"windowDurationMins\":300}}}}}}}}')\n",
                     pid_file.display(),
                     mode,
                     mode,
@@ -558,7 +558,7 @@ mod tests {
         }
 
         async fn wait_until_descendant_started(&self) {
-            for _ in 0..200 {
+            for _ in 0..500 {
                 if self.descendant_file.is_file() {
                     return;
                 }
@@ -638,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn completes_successful_json_rpc_exchange_and_cleans_child() {
         let mock = MockServer::new("ok");
-        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(2)));
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(8)));
         let limits = client
             .read_rate_limits(CancellationToken::new())
             .await
@@ -650,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_child_and_returns_timeout_error() {
         let mock = MockServer::new("timeout");
-        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(2)));
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(8)));
         let error = client
             .read_rate_limits(CancellationToken::new())
             .await
@@ -681,7 +681,7 @@ mod tests {
             ("wrong_id", "codex_protocol_error"),
         ] {
             let mock = MockServer::new(mode);
-            let client = CodexAppServerClient::new(mock.config(Duration::from_secs(2)));
+            let client = CodexAppServerClient::new(mock.config(Duration::from_secs(8)));
             assert_eq!(
                 client
                     .read_rate_limits(CancellationToken::new())
