@@ -27,13 +27,13 @@
 
 ## Git state
 - Branch: `feat/ui-redesign-themes`
-- HEAD before handoff commit: `ef5b3a55190221247bc3ebe15d688a5b989ce069`
-- Worktree currently contains implementation changes for this task plus the prior related Claude and tray work; no commits/pushes performed yet.
+- HEAD before handoff commit: `4ecae916c0c781ffede0ddfdc52d3af9459e74d3`
+- Initial implementation commit `4ecae916c0c781ffede0ddfdc52d3af9459e74d3` is pushed. Artifact-path correction commit is committed locally and pending push. `docs/state/main.md` remains untracked and untouched.
 
 ## Decisions and limitations
 - Nook's asset notice identifies Lucide/Simple Icons and Nook-owned assets but does not grant rights to redistribute OpenAI or Anthropic trademarks. AUM supports user-provided local artwork and does not substitute fabricated marks.
 - Pixel-level review at 100%, 125%, and 150% scaling was not reliable in the available desktop capture; those scales still need manual visual QA.
-- The local build is successful, but remote CI and the downloadable Windows artifact are not yet verified.
+- First GitHub Actions run `44807116604` passed format, Clippy, workspace tests, and Windows build, then failed during artifact staging: cache configured target output at repository-root `target/`, but workflow copied from `rust/target/`. Workflow source path is corrected to `../target/debug/agent-usage-monitor.exe`; a follow-up CI run is pending.
 
 ## Next actions
 1. Review and stage only the related implementation paths explicitly.
