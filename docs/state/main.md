@@ -33,6 +33,7 @@
 - Single-instance mutex `Local\AgentUsageMonitor.Singleton`: a dev build cannot start while the installed AUM runs. For visual QA, use the debug flags `--demo`, `--preview-theme=<graphite|bluish|light>`, `--preview-flyout` and `--preview-settings=<tab>` (in memory only) with an isolated `APPDATA`.
 
 ## In progress
+- Codex optical size correction (committed in `2b38b90`, visual check of the new debug build pending): after a visual check the Blossom read slightly larger and heavier than the Spark. `provider_icons.rs` now pads only the Codex master so the trimmed artwork fills 90 % of the same 14/16 px box (`optical_scale`: Codex 0.90, Claude 1.0), centred, for all themes and DPI. Claude rendering is unchanged. UI `provider_icons` tests 13/13 and UI-crate Clippy pass; a full workspace run was skipped while the Codex benchmark is active.
 - A binary size benchmark is being run by Codex in its isolated worktree; results are pending. Do not interfere with its processes or files.
 
 ## Next actions
