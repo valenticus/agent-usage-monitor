@@ -15,7 +15,7 @@
 
 </div>
 
-> **v0.1.0 · Release candidate.** Windows installer and portable packages have been built and tested locally. Downloadable binaries will appear on [GitHub Releases](https://github.com/valenticus/agent-usage-monitor/releases) once the release is published. Showcase images may reflect earlier UI iterations.
+> **Latest release: v0.1.1.** Download the Windows installer or portable ZIP from [GitHub Releases](https://github.com/valenticus/agent-usage-monitor/releases). Showcase images may reflect earlier UI iterations.
 
 Agent Usage Monitor (AUM) is a small Windows desktop app built with **Rust** and **Slint**. It presents supported AI coding-assistant usage windows, remaining percentages, reset countdowns, and local alerts in a compact interface.
 
@@ -37,6 +37,7 @@ Agent Usage Monitor (AUM) is a small Windows desktop app built with **Rust** and
 - The Claude status-line bridge is optional; enabling Claude monitoring in the UI is not the same as installing or configuring the bridge.
 - Notifications follow Windows notification settings and focus policies. The installed version integrates with Windows more completely than a portable launch.
 - This is an independent community project, not an official product of OpenAI or Anthropic.
+- Claude and Codex are trademarks of their respective owners. The provider marks shown in the app identify each provider only; they are not covered by the MIT license (see [brand asset notes](docs/design/brand-assets.md)).
 
 ## Showcase
 
@@ -76,17 +77,17 @@ The following images are included from the supplied showcase archive. Some show 
 
 ## Download and install
 
-See **[GitHub Releases](https://github.com/valenticus/agent-usage-monitor/releases)** for published v0.1.0 downloads. The release is not public yet.
+Downloads are on **[GitHub Releases](https://github.com/valenticus/agent-usage-monitor/releases)**. Each release lists SHA-256 checksums for its files.
 
 ### Windows installer (recommended)
 
-When published, download `AgentUsageMonitor-0.1.0-win-x64-setup.exe`, run the setup wizard, and launch **Agent Usage Monitor**. Installation is per-user; administrator access is not normally required.
+Download `AgentUsageMonitor-0.1.1-win-x64-setup.exe`, run the setup wizard, and launch **Agent Usage Monitor**. Installation is per-user; administrator access is not normally required. Installing over an earlier version upgrades it in place and keeps your settings.
 
 The installer can create Start Menu and optional desktop shortcuts. AUM can optionally start when you sign in to Windows. Uninstalling the application can preserve your settings for a future reinstall.
 
 ### Portable ZIP
 
-When published, download `AgentUsageMonitor-0.1.0-win-x64-portable.zip`, extract the archive, and run `agent-usage-monitor.exe`.
+Download `AgentUsageMonitor-0.1.1-win-x64-portable.zip`, extract the archive, and run `agent-usage-monitor.exe`.
 
 The archive contains the main executable, the optional `agent-usage-monitor-claude-bridge.exe`, LICENSE, and documentation. The bridge executable does not need to be launched manually just to open AUM.
 
@@ -121,9 +122,7 @@ cargo run -p agent-usage-monitor-ui --bin agent-usage-monitor -- --demo
 
 - `rust/agent-monitor-core/` — provider models, Codex access, Claude integration, and alerts.
 - `rust/agent-monitor-ui/` — Slint interface, settings, themes, localization, notifications, and Windows tray integration.
-- `docs/` — provider integration notes and project research.
-
-Some internal documentation in `main` still describes the earlier development milestone; the v0.1.0 code changes are being integrated from the release branch.
+- `docs/` — provider integration notes, design specification, and project research.
 
 ## License
 
