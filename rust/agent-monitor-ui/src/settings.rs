@@ -11,21 +11,22 @@ const ALERT_STATE_MIGRATION_LIMIT: u64 = 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     #[default]
-    System,
+    #[serde(alias = "system")]
     Graphite,
-    #[serde(alias = "dark")]
-    Navy,
+    #[serde(alias = "dark", alias = "navy")]
+    BluishDark,
     Light,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
-    System,
-    Ukrainian,
     #[default]
+    #[serde(alias = "system")]
+    Ukrainian,
     English,
     Polish,
+    Russian,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +38,7 @@ pub struct AppSettings {
     pub codex_enabled: bool,
     pub claude_enabled: bool,
     pub claude_cli_refresh_enabled: bool,
+    pub launch_at_startup: bool,
     pub alerts_enabled: bool,
     pub warning_threshold: u8,
     pub critical_threshold: u8,
@@ -49,11 +51,12 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema_version: 1,
-            theme_mode: ThemeMode::System,
-            language: Language::System,
+            theme_mode: ThemeMode::Graphite,
+            language: Language::Ukrainian,
             codex_enabled: true,
             claude_enabled: true,
             claude_cli_refresh_enabled: false,
+            launch_at_startup: false,
             alerts_enabled: true,
             warning_threshold: 25,
             critical_threshold: 10,
@@ -247,20 +250,25 @@ mod tests {
         let settings = AppSettings::default();
         assert!(settings.codex_enabled && settings.claude_enabled && settings.alerts_enabled);
         assert!(!settings.claude_cli_refresh_enabled);
+        assert!(!settings.launch_at_startup);
         assert_eq!(
             (settings.warning_threshold, settings.critical_threshold),
             (25, 10)
         );
         assert!(settings.exhausted_alerts_enabled && settings.include_weekly);
         assert_eq!(settings.popup_duration_seconds, 8);
-        assert_eq!(settings.theme_mode, ThemeMode::System);
+        assert_eq!(settings.theme_mode, ThemeMode::Graphite);
+        assert_eq!(settings.language, Language::Ukrainian);
     }
 
     #[test]
-    fn legacy_dark_theme_setting_migrates_to_navy() {
+    fn legacy_theme_settings_map_to_the_three_supported_themes() {
         let settings: AppSettings =
             serde_json::from_str(r#"{"schema_version":1,"theme_mode":"dark"}"#).unwrap();
-        assert_eq!(settings.theme_mode, ThemeMode::Navy);
+        assert_eq!(settings.theme_mode, ThemeMode::BluishDark);
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"schema_version":1,"theme_mode":"system"}"#).unwrap();
+        assert_eq!(settings.theme_mode, ThemeMode::Graphite);
     }
 
     #[test]
@@ -270,6 +278,7 @@ mod tests {
         let settings = AppSettings {
             codex_enabled: false,
             claude_cli_refresh_enabled: true,
+            launch_at_startup: true,
             language: Language::Polish,
             ..Default::default()
         };
@@ -280,6 +289,7 @@ mod tests {
         assert!(!loaded.codex_enabled);
         assert!(loaded.claude_enabled);
         assert!(!loaded.claude_cli_refresh_enabled);
+        assert!(!loaded.launch_at_startup);
         assert_eq!(loaded.warning_threshold, 25);
     }
 

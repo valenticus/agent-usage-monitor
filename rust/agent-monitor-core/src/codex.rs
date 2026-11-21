@@ -12,6 +12,10 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::{ProviderError, RateLimitSnapshot, RateLimitWindow};
+
+/// `CREATE_NO_WINDOW` process creation flag (winbase.h).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use crate::provider::RateLimitProvider;
 
 static APP_SERVER_GATE: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
@@ -150,6 +154,10 @@ impl CodexAppServerClient {
         };
         #[cfg(not(windows))]
         let mut command = Command::new(&executable);
+        // The release UI is a GUI-subsystem process without a console: keep
+        // the console helper (cmd/powershell/codex) from opening a window.
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command
@@ -304,6 +312,7 @@ async fn terminate_child(child: &mut Child) -> Result<(), ClientError> {
             if let Some(pid) = child.id() {
                 let pid = pid.to_string();
                 let result = Command::new("taskkill.exe")
+                    .creation_flags(CREATE_NO_WINDOW)
                     .args(["/PID", &pid, "/T", "/F"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())

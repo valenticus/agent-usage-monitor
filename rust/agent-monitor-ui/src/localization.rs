@@ -5,40 +5,16 @@ pub enum Locale {
     Uk,
     En,
     Pl,
-}
-
-pub fn system_language() -> Option<String> {
-    #[cfg(windows)]
-    {
-        let mut buffer = [0u16; 85];
-        let length = unsafe {
-            windows_sys::Win32::Globalization::GetUserDefaultLocaleName(
-                buffer.as_mut_ptr(),
-                buffer.len() as i32,
-            )
-        };
-        if length > 1 {
-            return Some(String::from_utf16_lossy(&buffer[..(length - 1) as usize]));
-        }
-    }
-    std::env::var("LANG").ok()
+    Ru,
 }
 
 impl Locale {
-    pub fn resolve(language: Language, system_language: Option<&str>) -> Self {
+    pub fn resolve(language: Language) -> Self {
         match language {
             Language::Ukrainian => Self::Uk,
             Language::Polish => Self::Pl,
             Language::English => Self::En,
-            Language::System => match system_language
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                value if value.starts_with("uk") => Self::Uk,
-                value if value.starts_with("pl") => Self::Pl,
-                _ => Self::En,
-            },
+            Language::Russian => Self::Ru,
         }
     }
 
@@ -50,14 +26,17 @@ impl Locale {
                 weekly: "Тиждень",
                 waiting: "Очікування",
                 loading: "Завантаження",
-                fresh: "Свіжі дані",
+                fresh: "щойно",
                 stale: "Дані застаріли",
                 unavailable: "Недоступно",
-                reset_unknown: "Скидання невідоме",
+                reset_unknown: "—",
                 demo: "Демо · приклад",
                 settings: "Налаштування",
-                refresh: "Оновити Codex",
+                refresh: "Оновити",
                 monitoring_disabled: "Моніторинг вимкнено",
+                remaining: "ЗАЛИШОК",
+                reset: "СКИДАННЯ",
+                close: "Закрити",
             },
             Self::En => PopupStrings {
                 usage_title: "Agent usage",
@@ -65,14 +44,17 @@ impl Locale {
                 weekly: "Weekly",
                 waiting: "Waiting",
                 loading: "Loading",
-                fresh: "Fresh data",
+                fresh: "just now",
                 stale: "Stale data",
                 unavailable: "Unavailable",
-                reset_unknown: "Reset unknown",
+                reset_unknown: "—",
                 demo: "Demo · sample",
                 settings: "Settings",
-                refresh: "Refresh Codex",
+                refresh: "Refresh",
                 monitoring_disabled: "Monitoring disabled",
+                remaining: "REMAINING",
+                reset: "RESET",
+                close: "Close",
             },
             Self::Pl => PopupStrings {
                 usage_title: "Limity agentów",
@@ -80,14 +62,35 @@ impl Locale {
                 weekly: "Tydzień",
                 waiting: "Oczekiwanie",
                 loading: "Ładowanie",
-                fresh: "Aktualne dane",
+                fresh: "przed chwilą",
                 stale: "Nieaktualne",
                 unavailable: "Niedostępne",
-                reset_unknown: "Nieznany reset",
+                reset_unknown: "—",
                 demo: "Demo · próbka",
                 settings: "Ustawienia",
-                refresh: "Odśwież Codex",
+                refresh: "Odśwież",
                 monitoring_disabled: "Monitorowanie wyłączone",
+                remaining: "POZOSTAŁO",
+                reset: "RESET",
+                close: "Zamknij",
+            },
+            Self::Ru => PopupStrings {
+                usage_title: "Лимиты агентов",
+                five_hour: "5 ч",
+                weekly: "Неделя",
+                waiting: "Ожидание",
+                loading: "Загрузка",
+                fresh: "только что",
+                stale: "Данные устарели",
+                unavailable: "Недоступно",
+                reset_unknown: "—",
+                demo: "Демо · пример",
+                settings: "Настройки",
+                refresh: "Обновить",
+                monitoring_disabled: "Мониторинг выключен",
+                remaining: "ОСТАЛОСЬ",
+                reset: "СБРОС",
+                close: "Закрыть",
             },
         }
     }
@@ -112,10 +115,13 @@ impl Locale {
                 weekly: "Тижневі ліміти",
                 duration: "Тривалість вікна",
                 alerts_description: "Показувати сповіщення Windows, коли ліміт майже вичерпано",
-                claude_note: "Дані Claude потребують явно налаштованої команди Claude Code status line. AUM не змінює параметри Claude.",
-                claude_refresh: "Фонове оновлення Claude",
+                claude_note: "Дані Claude потребують налаштованої команди status line у Claude Code. AUM не змінює параметри Claude.",
+                claude_refresh: "Фонове оновлення",
                 claude_refresh_description: "Отримувати ліміти через Claude CLI без активного сеансу.",
-                about_tagline: "Ліміти під рукою. Дані залишаються локальними.",
+                startup: "Запускати під час входу у Windows",
+                startup_description: "Відкривати AgentUsageMonitor у системному треї після входу.",
+                startup_error: "Не вдалося перевірити стан запуску Windows.",
+                about_tagline: "Ліміти Codex і Claude завжди перед очима.",
                 version: "Версія",
                 author: "Автор",
                 repository: "Репозиторій GitHub",
@@ -126,10 +132,31 @@ impl Locale {
                 integration: "Стан інтеграції",
                 system: "Системна",
                 graphite: "Графітова",
-                navy: "Темно-синя",
+                navy: "Синювата темна",
                 light: "Світла",
                 system_language: "Системна",
                 popup_seconds: "с",
+                thresholds: "Пороги",
+                display: "Показ",
+                connections: "Підключення",
+                warning_description: "Залишок, при якому з'явиться перше сповіщення",
+                critical_description: "Залишок для термінового сповіщення",
+                exhausted_description: "Окреме сповіщення, коли залишок досягає нуля",
+                weekly_description: "Стежити й за тижневим вікном, не лише за 5-годинним",
+                duration_description: "Скільки секунд видно сповіщення",
+                legend_normal: "Норма понад",
+                legend_warning: "Попередження",
+                legend_critical: "Критично до",
+                show_test: "Показати тест",
+                test_title: "Тестове сповіщення",
+                test_message: "Так виглядатиме сповіщення про ліміт.",
+                feature_tray: "Працює в треї й оновлюється автоматично",
+                feature_local: "Дані залишаються на цьому комп'ютері",
+                feature_agents: "Не змінює налаштування агентів",
+                codex_source: "Ліміти через Codex app-server",
+                claude_source: "Ліміти через status line і Claude CLI",
+                report_issue: "Повідомити про проблему",
+                legal: "Claude і Codex є торговельними марками відповідних власників. AgentUsageMonitor (AUM) — незалежний проєкт, не пов'язаний з OpenAI або Anthropic і не схвалений ними.",
             },
             Self::En => SettingsStrings {
                 title: "Settings",
@@ -150,9 +177,12 @@ impl Locale {
                 duration: "Popup duration",
                 alerts_description: "Show a Windows notification when a limit is running low",
                 claude_note: "The status line updates during a Claude session. Optional CLI refresh works in the background. AUM does not change Claude settings.",
-                claude_refresh: "Background Claude refresh",
-                claude_refresh_description: "Retrieve quota windows with Claude CLI, even without an active session.",
-                about_tagline: "Usage at a glance. Local by design.",
+                claude_refresh: "Background refresh",
+                claude_refresh_description: "Get limits through Claude CLI without an active session.",
+                startup: "Launch at Windows sign-in",
+                startup_description: "Start AgentUsageMonitor in the system tray after you sign in.",
+                startup_error: "Could not verify the Windows startup state.",
+                about_tagline: "Codex and Claude limits always in sight.",
                 version: "Version",
                 author: "Author",
                 repository: "GitHub repository",
@@ -163,10 +193,31 @@ impl Locale {
                 integration: "Integration status",
                 system: "System",
                 graphite: "Graphite",
-                navy: "Navy",
+                navy: "Bluish Dark",
                 light: "Light",
                 system_language: "System",
                 popup_seconds: "sec",
+                thresholds: "Thresholds",
+                display: "Display",
+                connections: "Connections",
+                warning_description: "Remaining share that triggers the first notification",
+                critical_description: "Remaining share for an urgent notification",
+                exhausted_description: "A separate notification when nothing is left",
+                weekly_description: "Watch the weekly window, not only the 5-hour one",
+                duration_description: "How many seconds a notification stays visible",
+                legend_normal: "Normal above",
+                legend_warning: "Warning",
+                legend_critical: "Critical up to",
+                show_test: "Show test",
+                test_title: "Test notification",
+                test_message: "This is how a limit notification will look.",
+                feature_tray: "Runs in the tray and refreshes automatically",
+                feature_local: "Data stays on this computer",
+                feature_agents: "Does not change agent settings",
+                codex_source: "Limits via Codex app-server",
+                claude_source: "Limits via status line and Claude CLI",
+                report_issue: "Report an issue",
+                legal: "Claude and Codex are trademarks of their respective owners. AgentUsageMonitor (AUM) is an independent project, not affiliated with or endorsed by OpenAI or Anthropic.",
             },
             Self::Pl => SettingsStrings {
                 title: "Ustawienia",
@@ -187,9 +238,12 @@ impl Locale {
                 duration: "Czas okna",
                 alerts_description: "Pokazuj powiadomienia Windows przy niskim limicie",
                 claude_note: "Status line aktualizuje dane podczas sesji Claude. Opcjonalne odświeżanie CLI działa w tle. AUM nie zmienia ustawień Claude.",
-                claude_refresh: "Odświeżanie Claude w tle",
+                claude_refresh: "Odświeżanie w tle",
                 claude_refresh_description: "Pobieraj limity przez Claude CLI także bez aktywnej sesji.",
-                about_tagline: "Limity pod ręką. Dane pozostają lokalne.",
+                startup: "Uruchamiaj przy logowaniu do Windows",
+                startup_description: "Uruchamiaj AgentUsageMonitor w zasobniku po zalogowaniu.",
+                startup_error: "Nie można sprawdzić stanu uruchamiania systemu Windows.",
+                about_tagline: "Limity Codex i Claude zawsze na widoku.",
                 version: "Wersja",
                 author: "Autor",
                 repository: "Repozytorium GitHub",
@@ -204,6 +258,88 @@ impl Locale {
                 light: "Jasny",
                 system_language: "Systemowy",
                 popup_seconds: "s",
+                thresholds: "Progi",
+                display: "Wyświetlanie",
+                connections: "Połączenia",
+                warning_description: "Pozostała część, przy której pojawi się pierwsze powiadomienie",
+                critical_description: "Pozostała część dla pilnego powiadomienia",
+                exhausted_description: "Osobne powiadomienie, gdy limit się wyczerpie",
+                weekly_description: "Śledź też okno tygodniowe, nie tylko 5-godzinne",
+                duration_description: "Ile sekund widać powiadomienie",
+                legend_normal: "Norma powyżej",
+                legend_warning: "Ostrzeżenie",
+                legend_critical: "Krytycznie do",
+                show_test: "Pokaż test",
+                test_title: "Powiadomienie testowe",
+                test_message: "Tak będzie wyglądać powiadomienie o limicie.",
+                feature_tray: "Działa w zasobniku i odświeża się automatycznie",
+                feature_local: "Dane pozostają na tym komputerze",
+                feature_agents: "Nie zmienia ustawień agentów",
+                codex_source: "Limity przez Codex app-server",
+                claude_source: "Limity przez status line i Claude CLI",
+                report_issue: "Zgłoś problem",
+                legal: "Claude i Codex są znakami towarowymi ich właścicieli. AgentUsageMonitor (AUM) to niezależny projekt, niepowiązany z OpenAI ani Anthropic i nieaprobowany przez nie.",
+            },
+            Self::Ru => SettingsStrings {
+                title: "Настройки",
+                general: "Общие",
+                providers: "Провайдеры",
+                notifications: "Уведомления",
+                about: "О программе",
+                appearance: "Внешний вид",
+                theme: "Тема",
+                language: "Язык",
+                codex: "Codex",
+                claude: "Claude",
+                alerts: "Уведомления",
+                warning: "Порог предупреждения",
+                critical: "Критический порог",
+                exhausted: "Уведомлять об исчерпании",
+                weekly: "Недельные лимиты",
+                duration: "Длительность окна",
+                alerts_description: "Показывать уведомления Windows при низком лимите",
+                claude_note: "Status line обновляет данные во время сеанса Claude. Необязательное обновление CLI работает в фоне. AUM не меняет настройки Claude.",
+                claude_refresh: "Фоновое обновление",
+                claude_refresh_description: "Получать лимиты через Claude CLI без активного сеанса.",
+                startup: "Запускать при входе в Windows",
+                startup_description: "Запускать AgentUsageMonitor в системном трее после входа.",
+                startup_error: "Не удалось проверить состояние запуска Windows.",
+                about_tagline: "Лимиты Codex и Claude всегда перед глазами.",
+                version: "Версия",
+                author: "Автор",
+                repository: "Репозиторий GitHub",
+                license: "Лицензия MIT",
+                technologies: "Технологии: Rust · Slint · Tokio",
+                on: "Вкл.",
+                off: "Выкл.",
+                integration: "Состояние интеграции",
+                system: "Системная",
+                graphite: "Графитовая",
+                navy: "Синеватая темная",
+                light: "Светлая",
+                system_language: "Системный",
+                popup_seconds: "с",
+                thresholds: "Пороги",
+                display: "Показ",
+                connections: "Подключения",
+                warning_description: "Остаток, при котором появится первое уведомление",
+                critical_description: "Остаток для срочного уведомления",
+                exhausted_description: "Отдельное уведомление, когда остаток достигает нуля",
+                weekly_description: "Следить и за недельным окном, не только за 5-часовым",
+                duration_description: "Сколько секунд видно уведомление",
+                legend_normal: "Норма выше",
+                legend_warning: "Предупреждение",
+                legend_critical: "Критично до",
+                show_test: "Показать тест",
+                test_title: "Тестовое уведомление",
+                test_message: "Так будет выглядеть уведомление о лимите.",
+                feature_tray: "Работает в трее и обновляется автоматически",
+                feature_local: "Данные остаются на этом компьютере",
+                feature_agents: "Не меняет настройки агентов",
+                codex_source: "Лимиты через Codex app-server",
+                claude_source: "Лимиты через status line и Claude CLI",
+                report_issue: "Сообщить о проблеме",
+                legal: "Claude и Codex являются товарными знаками соответствующих владельцев. AgentUsageMonitor (AUM) — независимый проект, не связанный с OpenAI или Anthropic и не одобренный ими.",
             },
         }
     }
@@ -224,6 +360,9 @@ pub struct PopupStrings {
     pub settings: &'static str,
     pub refresh: &'static str,
     pub monitoring_disabled: &'static str,
+    pub remaining: &'static str,
+    pub reset: &'static str,
+    pub close: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +387,9 @@ pub struct SettingsStrings {
     pub claude_note: &'static str,
     pub claude_refresh: &'static str,
     pub claude_refresh_description: &'static str,
+    pub startup: &'static str,
+    pub startup_description: &'static str,
+    pub startup_error: &'static str,
     pub about_tagline: &'static str,
     pub version: &'static str,
     pub author: &'static str,
@@ -263,6 +405,27 @@ pub struct SettingsStrings {
     pub light: &'static str,
     pub system_language: &'static str,
     pub popup_seconds: &'static str,
+    pub thresholds: &'static str,
+    pub display: &'static str,
+    pub connections: &'static str,
+    pub warning_description: &'static str,
+    pub critical_description: &'static str,
+    pub exhausted_description: &'static str,
+    pub weekly_description: &'static str,
+    pub duration_description: &'static str,
+    pub legend_normal: &'static str,
+    pub legend_warning: &'static str,
+    pub legend_critical: &'static str,
+    pub show_test: &'static str,
+    pub test_title: &'static str,
+    pub test_message: &'static str,
+    pub feature_tray: &'static str,
+    pub feature_local: &'static str,
+    pub feature_agents: &'static str,
+    pub codex_source: &'static str,
+    pub claude_source: &'static str,
+    pub report_issue: &'static str,
+    pub legal: &'static str,
 }
 
 #[cfg(test)]
@@ -270,16 +433,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_language_resolves_supported_locales_and_falls_back_to_english() {
-        assert_eq!(Locale::resolve(Language::System, Some("uk-UA")), Locale::Uk);
-        assert_eq!(Locale::resolve(Language::System, Some("pl-PL")), Locale::Pl);
-        assert_eq!(Locale::resolve(Language::System, Some("de-DE")), Locale::En);
-        assert_eq!(Locale::resolve(Language::System, None), Locale::En);
+    fn selected_language_resolves_to_one_of_the_supported_locales() {
+        assert_eq!(Locale::resolve(Language::Ukrainian), Locale::Uk);
+        assert_eq!(Locale::resolve(Language::Polish), Locale::Pl);
+        assert_eq!(Locale::resolve(Language::English), Locale::En);
+        assert_eq!(Locale::resolve(Language::Russian), Locale::Ru);
     }
 
     #[test]
     fn every_supported_locale_has_complete_settings_copy() {
-        for locale in [Locale::Uk, Locale::En, Locale::Pl] {
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
             let strings = locale.settings();
             for value in [
                 strings.general,
@@ -309,6 +472,9 @@ mod tests {
                 strings.integration,
                 strings.claude_refresh,
                 strings.claude_refresh_description,
+                strings.startup,
+                strings.startup_description,
+                strings.startup_error,
                 strings.technologies,
             ] {
                 assert!(!value.is_empty());
@@ -318,10 +484,12 @@ mod tests {
 
     #[test]
     fn all_popup_locales_have_a_title_and_refresh_label() {
-        for locale in [Locale::Uk, Locale::En, Locale::Pl] {
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
             let strings = locale.popup();
             assert!(!strings.usage_title.is_empty());
             assert!(!strings.refresh.is_empty());
+            assert!(!strings.remaining.is_empty());
+            assert!(!strings.reset.is_empty());
         }
     }
 }

@@ -9,3 +9,7 @@
 .env
 .env.*
 !.env.example
+
+# Third-party provider logos embedded only in local release builds; never committed.
+rust/agent-monitor-ui/assets/provider-icons/*
+!rust/agent-monitor-ui/assets/provider-icons/README.md

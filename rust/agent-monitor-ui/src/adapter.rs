@@ -28,6 +28,8 @@ struct ProviderUi {
     plan: String,
     status: String,
     status_color: slint::Color,
+    /// Theme-aware status level for the UI: 0 normal, 1 warning, 2 critical, 3 neutral.
+    status_level: i32,
     five: WindowView,
     weekly: WindowView,
 }
@@ -42,6 +44,66 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
+    /// Returns one independently constrained quota value for each provider.
+    /// A missing or disabled provider affects only its own tray bar.
+    pub fn tray_values(
+        &self,
+        codex_enabled: bool,
+        claude_enabled: bool,
+        now: i64,
+    ) -> [crate::tray::QuotaValue; 2] {
+        [
+            self.tray_value("codex", codex_enabled, now),
+            self.tray_value("claude", claude_enabled, now),
+        ]
+    }
+
+    fn tray_value(&self, id: &str, enabled: bool, now: i64) -> crate::tray::QuotaValue {
+        use crate::tray::{DataFreshness, QuotaValue};
+
+        let unavailable = QuotaValue {
+            remaining_percent: None,
+            freshness: DataFreshness::Unavailable,
+        };
+        if !enabled {
+            return unavailable;
+        }
+        let Some(provider) = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == id)
+        else {
+            return unavailable;
+        };
+        let remaining = provider
+            .limits
+            .first()
+            .into_iter()
+            .flat_map(|limit| [limit.primary.as_ref(), limit.secondary.as_ref()])
+            .flatten()
+            .filter(|window| {
+                window.used_percent.is_finite() && (0.0..=100.0).contains(&window.used_percent)
+            })
+            .map(RateLimitWindow::remaining_percent)
+            .reduce(f64::min);
+        let Some(remaining) = remaining else {
+            return unavailable;
+        };
+        let freshness = match (&provider.status, provider.last_success_unix_seconds) {
+            (ProviderStatus::Available, Some(updated))
+                if updated <= now && now.saturating_sub(updated) <= STALE_AFTER_SECONDS =>
+            {
+                DataFreshness::Fresh
+            }
+            (_, Some(_)) => DataFreshness::Stale,
+            _ => return unavailable,
+        };
+        QuotaValue {
+            remaining_percent: Some(remaining.round().clamp(0.0, 100.0) as u8),
+            freshness,
+        }
+    }
+
     pub fn settings_status(
         &self,
         provider_id: &str,
@@ -63,6 +125,7 @@ impl UiSnapshot {
                     "Wyłączono".into(),
                     "Monitorowanie dostawcy jest wyłączone".into(),
                 ),
+                Locale::Ru => ("Выключено".into(), "Мониторинг провайдера выключен".into()),
             };
         }
         if self.demo {
@@ -79,6 +142,7 @@ impl UiSnapshot {
                     "Demo".into(),
                     "Wartości przykładowe; brak połączenia na żywo".into(),
                 ),
+                Locale::Ru => ("Демо".into(), "Примерные значения; нет подключения".into()),
             };
         }
         if provider_id == "codex" && self.loading {
@@ -94,6 +158,10 @@ impl UiSnapshot {
                 Locale::Pl => (
                     "Ładowanie".into(),
                     "Sprawdzanie lokalnego Codex app-server".into(),
+                ),
+                Locale::Ru => (
+                    "Загрузка".into(),
+                    "Проверка локального Codex app-server".into(),
                 ),
             };
         }
@@ -120,12 +188,17 @@ impl UiSnapshot {
                             "Ostatnie dane sprzed {} min; oczekiwanie na aktualizację",
                             age / 60
                         ),
+                        Locale::Ru => format!(
+                            "Последние данные {} мин назад; ожидается обновление",
+                            age / 60
+                        ),
                     };
                     return (
                         match locale {
                             Locale::Uk => "Застаріло",
                             Locale::En => "Stale",
                             Locale::Pl => "Nieaktualne",
+                            Locale::Ru => "Устарели",
                         }
                         .into(),
                         description,
@@ -135,12 +208,14 @@ impl UiSnapshot {
                     Locale::Uk => format!("Оновлено {} хв тому", age / 60),
                     Locale::En => format!("Updated {} min ago", age / 60),
                     Locale::Pl => format!("Zaktualizowano {} min temu", age / 60),
+                    Locale::Ru => format!("Обновлено {} мин назад", age / 60),
                 };
                 (
                     match locale {
                         Locale::Uk => "Підключено",
                         Locale::En => "Connected",
                         Locale::Pl => "Połączono",
+                        Locale::Ru => "Подключено",
                     }
                     .into(),
                     age_label,
@@ -156,10 +231,47 @@ impl UiSnapshot {
                     "Błąd".into(),
                     "Nie udało się odczytać danych dostawcy".into(),
                 ),
+                Locale::Ru => (
+                    "Ошибка".into(),
+                    "Не удалось прочитать данные провайдера".into(),
+                ),
             },
             ProviderStatus::Unavailable => {
                 unavailable_status(provider_id, self.claude_bridge_enabled, locale)
             }
+        }
+    }
+
+    /// Chip level matching `settings_status`: 0 connected, 1 stale/demo,
+    /// 2 error, 3 neutral (disabled, loading, waiting, unavailable).
+    pub fn settings_status_level(&self, provider_id: &str, enabled: bool, now: i64) -> i32 {
+        if !enabled {
+            return 3;
+        }
+        if self.demo {
+            return 1;
+        }
+        if provider_id == "codex" && self.loading {
+            return 3;
+        }
+        let Some(provider) = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == provider_id)
+        else {
+            return 3;
+        };
+        match provider.status {
+            ProviderStatus::Available => {
+                let updated = provider.last_success_unix_seconds.unwrap_or_default();
+                if now.saturating_sub(updated) > STALE_AFTER_SECONDS {
+                    1
+                } else {
+                    0
+                }
+            }
+            ProviderStatus::Error => 2,
+            ProviderStatus::Unavailable => 3,
         }
     }
 
@@ -296,6 +408,10 @@ fn unavailable_status(provider_id: &str, bridge_enabled: bool, locale: Locale) -
                     "Oczekiwanie na dane".into(),
                     "Oczekiwanie na zdarzenie Claude Code status line".into(),
                 ),
+                Locale::Ru => (
+                    "Ожидание данных".into(),
+                    "Ожидается событие от Claude Code status line".into(),
+                ),
             };
         }
         return match locale {
@@ -311,6 +427,10 @@ fn unavailable_status(provider_id: &str, bridge_enabled: bool, locale: Locale) -
                 "Wymagana konfiguracja".into(),
                 "Wymagana komenda status line; AUM nie zmienia ustawień Claude".into(),
             ),
+            Locale::Ru => (
+                "Требуется настройка".into(),
+                "Нужна команда status line; AUM не меняет настройки Claude".into(),
+            ),
         };
     }
     match locale {
@@ -325,6 +445,10 @@ fn unavailable_status(provider_id: &str, bridge_enabled: bool, locale: Locale) -
         Locale::Pl => (
             "Niedostępne".into(),
             "Codex app-server nie zwrócił danych".into(),
+        ),
+        Locale::Ru => (
+            "Недоступно".into(),
+            "Codex app-server ещё не вернул данные".into(),
         ),
     }
 }
@@ -367,14 +491,24 @@ pub fn apply_config(
     window.set_disabled_label(locale.popup().monitoring_disabled.into());
     window.set_usage_title_label(locale.popup().usage_title.into());
     window.set_refresh_label(locale.popup().refresh.into());
+    window.set_remaining_heading(locale.popup().remaining.into());
+    window.set_reset_heading(locale.popup().reset.into());
+    window.set_close_label(locale.popup().close.into());
+    window.set_warning_threshold(settings.warning_threshold as i32);
+    window.set_critical_threshold(settings.critical_threshold as i32);
     window.set_theme_kind(theme_kind(settings.theme_mode, system_light));
     window.invoke_apply_theme_palette();
     window.set_accent_color(crate::theme::system_accent_color());
     let icons = crate::provider_icons::local();
-    window.set_codex_icon(icons.codex.clone().unwrap_or_default());
-    window.set_codex_icon_available(icons.codex.is_some());
-    window.set_claude_icon(icons.claude.clone().unwrap_or_default());
-    window.set_claude_icon_available(icons.claude.is_some());
+    let light = settings.theme_mode == crate::settings::ThemeMode::Light;
+    // Flyout marks are 14 logical px (14/18/21/28 device px at 100/125/150/200 %).
+    let scale = slint::ComponentHandle::window(window).scale_factor();
+    let codex = icons.icon(crate::provider_icons::Provider::Codex, light, 14.0, scale);
+    let claude = icons.icon(crate::provider_icons::Provider::Claude, light, 14.0, scale);
+    window.set_codex_icon_available(codex.is_some());
+    window.set_codex_icon(codex.unwrap_or_default());
+    window.set_claude_icon_available(claude.is_some());
+    window.set_claude_icon(claude.unwrap_or_default());
     apply_provider(
         window,
         ProviderView::Codex,
@@ -387,11 +521,10 @@ pub fn apply_config(
     );
 }
 
-pub(crate) fn theme_kind(mode: crate::settings::ThemeMode, system_light: bool) -> i32 {
+pub(crate) fn theme_kind(mode: crate::settings::ThemeMode, _system_light: bool) -> i32 {
     match mode {
-        crate::settings::ThemeMode::System if system_light => 2,
-        crate::settings::ThemeMode::System | crate::settings::ThemeMode::Graphite => 0,
-        crate::settings::ThemeMode::Navy => 1,
+        crate::settings::ThemeMode::Graphite => 0,
+        crate::settings::ThemeMode::BluishDark => 1,
         crate::settings::ThemeMode::Light => 2,
     }
 }
@@ -407,7 +540,7 @@ fn provider_ui_for_locale(snapshot: &UiSnapshot, id: &str, now: i64, locale: Loc
         .iter()
         .find(|provider| provider.provider_id == id)
     else {
-        return ProviderUi::unavailable();
+        return ProviderUi::unavailable(locale);
     };
     let fresh = provider.status == ProviderStatus::Available
         && provider
@@ -415,10 +548,10 @@ fn provider_ui_for_locale(snapshot: &UiSnapshot, id: &str, now: i64, locale: Loc
             .is_some_and(|last| last <= now && now.saturating_sub(last) <= STALE_AFTER_SECONDS);
     let has_last_good = provider.last_success_unix_seconds.is_some();
     let strings = locale.popup();
-    let (status, color) = if snapshot.demo {
-        (strings.demo.into(), rgb(0xd9, 0xae, 0x62))
+    let (status, color, status_level) = if snapshot.demo {
+        (strings.demo.into(), rgb(0xd9, 0xae, 0x62), 1)
     } else if snapshot.loading && id == "codex" {
-        (strings.loading.into(), rgb(0x9a, 0xa5, 0xb2))
+        (strings.loading.into(), rgb(0x9a, 0xa5, 0xb2), 3)
     } else if snapshot.claude_bridge_enabled && id == "claude" && !has_last_good {
         if provider.status == ProviderStatus::Error {
             (
@@ -426,57 +559,52 @@ fn provider_ui_for_locale(snapshot: &UiSnapshot, id: &str, now: i64, locale: Loc
                     Locale::Uk => "Помилка мосту",
                     Locale::En => "Bridge error",
                     Locale::Pl => "Błąd mostu",
+                    Locale::Ru => "Ошибка моста",
                 }
                 .into(),
                 rgb(0xef, 0x82, 0x89),
+                2,
             )
         } else {
-            (strings.waiting.into(), rgb(0x9a, 0xa5, 0xb2))
+            (strings.waiting.into(), rgb(0x9a, 0xa5, 0xb2), 3)
         }
     } else if fresh {
-        (strings.fresh.into(), rgb(0x79, 0xc9, 0x9e))
+        let age = provider
+            .last_success_unix_seconds
+            .map(|last| now.saturating_sub(last))
+            .unwrap_or_default();
+        (
+            relative_age(age, locale, strings.fresh),
+            rgb(0x79, 0xc9, 0x9e),
+            0,
+        )
     } else if has_last_good {
-        (strings.stale.into(), rgb(0xe6, 0xb9, 0x5f))
+        (strings.stale.into(), rgb(0xe6, 0xb9, 0x5f), 1)
     } else if provider.status == ProviderStatus::Error {
-        let error_code = provider.error.as_ref().map(|error| error.code.as_str());
-        let label = match error_code {
-            Some("codex_timeout") => "Таймаут Codex".into(),
-            Some("codex_process_error") => "Помилка запуску".into(),
-            Some("codex_spawn_error") => "Codex не запустився".into(),
-            Some("codex_spawn_not_found") => "Codex binary недоступний".into(),
-            Some("codex_spawn_denied") => "Немає доступу до Codex".into(),
-            Some("codex_spawn_invalid_input") => "Некоректний запуск Codex".into(),
-            Some(code) if code.starts_with("codex_spawn_os_") => {
-                format!(
-                    "Помилка запуску OS {}",
-                    code.trim_start_matches("codex_spawn_os_")
-                )
-            }
-            Some("codex_cleanup_error") => "Помилка очищення".into(),
-            Some("codex_protocol_error") => "Помилка протоколу".into(),
-            _ => "Помилка".into(),
-        };
         (
             match locale {
-                Locale::Uk => label,
+                Locale::Uk => "Помилка провайдера".into(),
                 Locale::En => "Provider error".into(),
                 Locale::Pl => "Błąd dostawcy".into(),
+                Locale::Ru => "Ошибка провайдера".into(),
             },
             rgb(0xef, 0x82, 0x89),
+            2,
         )
     } else {
-        (strings.unavailable.into(), rgb(0x9a, 0xa5, 0xb2))
+        (strings.unavailable.into(), rgb(0x9a, 0xa5, 0xb2), 3)
     };
     let limit = provider.limits.first();
     let claude_data = (id == "claude").then_some(&snapshot.claude_usage);
-    let plan = limit
-        .and_then(|limit| limit.plan_type.as_deref())
-        .map(short_plan)
-        .unwrap_or_default();
+    // Claude's supported metadata does not expose an exact subscription tier.
+    // Until both providers can reliably report one, the approved UI fallback
+    // is to hide both badges while retaining their parsed metadata in Core.
+    let plan = String::new();
     ProviderUi {
         plan,
         status,
         status_color: color,
+        status_level,
         five: window_ui(
             limit.and_then(|limit| limit.primary.as_ref()),
             claude_data
@@ -499,22 +627,23 @@ fn provider_ui_for_locale(snapshot: &UiSnapshot, id: &str, now: i64, locale: Loc
 }
 
 impl ProviderUi {
-    fn unavailable() -> Self {
+    fn unavailable(locale: Locale) -> Self {
         Self {
             plan: String::new(),
-            status: "Недоступно".into(),
+            status: locale.popup().unavailable.into(),
             status_color: rgb(0x9a, 0xa5, 0xb2),
-            five: WindowView::missing(),
-            weekly: WindowView::missing(),
+            status_level: 3,
+            five: WindowView::missing(locale),
+            weekly: WindowView::missing(locale),
         }
     }
 }
 
 impl WindowView {
-    fn missing() -> Self {
+    fn missing(locale: Locale) -> Self {
         Self {
             remaining: "—".into(),
-            reset: "Скидання невідоме".into(),
+            reset: locale.popup().reset_unknown.into(),
             value: 0.0,
             available: false,
         }
@@ -538,11 +667,8 @@ fn window_ui(
             (Some(value), true) => format!("{}%", value.round() as u8),
             _ => "—".into(),
         },
-        reset: match reset {
-            Some(reset) => format!(
-                "↻ {}",
-                localized_countdown(reset.saturating_sub(now), locale)
-            ),
+        reset: match reset.filter(|reset| *reset > now) {
+            Some(reset) => localized_countdown(reset.saturating_sub(now), locale),
             None => locale.popup().reset_unknown.into(),
         },
         value: remaining.unwrap_or_default() as f32,
@@ -550,9 +676,26 @@ fn window_ui(
     }
 }
 
+/// "щойно" for the first minute, then "N хв тому" (minutes since the last
+/// successful read). Only called for fresh, real data.
+fn relative_age(age_seconds: i64, locale: Locale, just_now: &str) -> String {
+    let minutes = age_seconds.max(0) / 60;
+    if minutes == 0 {
+        return just_now.into();
+    }
+    match locale {
+        Locale::Uk => format!("{minutes} хв тому"),
+        Locale::En => format!("{minutes} min ago"),
+        Locale::Pl => format!("{minutes} min temu"),
+        Locale::Ru => format!("{minutes} мин назад"),
+    }
+}
+
 fn localized_countdown(seconds: i64, locale: Locale) -> String {
-    if locale == Locale::Uk {
-        return ukrainian_countdown(seconds);
+    match locale {
+        Locale::Uk => return ukrainian_countdown(seconds),
+        Locale::Ru => return russian_countdown(seconds),
+        Locale::En | Locale::Pl => {}
     }
     let seconds = seconds.max(0);
     let days = seconds / 86_400;
@@ -564,40 +707,43 @@ fn localized_countdown(seconds: i64, locale: Locale) -> String {
         format!("{hours}h {minutes}m")
     } else if minutes > 0 {
         format!("{minutes}m")
-    } else if locale == Locale::Pl {
-        "mniej niż minutę".into()
     } else {
-        "less than a minute".into()
+        "< 1 min".into()
     }
 }
 
+// Compact forms from the approved flyout reference: "4 год 19 хв", "2д 3г".
 fn ukrainian_countdown(seconds: i64) -> String {
     let seconds = seconds.max(0);
     let day = seconds / 86_400;
     let hour = seconds % 86_400 / 3_600;
     let minute = seconds % 3_600 / 60;
     if day > 0 {
-        format!("{day} дн. {hour} год")
+        format!("{day}д {hour}г")
     } else if hour > 0 {
         format!("{hour} год {minute} хв")
     } else if minute > 0 {
         format!("{minute} хв")
     } else if seconds > 0 {
-        "менше хвилини".into()
+        "< 1 хв".into()
     } else {
         "час минув".into()
     }
 }
 
-fn short_plan(value: &str) -> String {
-    let mut chars = value.chars();
-    let prefix: String = chars.by_ref().take(16).collect();
-    if chars.next().is_some() {
-        format!("{prefix}…")
-    } else if prefix.is_empty() {
-        String::new()
+fn russian_countdown(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    let day = seconds / 86_400;
+    let hour = seconds % 86_400 / 3_600;
+    let minute = seconds % 3_600 / 60;
+    if day > 0 {
+        format!("{day}д {hour}ч")
+    } else if hour > 0 {
+        format!("{hour} ч {minute} мин")
+    } else if minute > 0 {
+        format!("{minute} мин")
     } else {
-        prefix
+        "< 1 мин".into()
     }
 }
 
@@ -611,6 +757,7 @@ fn apply_provider(window: &MainWindow, provider: ProviderView, value: ProviderUi
             window.set_codex_plan(value.plan.into());
             window.set_codex_status(value.status.into());
             window.set_codex_status_color(value.status_color);
+            window.set_codex_status_level(value.status_level);
             window.set_codex_five_remaining(value.five.remaining.into());
             window.set_codex_five_reset(value.five.reset.into());
             window.set_codex_five_value(value.five.value);
@@ -624,6 +771,7 @@ fn apply_provider(window: &MainWindow, provider: ProviderView, value: ProviderUi
             window.set_claude_plan(value.plan.into());
             window.set_claude_status(value.status.into());
             window.set_claude_status_color(value.status_color);
+            window.set_claude_status_level(value.status_level);
             window.set_claude_five_remaining(value.five.remaining.into());
             window.set_claude_five_reset(value.five.reset.into());
             window.set_claude_five_value(value.five.value);
@@ -641,14 +789,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn theme_kind_maps_all_four_modes_and_resolves_system_preference() {
+    fn subscription_badges_are_hidden_until_both_tiers_are_reliable() {
+        let snapshot = UiSnapshot::demo(1);
+        assert!(provider_ui(&snapshot, "codex", 1).plan.is_empty());
+        assert!(provider_ui(&snapshot, "claude", 1).plan.is_empty());
+    }
+
+    #[test]
+    fn theme_kind_maps_exactly_three_modes() {
         use crate::settings::ThemeMode;
 
         assert_eq!(theme_kind(ThemeMode::Graphite, true), 0);
-        assert_eq!(theme_kind(ThemeMode::Navy, true), 1);
+        assert_eq!(theme_kind(ThemeMode::BluishDark, true), 1);
         assert_eq!(theme_kind(ThemeMode::Light, false), 2);
-        assert_eq!(theme_kind(ThemeMode::System, false), 0);
-        assert_eq!(theme_kind(ThemeMode::System, true), 2);
     }
 
     fn snapshot(
@@ -707,8 +860,27 @@ mod tests {
         );
         let view = provider_ui(&data, "codex", 100);
         assert_eq!(view.five.remaining, "25%");
-        assert_eq!(view.five.reset, "↻ 1 год 0 хв");
+        assert_eq!(view.five.reset, "1 год 0 хв");
         assert!(view.five.available);
+    }
+
+    #[test]
+    fn failed_claude_refresh_keeps_last_good_values_and_does_not_mark_them_fresh() {
+        let status_line = ClaudeStatusLineSnapshot {
+            five_hour_remaining_percent: Some(40.0),
+            five_hour_reset_at: Some(500),
+            weekly_remaining_percent: Some(70.0),
+            weekly_reset_at: Some(900),
+            snapshot_at: 100,
+        };
+        let provider = status_line.to_provider_snapshot();
+        let last_good = UiSnapshot::loading(true).replace_claude(provider, status_line);
+        let failed = last_good.replace_claude_error();
+        let view = provider_ui(&failed, "claude", 101);
+        assert_eq!(view.five.remaining, "40%");
+        assert_eq!(view.weekly.remaining, "70%");
+        assert_eq!(view.status, "Дані застаріли");
+        assert_ne!(view.status, "щойно");
     }
 
     #[test]
@@ -723,7 +895,7 @@ mod tests {
                 .remaining,
             "—"
         );
-        assert_eq!(ukrainian_countdown(30), "менше хвилини");
+        assert_eq!(ukrainian_countdown(30), "< 1 хв");
     }
 
     #[test]
@@ -797,6 +969,55 @@ mod tests {
     }
 
     #[test]
+    fn tray_state_uses_each_providers_tightest_window_and_keeps_other_bar_live() {
+        let now = 1_700_000_000;
+        let window = |used_percent| {
+            Some(RateLimitWindow {
+                used_percent,
+                window_duration_mins: None,
+                resets_at: None,
+            })
+        };
+        let make_provider = |id: &str, five, weekly| ProviderSnapshot {
+            provider_id: id.into(),
+            status: ProviderStatus::Available,
+            version: None,
+            limits: vec![RateLimitSnapshot {
+                limit_id: None,
+                limit_name: None,
+                primary: window(five),
+                secondary: window(weekly),
+                plan_type: None,
+                rate_limit_reached_type: None,
+            }],
+            last_success_unix_seconds: Some(now),
+            error: None,
+        };
+        let snapshot = UiSnapshot {
+            providers: vec![
+                make_provider("codex", 4.0, 1.0),
+                make_provider("claude", 51.0, 14.0),
+            ],
+            demo: false,
+            loading: false,
+            claude_bridge_enabled: true,
+            claude_usage: ClaudeUsageSnapshot::default(),
+        };
+        let values = snapshot.tray_values(true, true, now);
+        assert_eq!(values[0].remaining_percent, Some(96));
+        assert_eq!(values[1].remaining_percent, Some(49));
+
+        let degraded = UiSnapshot {
+            providers: vec![empty_provider("codex"), make_provider("claude", 35.0, 12.0)],
+            ..snapshot
+        };
+        let values = degraded.tray_values(true, true, now);
+        assert_eq!(values[0].freshness, crate::tray::DataFreshness::Unavailable);
+        assert_eq!(values[1].remaining_percent, Some(65));
+        assert_eq!(values[1].freshness, crate::tray::DataFreshness::Fresh);
+    }
+
+    #[test]
     fn loading_and_last_known_good_states_remain_distinguishable() {
         assert_eq!(
             provider_ui(&UiSnapshot::loading(false), "codex", 100).status,
@@ -827,15 +1048,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_updates_are_independent_and_claude_expires_to_stale() {
+    fn status_line_resets_reach_the_flyout_and_count_down_locally() {
         let now = 1_700_000_000;
-        let normalized = ClaudeStatusLineSnapshot {
-            five_hour_remaining_percent: Some(67.0),
-            five_hour_reset_at: Some(now + 3_600),
-            weekly_remaining_percent: None,
-            weekly_reset_at: Some(now + 86_400),
-            snapshot_at: now,
-        };
+        let raw = format!(
+            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":33,"resets_at":{} }},"seven_day":{{"used_percentage":14,"resets_at":{} }}}}}}"#,
+            now + 3_600,
+            now + 86_400
+        );
+        let normalized = ClaudeStatusLineSnapshot::from_status_line_json(&raw, now).unwrap();
         let initial = UiSnapshot::loading(true);
         let claude = normalized.to_provider_snapshot();
         let with_claude = initial.replace_claude(claude, normalized);
@@ -845,12 +1065,29 @@ mod tests {
         );
         assert_eq!(
             provider_ui(&with_claude, "claude", now).weekly.remaining,
-            "—"
+            "86%"
         );
         assert_eq!(
             provider_ui(&with_claude, "claude", now).weekly.reset,
-            "↻ 1 дн. 0 год"
+            "1д 0г"
         );
+        let ticked = provider_ui(&with_claude, "claude", now + 60);
+        assert_eq!(ticked.five.reset, "59 хв");
+        assert_eq!(ticked.weekly.reset, "23 год 59 хв");
+        let newer_status_line = ClaudeStatusLineSnapshot {
+            five_hour_remaining_percent: Some(68.0),
+            five_hour_reset_at: None,
+            weekly_remaining_percent: Some(84.0),
+            weekly_reset_at: None,
+            snapshot_at: now + 120,
+        };
+        let merged =
+            with_claude.replace_claude(newer_status_line.to_provider_snapshot(), newer_status_line);
+        let merged_view = provider_ui(&merged, "claude", now + 120);
+        assert_eq!(merged_view.five.remaining, "68%");
+        assert_eq!(merged_view.five.reset, "58 хв");
+        assert_eq!(merged_view.weekly.remaining, "84%");
+        assert_eq!(merged_view.weekly.reset, "23 год 58 хв");
         assert_eq!(
             provider_ui(&with_claude, "codex", now).status,
             "Завантаження"
@@ -861,7 +1098,7 @@ mod tests {
             .next()
             .unwrap();
         let updated = with_claude.replace_codex(codex);
-        assert_eq!(provider_ui(&updated, "codex", now).status, "Свіжі дані");
+        assert_eq!(provider_ui(&updated, "codex", now).status, "щойно");
         assert_eq!(
             provider_ui(&with_claude, "claude", now + STALE_AFTER_SECONDS + 1).status,
             "Дані застаріли"
@@ -888,10 +1125,7 @@ mod tests {
                 resets_at: Some(50),
             }),
         );
-        assert_eq!(
-            provider_ui(&elapsed, "codex", 100).five.reset,
-            "↻ час минув"
-        );
+        assert_eq!(provider_ui(&elapsed, "codex", 100).five.reset, "—");
         let unknown = snapshot(
             ProviderStatus::Available,
             Some(100),
@@ -901,10 +1135,7 @@ mod tests {
                 resets_at: None,
             }),
         );
-        assert_eq!(
-            provider_ui(&unknown, "codex", 100).five.reset,
-            "Скидання невідоме"
-        );
+        assert_eq!(provider_ui(&unknown, "codex", 100).five.reset, "—");
     }
 
     #[test]

@@ -13,13 +13,13 @@ Agent Usage Monitor helps developers keep an eye on their AI coding-assistant us
 - **Codex:** reads rate-limit information using the experimental `codex app-server` interface, with initial refresh and periodic updates in live mode.
 - **Claude Code (opt-in):** receives only supported usage windows from Claude Code's documented status-line input through a local bridge. It never silently edits an existing status-line configuration.
 - **At a glance:** remaining percentages and independent reset countdowns, with unavailable or stale data clearly distinguished from valid values.
-- **Windows integration:** notification-area tray icon, compact quota popup, Settings window, and notification alerts.
-- **Personalization:** dark, light, and system themes; Ukrainian, English, and Polish localization.
+- **Windows integration:** dynamic two-bar tray icon, hover preview and pinned flyout, theme-aware tray menu, Settings window, and Windows toast notifications under the AgentUsageMonitor name.
+- **Personalization:** Graphite, Bluish Dark, and Light themes; Ukrainian, Polish, English, and Russian localization.
 - **Local-first:** saves settings and alert state under the user's application data directory. It does not store authentication credentials or tokens.
 
 ### Current limitations
 
-This is a **development build, not a finished public release**. Quota-driven tray-icon refresh is not yet connected, high-DPI screenshot comparisons remain outstanding, and integration availability depends on upstream provider interfaces. Claude Code usage is session-driven and may be missing or stale. No promises of stable installation packages or released binaries are implied.
+This is a **pre-release (0.1.0 release candidate), not yet published**. High-DPI layouts were checked at 100 % and with scale emulation only, and integration availability depends on upstream provider interfaces. Claude Code usage is session-driven and may be missing or stale. No promises of stable installation packages or released binaries are implied.
 
 ## License & reuse
 
@@ -50,3 +50,7 @@ Use `--live` for live Codex data. Claude integration is opt-in with `--enable-cl
 - `docs/`: essential integration and architecture research notes.
 
 The executable is `agent-usage-monitor.exe`. See `rust/agent-monitor-ui/README.md` for current features and limitations.
+
+## Windows release candidate
+
+`packaging/windows/build-installer.ps1` builds the x64 release binaries, a portable ZIP and, when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install --id JRSoftware.InnoSetup -e`), a per-user installer (`packaging/windows/AgentUsageMonitor.iss`). Artifacts are written to `rust/target/installer/`. The installer needs no administrator rights, adds a Start menu shortcut (desktop shortcut optional), keeps settings on upgrade and uninstall unless you choose otherwise, and includes optional Windows sign-in launch (off by default). The app registers only its own value under the current user's Run key; uninstall removes that value. The Claude Code bridge stays opt-in. Codex and Claude marks are embedded in the EXE only if a maintainer places them in the git-ignored `rust/agent-monitor-ui/assets/provider-icons/` folder before building; they are never committed, and a build containing them must not be distributed publicly without the brand owners' permission (see `docs/design/brand-assets.md`).

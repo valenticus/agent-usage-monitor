@@ -1,15 +1,25 @@
+// Release builds are GUI-subsystem apps (no console window). Debug builds
+// keep the console for the diagnostic log lines.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod adapter;
+mod aum_icon;
+mod autostart;
 mod claude_refresher;
+mod flyout;
 mod localization;
+mod notifications;
 mod provider_icons;
 mod settings;
 mod theme;
-#[allow(dead_code)] // Pure quota renderer is tested; the native tray icon is currently static.
 mod tray;
+mod tray_menu;
 
 slint::include_modules!();
 
 use std::path::Path;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,6 +39,12 @@ type SharedSettings = Arc<Mutex<AppSettings>>;
 type SharedLocale = Arc<Mutex<Locale>>;
 type SharedSnapshot = Arc<Mutex<adapter::UiSnapshot>>;
 type SharedAlerts = Arc<Mutex<AlertRuntime>>;
+static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ManualRefreshRequest {
+    pub(crate) id: u64,
+}
 
 struct AlertRuntime {
     engine: AlertEngine,
@@ -84,6 +100,8 @@ fn alert_notification_copy(event: &AlertEvent, locale: Locale) -> (String, Strin
         (Locale::En, AlertWindow::Weekly) => "weekly limit",
         (Locale::Pl, AlertWindow::FiveHour) => "limit 5-godzinny",
         (Locale::Pl, AlertWindow::Weekly) => "limit tygodniowy",
+        (Locale::Ru, AlertWindow::FiveHour) => "лимит на 5 часов",
+        (Locale::Ru, AlertWindow::Weekly) => "недельный лимит",
     };
     let severity = match (locale, event.severity) {
         (Locale::Uk, AlertSeverity::Warning) => "попередження",
@@ -95,11 +113,15 @@ fn alert_notification_copy(event: &AlertEvent, locale: Locale) -> (String, Strin
         (Locale::Pl, AlertSeverity::Warning) => "ostrzeżenie",
         (Locale::Pl, AlertSeverity::Critical) => "poziom krytyczny",
         (Locale::Pl, AlertSeverity::Exhausted) => "wyczerpany",
+        (Locale::Ru, AlertSeverity::Warning) => "предупреждение",
+        (Locale::Ru, AlertSeverity::Critical) => "критический уровень",
+        (Locale::Ru, AlertSeverity::Exhausted) => "исчерпан",
     };
     let message = match locale {
         Locale::Uk => format!("Залишилося {}%", event.remaining_percent),
         Locale::En => format!("{}% remaining", event.remaining_percent),
         Locale::Pl => format!("Pozostało {}%", event.remaining_percent),
+        Locale::Ru => format!("Осталось {}%", event.remaining_percent),
     };
     (format!("{provider} · {window} · {severity}"), message)
 }
@@ -111,6 +133,30 @@ fn deliver_alerts(notifier: &Option<tray::TrayNotifier>, events: Vec<AlertEvent>
     for event in events {
         let (title, message) = alert_notification_copy(&event, locale);
         notifier.notify(&title, &message, event.popup_duration_seconds);
+    }
+}
+
+fn queue_manual_refresh(
+    provider: &str,
+    sender: &mpsc::Sender<ManualRefreshRequest>,
+    request: ManualRefreshRequest,
+) -> bool {
+    match sender.try_send(request) {
+        Ok(()) => {
+            eprintln!("REFRESH: queued id={} provider={provider}", request.id);
+            true
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            eprintln!("REFRESH: coalesced id={} provider={provider}", request.id);
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            eprintln!(
+                "REFRESH: skipped id={} provider={provider} reason=worker_closed",
+                request.id
+            );
+            false
+        }
     }
 }
 
@@ -150,7 +196,19 @@ fn main() -> Result<(), slint::PlatformError> {
             return Ok(());
         }
     };
+    // App identity for toasts (sender name + static AUM icon); per-user only.
+    #[cfg(windows)]
+    if let Err(error) = notifications::register_identity() {
+        eprintln!("NOTIFY: app identity registration failed: {error}");
+    }
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(debug_assertions)]
+    if let Some(state) = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--preview-startup="))
+    {
+        let _ = PREVIEW_STARTUP.set(state.to_owned());
+    }
     let demo_mode = args.iter().any(|arg| arg == "--demo");
     let live_mode = args.iter().any(|arg| arg == "--live");
     let empty_mode = args.iter().any(|arg| arg == "--empty");
@@ -174,6 +232,35 @@ fn main() -> Result<(), slint::PlatformError> {
     let config: SharedSettings = Arc::new(Mutex::new(
         settings::load(&settings_path).unwrap_or_default(),
     ));
+    reconcile_autostart(&config, &settings_path, claude_bridge_enabled);
+    // Debug-only visual review aid: override the theme in memory (never saved).
+    #[cfg(debug_assertions)]
+    if let Some(theme) = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--preview-theme="))
+    {
+        if let Ok(mut current) = config.lock() {
+            current.theme_mode = match theme {
+                "light" => ThemeMode::Light,
+                "bluish" => ThemeMode::BluishDark,
+                _ => ThemeMode::Graphite,
+            };
+        }
+    }
+    #[cfg(debug_assertions)]
+    if let Some(language) = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--preview-language="))
+    {
+        if let Ok(mut current) = config.lock() {
+            current.language = match language {
+                "en" => Language::English,
+                "pl" => Language::Polish,
+                "ru" => Language::Russian,
+                _ => Language::Ukrainian,
+            };
+        }
+    }
     let locale: SharedLocale = Arc::new(Mutex::new(resolve_locale(&lock_settings(&config))));
     let initial_snapshot = initial_snapshot(demo_mode, use_live, claude_bridge_enabled, now_unix());
     let current: SharedSnapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
@@ -182,12 +269,23 @@ fn main() -> Result<(), slint::PlatformError> {
         settings_path.with_file_name("alert-state.json"),
     )));
 
+    // The flyout is shown without activation only for temporary tray previews.
+    // Explicit tray Open and Settings actions activate their windows normally.
+    // The tray menu (also frameless) needs keyboard focus.
+    slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(|attributes| {
+            if attributes.title == "AgentUsageMonitor" {
+                attributes.with_active(false)
+            } else {
+                attributes
+            }
+        })
+        .select()?;
+
     let window = MainWindow::new()?;
     let settings_window = SettingsWindow::new()?;
     window.set_refresh_enabled(use_live);
-    window
-        .window()
-        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+    settings_window.set_window_icon(theme::aum_icon_image(64));
     adapter::apply_config(
         &window,
         &initial_snapshot,
@@ -215,8 +313,49 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let (refresh_sender, refresh_receiver) = mpsc::channel(1);
-    window.on_refresh_requested(move || {
-        let _ = refresh_sender.try_send(());
+    let (claude_refresh_sender, claude_refresh_receiver) = mpsc::channel(1);
+    // Dispatch one bounded request to each opted-in provider independently.
+    // Full channels mean an equivalent request is already pending, so clicks
+    // coalesce instead of starting duplicate CLI processes.
+    let request_refresh: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let codex_sender = refresh_sender.clone();
+        let claude_sender = claude_refresh_sender.clone();
+        let config = config.clone();
+        Arc::new(move || {
+            if !use_live {
+                eprintln!("REFRESH: skipped reason=not_live");
+                return false;
+            }
+            let settings = lock_settings(&config);
+            let codex_enabled = settings.codex_enabled;
+            let claude_enabled = settings.claude_enabled;
+            let claude_cli_enabled = settings.claude_cli_refresh_enabled;
+            let id = NEXT_REFRESH_ID.fetch_add(1, Ordering::Relaxed);
+            let request = ManualRefreshRequest { id };
+            eprintln!("REFRESH: requested id={id}");
+            let codex = if codex_enabled {
+                queue_manual_refresh("codex", &codex_sender, request)
+            } else {
+                eprintln!("REFRESH: skipped id={id} provider=codex reason=disabled");
+                false
+            };
+            let claude = if !claude_enabled {
+                eprintln!("REFRESH: skipped id={id} provider=claude reason=disabled");
+                false
+            } else if !claude_cli_enabled {
+                eprintln!("REFRESH: skipped id={id} provider=claude reason=cli_opt_in_disabled");
+                false
+            } else {
+                queue_manual_refresh("claude", &claude_sender, request)
+            };
+            codex || claude
+        })
+    };
+    window.on_refresh_requested({
+        let dispatcher = request_refresh.clone();
+        move || {
+            let _ = dispatcher();
+        }
     });
     settings_window.window().on_close_requested({
         let panel = settings_window.as_weak();
@@ -306,6 +445,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 settings.claude_cli_refresh_enabled = !settings.claude_cli_refresh_enabled
             })
         }
+    });
+    settings_window.on_toggle_startup({
+        let values = callback_context(
+            &config,
+            &settings_path,
+            &locale,
+            &settings_sender,
+            &window,
+            &settings_window,
+            &current,
+        );
+        move || toggle_autostart(&values)
     });
     settings_window.on_toggle_alerts({
         let values = callback_context(
@@ -414,6 +565,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     settings_window.on_open_repository(open_repository);
+    settings_window.on_open_issues(open_issues);
 
     #[cfg(windows)]
     let (native_tray, tray_events) = match tray::NativeTray::start(lock_locale(&locale)) {
@@ -424,44 +576,157 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     #[cfg(windows)]
+    settings_window.on_show_test_notification({
+        let notifier = native_tray.notifier();
+        let locale = locale.clone();
+        let config = config.clone();
+        move || {
+            let labels = lock_locale(&locale).settings();
+            let duration = lock_settings(&config).popup_duration_seconds;
+            notifier.notify(labels.test_title, labels.test_message, duration);
+        }
+    });
+    #[cfg(windows)]
     let worker_notifier = Some(native_tray.notifier());
     #[cfg(not(windows))]
     let worker_notifier = None;
+
+    // One flyout window with two presentations; its state lives on the UI thread.
+    #[cfg(windows)]
+    let flyout = {
+        let notifier = native_tray.notifier();
+        flyout::Flyout::new(&window, move || notifier.icon_rect())
+    };
+    #[cfg(not(windows))]
+    let flyout = flyout::Flyout::new(&window, || None);
+    window.on_close_flyout({
+        let flyout = flyout.clone();
+        move || flyout.close()
+    });
+    window.on_start_drag({
+        let flyout = flyout.clone();
+        move || flyout.start_drag()
+    });
+    window.on_refresh_finished({
+        let flyout = flyout.clone();
+        move || flyout.refresh_finished()
+    });
+    window.window().on_close_requested({
+        let flyout = flyout.clone();
+        move || {
+            flyout.closed_externally();
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+    {
+        let flyout = flyout.clone();
+        slint::Timer::single_shot(Duration::from_millis(0), move || flyout.warm_up());
+    }
+
+    // One custom tray menu for the whole run (re-used on every right-click).
+    #[cfg(windows)]
+    let tray_menu = TrayMenu::new()?;
+    // Single dispatcher for tray events and context-menu commands, so the
+    // menu runs exactly the same actions as the tray (and double-click).
+    #[cfg(windows)]
+    let dispatch: Rc<dyn Fn(tray::TrayEvent)> = {
+        let settings = settings_window.as_weak();
+        let live_window = window.as_weak();
+        let live_snapshot = current.clone();
+        let live_config = config.clone();
+        let live_locale = locale.clone();
+        let flyout = flyout.clone();
+        let menu = tray_menu.as_weak();
+        Rc::new(move |event| match event {
+            tray::TrayEvent::Hover => {
+                // A visible context menu owns the interaction; no preview
+                // underneath it.
+                if menu
+                    .upgrade()
+                    .is_some_and(|menu| menu.window().is_visible())
+                {
+                    return;
+                }
+                apply_latest_to_window(&live_window, &live_snapshot, &live_config, &live_locale);
+                flyout.hover();
+            }
+            tray::TrayEvent::Pointer => flyout.pointer_over_icon(),
+            tray::TrayEvent::OpenFull => {
+                apply_latest_to_window(&live_window, &live_snapshot, &live_config, &live_locale);
+                flyout.open_full();
+            }
+            tray::TrayEvent::Refresh => {
+                apply_latest_to_window(&live_window, &live_snapshot, &live_config, &live_locale);
+                flyout.menu_refresh(|| request_refresh());
+            }
+            tray::TrayEvent::OpenSettings => {
+                if let Some(settings) = settings.upgrade() {
+                    show_settings_centered(&settings);
+                }
+            }
+            tray::TrayEvent::Quit => {
+                if let Some(menu) = menu.upgrade() {
+                    tray_menu::close(&menu);
+                }
+                let _ = slint::quit_event_loop();
+            }
+            tray::TrayEvent::ContextMenu { x, y } => {
+                let Some(menu) = menu.upgrade() else {
+                    return;
+                };
+                // The menu replaces a temporary preview instead of overlapping it.
+                flyout.dismiss_preview();
+                let settings = lock_settings(&live_config);
+                let theme = adapter::theme_kind(settings.theme_mode, system_light(&settings));
+                let locale = lock_locale(&live_locale);
+                tray_menu::open(&menu, (x, y), theme, locale);
+            }
+        })
+    };
+    #[cfg(windows)]
+    {
+        let menu = tray_menu.as_weak();
+        let dispatch = dispatch.clone();
+        tray_menu.on_activated(move |command| {
+            // Close first, then run the action.
+            if let Some(menu) = menu.upgrade() {
+                tray_menu::close(&menu);
+            }
+            let event = match command {
+                tray_menu::OPEN => tray::TrayEvent::OpenFull,
+                tray_menu::REFRESH => tray::TrayEvent::Refresh,
+                tray_menu::SETTINGS => tray::TrayEvent::OpenSettings,
+                tray_menu::EXIT => tray::TrayEvent::Quit,
+                _ => return,
+            };
+            dispatch(event);
+        });
+        let menu = tray_menu.as_weak();
+        tray_menu.on_dismissed(move || {
+            if let Some(menu) = menu.upgrade() {
+                tray_menu::close(&menu);
+            }
+        });
+    }
+
     #[cfg(windows)]
     let _tray_timer = {
-        let popup = window.as_weak();
-        let settings = settings_window.as_weak();
         let tray_timer = slint::Timer::default();
         let events = tray_events;
+        let dispatch = dispatch.clone();
         tray_timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(50),
             move || {
                 while let Ok(event) = events.try_recv() {
-                    match event {
-                        tray::TrayEvent::TogglePopup => {
-                            if let Some(popup) = popup.upgrade() {
-                                if popup_visible_after_toggle(popup.window().is_visible()) {
-                                    let _ = popup.show();
-                                } else {
-                                    let _ = popup.hide();
-                                }
-                            }
-                        }
-                        tray::TrayEvent::OpenSettings => {
-                            if let Some(settings) = settings.upgrade() {
-                                show_settings_centered(&settings);
-                            }
-                        }
-                        tray::TrayEvent::Quit => {
-                            let _ = slint::quit_event_loop();
-                        }
-                    }
+                    dispatch(event);
                 }
             },
         );
         tray_timer
     };
+    #[cfg(not(windows))]
+    let _ = request_refresh;
 
     let cancellation = CancellationToken::new();
     let worker = if use_live {
@@ -493,6 +758,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 claude_bridge_enabled,
                 settings_receiver,
                 refresh_receiver,
+                claude_refresh_receiver,
             ));
         }))
     } else {
@@ -516,17 +782,37 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
 
+    let tray_display_notifier = native_tray.notifier();
+    let tray_display_snapshot = current.clone();
+    let tray_display_config = config.clone();
+    let tray_icon_timer = slint::Timer::default();
+    tray_icon_timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_secs(1),
+        move || {
+            if let Ok(snapshot) = tray_display_snapshot.lock() {
+                let settings = lock_settings(&tray_display_config);
+                tray_display_notifier.update_icon(
+                    snapshot.tray_values(
+                        settings.codex_enabled,
+                        settings.claude_enabled,
+                        now_unix(),
+                    ),
+                    !system_light(&settings),
+                    settings.warning_threshold,
+                    settings.critical_threshold,
+                );
+            }
+        },
+    );
+
     let theme_window = window.as_weak();
     let theme_panel = settings_window.as_weak();
-    let theme_config = config.clone();
-    let theme_locale = locale.clone();
-    let theme_snapshot = current.clone();
     let theme_timer = slint::Timer::default();
     theme_timer.start(
         slint::TimerMode::Repeated,
         Duration::from_secs(2),
         move || {
-            let settings = lock_settings(&theme_config);
             let accent = theme::system_accent_color();
             if let Some(window) = theme_window.upgrade() {
                 window.set_accent_color(accent);
@@ -534,37 +820,13 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(panel) = theme_panel.upgrade() {
                 panel.set_accent_color(accent);
             }
-            if settings.theme_mode != ThemeMode::System {
-                return;
-            }
-            if let (Some(window), Ok(snapshot)) = (theme_window.upgrade(), theme_snapshot.lock()) {
-                adapter::apply_config(
-                    &window,
-                    &snapshot,
-                    now_unix(),
-                    &settings,
-                    lock_locale(&theme_locale),
-                    theme::system_prefers_light(),
-                );
-            }
-            if let Some(panel) = theme_panel.upgrade() {
-                if let Ok(snapshot) = theme_snapshot.lock() {
-                    update_settings_window(
-                        &panel,
-                        &settings,
-                        lock_locale(&theme_locale),
-                        theme::system_prefers_light(),
-                        &snapshot,
-                        now_unix(),
-                    );
-                }
-            }
         },
     );
 
     #[cfg(windows)]
     let _popup_style_timer = {
         let popup = window.as_weak();
+        let flyout = flyout.clone();
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -574,17 +836,101 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 };
                 let _ = apply_popup_taskbar_style(&popup);
+                flyout.tick();
             },
         );
         timer
     };
 
-    let result = window.run();
+    // Debug-only visual review aid: open windows without tray interaction.
+    #[cfg(debug_assertions)]
+    {
+        let preview_full = args.iter().any(|arg| arg == "--preview-flyout");
+        let preview_compact = args.iter().any(|arg| arg == "--preview-compact");
+        if preview_full || preview_compact {
+            let flyout = flyout.clone();
+            slint::Timer::single_shot(Duration::from_millis(300), move || {
+                if preview_full {
+                    flyout.open_full();
+                } else {
+                    flyout.preview_compact();
+                }
+            });
+        }
+        if let Some(tab) = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--preview-settings="))
+            .and_then(|tab| tab.parse::<i32>().ok())
+            .filter(|tab| valid_settings_tab(*tab))
+        {
+            settings_window.set_selected_tab(tab);
+            show_settings_centered(&settings_window);
+        }
+        // Font audit: render with another family (in memory only).
+        if let Some(family) = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--preview-font="))
+        {
+            let family = slint::SharedString::from(family);
+            window.global::<Typography>().set_family(family.clone());
+            settings_window
+                .global::<Typography>()
+                .set_family(family.clone());
+            #[cfg(windows)]
+            tray_menu.global::<Typography>().set_family(family);
+        }
+        // Context menu at the current cursor position, without a tray click.
+        #[cfg(windows)]
+        if args.iter().any(|arg| arg == "--preview-menu") {
+            let dispatch = dispatch.clone();
+            slint::Timer::single_shot(Duration::from_millis(600), move || {
+                let (x, y) = cursor_position().unwrap_or((800, 600));
+                dispatch(tray::TrayEvent::ContextMenu { x, y });
+            });
+        }
+    }
+
+    // The flyout starts hidden: run the loop without showing any window
+    // (ComponentHandle::run() would show the flyout).
+    let result = slint::run_event_loop_until_quit();
     cancellation.cancel();
     if let Some(worker) = worker {
         let _ = worker.join();
     }
     result
+}
+
+/// Threshold legend in the same left-to-right order as the scale:
+/// [critical (<= critical), warning (critical..=warning), normal (> warning)],
+/// built from the configured thresholds.
+fn threshold_legend(
+    labels: &localization::SettingsStrings,
+    warning_threshold: u8,
+    critical_threshold: u8,
+) -> [String; 3] {
+    [
+        format!("{} {}%", labels.legend_critical, critical_threshold),
+        // U+2060 WORD JOINER around the dash: the range "10–25%" never breaks
+        // across lines when a narrow legend wraps (only between words).
+        format!(
+            "{} {}\u{2060}–\u{2060}{}%",
+            labels.legend_warning, critical_threshold, warning_threshold
+        ),
+        format!("{} {}%", labels.legend_normal, warning_threshold),
+    ]
+}
+
+/// Debug-only `--preview-startup=on|error`: Settings shows that startup-row
+/// state regardless of the registry (visual review only).
+#[cfg(debug_assertions)]
+static PREVIEW_STARTUP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+#[cfg(all(windows, debug_assertions))]
+fn cursor_position() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut point = POINT { x: 0, y: 0 };
+    (unsafe { GetCursorPos(&mut point) } != 0).then_some((point.x, point.y))
 }
 
 #[cfg(windows)]
@@ -652,16 +998,105 @@ fn callback_context(
 }
 
 fn save_setting_change(context: &CallbackContext, change: impl FnOnce(&mut AppSettings)) {
-    let (config, path, locale, sender, window, panel, snapshot) = context;
+    let (config, path, ..) = context;
     let mut updated = lock_settings(config);
     change(&mut updated);
     if settings::save(path, &updated).is_err() {
         return;
     }
+    publish_settings(context, updated);
+}
+
+fn toggle_autostart(context: &CallbackContext) {
+    let (config, path, ..) = context;
+    let mut updated = lock_settings(config);
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("AUTOSTART: could not resolve executable: {error}");
+            show_autostart_unverified(context);
+            return;
+        }
+    };
+    let actual_before = match autostart::is_enabled_for(&executable) {
+        Ok(actual) => actual,
+        Err(error) => {
+            eprintln!("AUTOSTART: could not read current registration state: {error}");
+            show_autostart_unverified(context);
+            return;
+        }
+    };
+    let requested = !actual_before;
+    let claude_bridge = std::env::args().any(|argument| argument == "--enable-claude-bridge");
+    if let Err(error) = autostart::set_enabled(requested, &executable, claude_bridge) {
+        eprintln!("AUTOSTART: registration change failed: {error}");
+        show_autostart_unverified(context);
+        return;
+    }
+    let actual = match autostart::is_enabled_for(&executable) {
+        Ok(actual) => actual,
+        Err(error) => {
+            eprintln!("AUTOSTART: registration changed but could not verify it: {error}");
+            requested
+        }
+    };
+    if actual != requested {
+        eprintln!("AUTOSTART: requested state did not match the registered state");
+    }
+    updated.launch_at_startup = actual;
+    if let Err(error) = settings::save(path, &updated) {
+        eprintln!("AUTOSTART: registry changed but preference could not be saved: {error}");
+    }
+    publish_settings(context, updated);
+}
+
+fn show_autostart_unverified(context: &CallbackContext) {
+    let (_, _, locale, _, _, panel, _) = context;
+    if let Some(panel) = panel.upgrade() {
+        let labels = lock_locale(locale).settings();
+        panel.set_startup_state_known(false);
+        panel.set_startup_enabled(false);
+        panel.set_startup_description(labels.startup_error.into());
+    }
+}
+
+fn reconcile_autostart(config: &SharedSettings, path: &Path, claude_bridge: bool) {
+    let Ok(executable) = std::env::current_exe() else {
+        eprintln!("AUTOSTART: could not resolve executable; registration was not changed");
+        return;
+    };
+    let mut settings = lock_settings(config);
+    if let Err(error) =
+        autostart::set_enabled(settings.launch_at_startup, &executable, claude_bridge)
+    {
+        eprintln!("AUTOSTART: startup registration could not be reconciled: {error}");
+        if let Ok(actual) = autostart::is_enabled_for(&executable) {
+            settings.launch_at_startup = actual;
+        }
+    } else {
+        settings.launch_at_startup = match autostart::is_enabled_for(&executable) {
+            Ok(actual) => actual,
+            Err(error) => {
+                eprintln!("AUTOSTART: registration reconciled but verification failed: {error}");
+                settings.launch_at_startup
+            }
+        };
+    }
+    if let Err(error) = settings::save(path, &settings) {
+        eprintln!("AUTOSTART: actual registration state could not be saved: {error}");
+    }
+    if let Ok(mut current) = config.lock() {
+        *current = settings;
+    }
+}
+
+fn publish_settings(context: &CallbackContext, updated: AppSettings) {
+    let (config, _path, locale, sender, window, panel, snapshot) = context;
     if let Ok(mut current) = config.lock() {
         *current = updated.clone();
     }
     let resolved = resolve_locale(&updated);
+    tray::set_locale(resolved);
     if let Ok(mut current_locale) = locale.lock() {
         *current_locale = resolved;
     }
@@ -696,13 +1131,13 @@ async fn run_live_workers<P>(
     cancellation: CancellationToken,
     claude_bridge_enabled: bool,
     settings: watch::Receiver<AppSettings>,
-    refresh_requests: mpsc::Receiver<()>,
+    refresh_requests: mpsc::Receiver<ManualRefreshRequest>,
+    claude_refresh_requests: mpsc::Receiver<ManualRefreshRequest>,
 ) where
     P: RateLimitProvider + 'static,
 {
     let (sender, mut receiver) = mpsc::channel::<ClaudeStatusLineSnapshot>(4);
-    let (cli_sender, mut cli_receiver) =
-        mpsc::channel::<agent_usage_monitor_core::ClaudeUsageSnapshot>(2);
+    let (cli_sender, mut cli_receiver) = mpsc::channel::<claude_refresher::ClaudeRefreshEvent>(2);
     let claude_window = context.window.clone();
     let claude_snapshot = context.current.clone();
     let claude_config = context.config.clone();
@@ -733,11 +1168,7 @@ async fn run_live_workers<P>(
                             let events = alert_runtime.refresh(&updated, &lock_settings(&claude_config), now_unix());
                             deliver_alerts(&claude_notifier, events, lock_locale(&claude_locale));
                         }
-                        if let Some(window) = claude_window.upgrade() { apply_current(&window, &updated, &claude_config, &claude_locale); }
-                        if let Some(panel) = claude_settings_window.upgrade() {
-                            let settings = lock_settings(&claude_config);
-                            update_settings_window(&panel, &settings, lock_locale(&claude_locale), system_light(&settings), &updated, now_unix());
-                        }
+                        queue_ui_snapshot(claude_window.clone(), claude_settings_window.clone(), claude_snapshot.clone(), claude_config.clone(), claude_locale.clone());
                     }
                 }
                 usage = cli_receiver.recv() => {
@@ -745,22 +1176,39 @@ async fn run_live_workers<P>(
                     if !claude_settings.borrow().claude_enabled
                         || !claude_settings.borrow().claude_cli_refresh_enabled
                     { continue; }
-                    let updated = if let Ok(mut current) = claude_snapshot.lock() {
-                        *current = current.merge_claude_usage(usage);
-                        Some(current.clone())
-                    } else { None };
+                    let (request_id, updated) = match usage {
+                        claude_refresher::ClaudeRefreshEvent::Completed { request_id, snapshot } => {
+                            let cache_started = std::time::Instant::now();
+                            let updated = if let Ok(mut current) = claude_snapshot.lock() {
+                                *current = current.merge_claude_usage(snapshot);
+                                Some(current.clone())
+                            } else { None };
+                            eprintln!("CLAUDE_REFRESH: cache_updated request_id={} cache_ms={}", request_id.map_or_else(|| "background".into(), |id| id.to_string()), cache_started.elapsed().as_millis());
+                            (request_id, updated)
+                        }
+                        claude_refresher::ClaudeRefreshEvent::Failed { request_id, timed_out } => {
+                            let updated = if let Ok(mut current) = claude_snapshot.lock() {
+                                *current = current.replace_claude_error();
+                                Some(current.clone())
+                            } else { None };
+                            let kind = if timed_out { "timed_out" } else { "failed" };
+                            eprintln!("CLAUDE_REFRESH: cache_updated request_id={} result={kind} retained_last_good=true", request_id.map_or_else(|| "background".into(), |id| id.to_string()));
+                            (request_id, updated)
+                        }
+                    };
                     if let Some(updated) = updated {
                         if let Ok(mut alert_runtime) = claude_alerts.lock() {
                             let events = alert_runtime.refresh(&updated, &lock_settings(&claude_config), now_unix());
                             deliver_alerts(&claude_notifier, events, lock_locale(&claude_locale));
                         }
-                        if let Some(window) = claude_window.upgrade() {
-                            apply_current(&window, &updated, &claude_config, &claude_locale);
-                        }
-                        if let Some(panel) = claude_settings_window.upgrade() {
-                            let settings = lock_settings(&claude_config);
-                            update_settings_window(&panel, &settings, lock_locale(&claude_locale), system_light(&settings), &updated, now_unix());
-                        }
+                        queue_ui_snapshot_for_refresh(
+                            claude_window.clone(),
+                            claude_settings_window.clone(),
+                            claude_snapshot.clone(),
+                            claude_config.clone(),
+                            claude_locale.clone(),
+                            request_id,
+                        );
                     }
                 }
             }
@@ -784,22 +1232,13 @@ async fn run_live_workers<P>(
             if let Ok(mut current) = pipe_snapshot.lock() {
                 *current = current.replace_claude_error();
             }
-            if let (Some(window), Ok(current)) = (pipe_window.upgrade(), pipe_snapshot.lock()) {
-                apply_current(&window, &current, &pipe_config, &pipe_locale);
-            }
-            if let (Some(panel), Ok(current)) =
-                (pipe_settings_window.upgrade(), pipe_snapshot.lock())
-            {
-                let settings = lock_settings(&pipe_config);
-                update_settings_window(
-                    &panel,
-                    &settings,
-                    lock_locale(&pipe_locale),
-                    system_light(&settings),
-                    &current,
-                    now_unix(),
-                );
-            }
+            queue_ui_snapshot(
+                pipe_window.clone(),
+                pipe_settings_window.clone(),
+                pipe_snapshot.clone(),
+                pipe_config.clone(),
+                pipe_locale.clone(),
+            );
             pipe_cancellation.cancelled().await;
         }
     };
@@ -810,7 +1249,12 @@ async fn run_live_workers<P>(
         settings,
         refresh_requests,
     );
-    let cli = claude_refresher::run(cli_settings, cli_sender, cancellation);
+    let cli = claude_refresher::run(
+        cli_settings,
+        cli_sender,
+        claude_refresh_requests,
+        cancellation,
+    );
     tokio::join!(codex, claude_updates, pipe_updates, cli);
 }
 
@@ -819,7 +1263,7 @@ async fn refresh_loop<P>(
     context: WorkerUiContext,
     cancellation: CancellationToken,
     mut settings: watch::Receiver<AppSettings>,
-    mut refresh_requests: mpsc::Receiver<()>,
+    mut refresh_requests: mpsc::Receiver<ManualRefreshRequest>,
 ) where
     P: RateLimitProvider + 'static,
 {
@@ -839,15 +1283,25 @@ async fn refresh_loop<P>(
                 let next = updated_settings.codex_enabled;
                 if next && !enabled {
                     enabled = true;
-                    refresh_codex(&provider, &mut state, &context, &cancellation).await;
+                    refresh_codex(&provider, &mut state, &context, &cancellation, None).await;
                 } else { enabled = next; }
             },
             _ = interval.tick(), if enabled => {
-                refresh_codex(&provider, &mut state, &context, &cancellation).await;
+                refresh_codex(&provider, &mut state, &context, &cancellation, None).await;
             }
-            request = refresh_requests.recv(), if enabled => {
+            request = refresh_requests.recv() => {
                 if request.is_none() { break; }
-                refresh_codex(&provider, &mut state, &context, &cancellation).await;
+                if enabled {
+                    let request = request.unwrap();
+                    refresh_codex(&provider, &mut state, &context, &cancellation, Some(request.id)).await;
+                } else if let Some(request) = request {
+                    eprintln!("REFRESH: skipped id={} provider=codex reason=disabled_at_execution", request.id);
+                }
+                let settings = lock_settings(&context.config);
+                if !settings.claude_enabled || !settings.claude_cli_refresh_enabled {
+                    // Claude is not part of this request; Codex completes it.
+                    let _ = context.window.upgrade_in_event_loop(|window| window.invoke_refresh_finished());
+                }
             }
         }
     }
@@ -858,13 +1312,29 @@ async fn refresh_codex<P: RateLimitProvider>(
     state: &mut ProviderState,
     context: &WorkerUiContext,
     cancellation: &CancellationToken,
+    request_id: Option<u64>,
 ) {
+    eprintln!(
+        "REFRESH: started id={} provider=codex",
+        request_id.map_or_else(|| "background".into(), |id| id.to_string())
+    );
+    let provider_started = std::time::Instant::now();
     let result = provider.read_rate_limits(cancellation.child_token()).await;
+    eprintln!(
+        "PROVIDER_LATENCY: codex response_ms={}",
+        provider_started.elapsed().as_millis()
+    );
+    let succeeded = result.is_ok();
     match result {
         Ok(limits) => state.record_success(limits, None, now_unix()),
         Err(error) if error.code == "codex_cancelled" && cancellation.is_cancelled() => return,
         Err(error) => state.record_failure(status_for(&error), error),
     }
+    eprintln!(
+        "REFRESH: {} id={} provider=codex",
+        if succeeded { "completed" } else { "failed" },
+        request_id.map_or_else(|| "background".into(), |id| id.to_string())
+    );
     let updated = if let Ok(mut current) = context.current.lock() {
         *current = current.replace_codex(state.snapshot().clone());
         Some(current.clone())
@@ -877,20 +1347,13 @@ async fn refresh_codex<P: RateLimitProvider>(
                 alert_runtime.refresh(&updated, &lock_settings(&context.config), now_unix());
             deliver_alerts(&context.notifier, events, lock_locale(&context.locale));
         }
-        if let Some(window) = context.window.upgrade() {
-            apply_current(&window, &updated, &context.config, &context.locale);
-        }
-        if let Some(panel) = context.settings_window.upgrade() {
-            let settings = lock_settings(&context.config);
-            update_settings_window(
-                &panel,
-                &settings,
-                lock_locale(&context.locale),
-                system_light(&settings),
-                &updated,
-                now_unix(),
-            );
-        }
+        queue_ui_snapshot(
+            context.window.clone(),
+            context.settings_window.clone(),
+            context.current.clone(),
+            context.config.clone(),
+            context.locale.clone(),
+        );
     }
 }
 
@@ -912,6 +1375,70 @@ fn apply_current(
     );
 }
 
+fn apply_latest_to_window(
+    window: &slint::Weak<MainWindow>,
+    snapshot: &SharedSnapshot,
+    config: &SharedSettings,
+    locale: &SharedLocale,
+) {
+    if let (Some(window), Ok(snapshot)) = (window.upgrade(), snapshot.lock()) {
+        apply_current(&window, &snapshot, config, locale);
+    }
+}
+
+/// Provider workers publish snapshots through Slint's event loop. The shared
+/// cache remains authoritative, so a flyout opened later can also apply its
+/// newest value even if it was hidden when this callback was queued.
+fn queue_ui_snapshot(
+    window: slint::Weak<MainWindow>,
+    panel: slint::Weak<SettingsWindow>,
+    snapshot: SharedSnapshot,
+    config: SharedSettings,
+    locale: SharedLocale,
+) {
+    queue_ui_snapshot_for_refresh(window, panel, snapshot, config, locale, None);
+}
+
+fn queue_ui_snapshot_for_refresh(
+    window: slint::Weak<MainWindow>,
+    panel: slint::Weak<SettingsWindow>,
+    snapshot: SharedSnapshot,
+    config: SharedSettings,
+    locale: SharedLocale,
+    refresh_id: Option<u64>,
+) {
+    let queued_at = std::time::Instant::now();
+    let _ = window.upgrade_in_event_loop(move |window| {
+        eprintln!(
+            "UI_PROPAGATION: snapshot_to_event_loop_ms={}",
+            queued_at.elapsed().as_millis()
+        );
+        let Ok(snapshot) = snapshot.lock() else {
+            return;
+        };
+        let snapshot = snapshot.clone();
+        apply_current(&window, &snapshot, &config, &locale);
+        if let Some(id) = refresh_id {
+            eprintln!(
+                "CLAUDE_REFRESH: ui_updated request_id={id} propagation_ms={}",
+                queued_at.elapsed().as_millis()
+            );
+            window.invoke_refresh_finished();
+        }
+        if let Some(panel) = panel.upgrade() {
+            let settings = lock_settings(&config);
+            update_settings_window(
+                &panel,
+                &settings,
+                lock_locale(&locale),
+                system_light(&settings),
+                &snapshot,
+                now_unix(),
+            );
+        }
+    });
+}
+
 fn update_settings_window(
     window: &SettingsWindow,
     settings: &AppSettings,
@@ -925,20 +1452,42 @@ fn update_settings_window(
     window.set_codex_enabled(settings.codex_enabled);
     window.set_claude_enabled(settings.claude_enabled);
     window.set_claude_cli_refresh_enabled(settings.claude_cli_refresh_enabled);
+    let startup_state = std::env::current_exe().and_then(|executable| {
+        autostart::is_enabled_for(&executable).map_err(|error| {
+            eprintln!("AUTOSTART: could not read actual registration state: {error}");
+            std::io::Error::other("autostart registration state unavailable")
+        })
+    });
+    let startup_state_known = startup_state.is_ok();
+    let startup_enabled = startup_state.unwrap_or(false);
+    // Debug-only visual review of the ON / unverified states (UI values only;
+    // the registry is neither read differently nor changed).
+    #[cfg(debug_assertions)]
+    let (startup_state_known, startup_enabled) = match PREVIEW_STARTUP.get().map(String::as_str) {
+        Some("on") => (true, true),
+        Some("error") => (false, false),
+        _ => (startup_state_known, startup_enabled),
+    };
+    window.set_startup_state_known(startup_state_known);
+    window.set_startup_enabled(startup_enabled);
     let icons = provider_icons::local();
-    window.set_codex_icon(icons.codex.clone().unwrap_or_default());
-    window.set_codex_icon_available(icons.codex.is_some());
-    window.set_claude_icon(icons.claude.clone().unwrap_or_default());
-    window.set_claude_icon_available(icons.claude.is_some());
+    let scale = window.window().scale_factor();
+    let codex_icon = icons.icon(provider_icons::Provider::Codex, light, 16.0, scale);
+    let claude_icon = icons.icon(provider_icons::Provider::Claude, light, 16.0, scale);
+    window.set_codex_icon_available(codex_icon.is_some());
+    window.set_codex_icon(codex_icon.unwrap_or_default());
+    window.set_claude_icon_available(claude_icon.is_some());
+    window.set_claude_icon(claude_icon.unwrap_or_default());
+    window.set_warning_threshold(i32::from(settings.warning_threshold));
+    window.set_critical_threshold(i32::from(settings.critical_threshold));
     window.set_alerts_enabled(settings.alerts_enabled);
     window.set_exhausted_alerts_enabled(settings.exhausted_alerts_enabled);
     window.set_include_weekly(settings.include_weekly);
     window.set_theme_kind(adapter::theme_kind(settings.theme_mode, light));
     window.invoke_apply_theme_palette();
-    window.set_accent_color(theme::system_accent_color());
+    theme::apply_title_bar(window.window(), settings.theme_mode);
     window.set_theme_options(
         [
-            SharedString::from(labels.system),
             SharedString::from(labels.graphite),
             SharedString::from(labels.navy),
             SharedString::from(labels.light),
@@ -946,25 +1495,24 @@ fn update_settings_window(
         .into(),
     );
     window.set_theme_index(match settings.theme_mode {
-        ThemeMode::System => 0,
-        ThemeMode::Graphite => 1,
-        ThemeMode::Navy => 2,
-        ThemeMode::Light => 3,
+        ThemeMode::Graphite => 0,
+        ThemeMode::BluishDark => 1,
+        ThemeMode::Light => 2,
     });
     window.set_language_options(
         [
-            SharedString::from(labels.system_language),
             "Українська".into(),
             "English".into(),
             "Polski".into(),
+            "Русский".into(),
         ]
         .into(),
     );
     window.set_language_index(match settings.language {
-        Language::System => 0,
-        Language::Ukrainian => 1,
-        Language::English => 2,
-        Language::Polish => 3,
+        Language::Ukrainian => 0,
+        Language::English => 1,
+        Language::Polish => 2,
+        Language::Russian => 3,
     });
     let warning_options: Vec<SharedString> = [25, 30, 40, 50, 75, 100]
         .into_iter()
@@ -1009,39 +1557,139 @@ fn update_settings_window(
         snapshot.settings_status("codex", settings.codex_enabled, now, locale);
     window.set_codex_state(codex_state.into());
     window.set_codex_description(codex_description.into());
+    window.set_codex_state_level(snapshot.settings_status_level(
+        "codex",
+        settings.codex_enabled,
+        now,
+    ));
     let (claude_state, claude_description) =
         snapshot.settings_status("claude", settings.claude_enabled, now, locale);
     window.set_claude_state(claude_state.into());
     window.set_claude_description(claude_description.into());
+    window.set_claude_state_level(snapshot.settings_status_level(
+        "claude",
+        settings.claude_enabled,
+        now,
+    ));
 
+    let section = |value: &str| SharedString::from(value.to_uppercase());
     window.set_title_label(labels.title.into());
     window.set_general_label(labels.general.into());
     window.set_notifications_label(labels.notifications.into());
     window.set_about_label(labels.about.into());
-    window.set_appearance_label(labels.appearance.into());
-    window.set_providers_label(labels.providers.into());
+    window.set_appearance_label(section(labels.appearance));
+    window.set_providers_label(section(labels.providers));
+    window.set_thresholds_label(section(labels.thresholds));
+    window.set_display_label(section(labels.display));
+    window.set_connections_label(section(labels.connections));
     window.set_theme_name_label(labels.theme.into());
     window.set_language_name_label(labels.language.into());
-    window.set_warning_name_label(labels.warning.into());
-    window.set_critical_name_label(labels.critical.into());
-    window.set_exhausted_name_label(labels.exhausted.into());
-    window.set_weekly_name_label(labels.weekly.into());
-    window.set_duration_name_label(labels.duration.into());
+    window.set_alerts_title(labels.alerts.into());
     window.set_alerts_description(labels.alerts_description.into());
+    window.set_warning_name_label(labels.warning.into());
+    window.set_warning_description(labels.warning_description.into());
+    window.set_critical_name_label(labels.critical.into());
+    window.set_critical_description(labels.critical_description.into());
+    window.set_exhausted_name_label(labels.exhausted.into());
+    window.set_exhausted_description(labels.exhausted_description.into());
+    window.set_weekly_name_label(labels.weekly.into());
+    window.set_weekly_description(labels.weekly_description.into());
+    window.set_duration_name_label(labels.duration.into());
+    window.set_duration_description(labels.duration_description.into());
+    let [critical, warning, normal] = threshold_legend(
+        &labels,
+        settings.warning_threshold,
+        settings.critical_threshold,
+    );
+    window.set_legend_normal(normal.into());
+    window.set_legend_warning(warning.into());
+    window.set_legend_critical(critical.into());
+    window.set_show_test_label(labels.show_test.into());
     window.set_source_note(labels.claude_note.into());
-    window.set_about_product("AgentUsageMonitor".into());
-    window.set_about_tagline(labels.about_tagline.into());
     window.set_claude_refresh_label(labels.claude_refresh.into());
     window.set_claude_refresh_description(labels.claude_refresh_description.into());
+    window.set_startup_label(labels.startup.into());
+    window.set_startup_description(
+        if startup_state_known {
+            labels.startup_description
+        } else {
+            labels.startup_error
+        }
+        .into(),
+    );
+
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    window.set_app_version(version.as_str().into());
+    window.set_about_product("AgentUsageMonitor".into());
+    window.set_about_tagline(labels.about_tagline.into());
     window.set_about_version(format!("{}  {}", labels.version, env!("CARGO_PKG_VERSION")).into());
     window.set_about_author(format!("{}  Valentyn Fetisov", labels.author).into());
     window.set_about_repository(labels.repository.into());
+    window.set_about_report_issue(labels.report_issue.into());
     window.set_about_license(labels.license.into());
     window.set_about_technologies(labels.technologies.into());
+    window.set_about_feature_tray(labels.feature_tray.into());
+    window.set_about_feature_local(labels.feature_local.into());
+    window.set_about_feature_agents(labels.feature_agents.into());
+    window.set_codex_source(labels.codex_source.into());
+    window.set_claude_source(labels.claude_source.into());
+    window.set_legal_note(labels.legal.into());
+    window.set_copyright_line(format!("© 2026 Valentyn Fetisov · {}", labels.license).into());
 }
 
 fn show_settings_centered(window: &SettingsWindow) {
     let _ = window.show();
+    activate_window(window.window());
+    let mode = match window.get_theme_kind() {
+        1 => ThemeMode::BluishDark,
+        2 => ThemeMode::Light,
+        _ => ThemeMode::Graphite,
+    };
+    if !theme::apply_title_bar(window.window(), mode) {
+        retry_title_bar(window.as_weak(), mode, 20);
+    }
+    place_settings(window);
+    // The final scale factor can arrive a few event-loop turns after show()
+    // (per-monitor DPI); place once more with it.
+    let weak = window.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(150), move || {
+        if let Some(window) = weak.upgrade() {
+            place_settings(&window);
+        }
+    });
+}
+
+/// Requests ordinary foreground activation for a window opened by an explicit
+/// tray/menu action. The OS remains responsible for its normal foreground lock.
+fn activate_window(window: &slint::Window) {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        let handle = window.window_handle();
+        let Ok(handle) = handle.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        unsafe {
+            let _ = SetForegroundWindow(handle.hwnd.get() as _);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use slint::winit_030::{WinitWindowAccessor, winit::window::WindowLevel};
+        window.with_winit_window(|native| {
+            native.set_window_level(WindowLevel::Normal);
+            native.focus_window();
+        });
+    }
+}
+
+/// Default size at the window's scale, clamped to the work area of the
+/// monitor under the cursor (outer frame included), centred there.
+fn place_settings(window: &SettingsWindow) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::POINT;
@@ -1060,10 +1708,29 @@ fn show_settings_centered(window: &SettingsWindow) {
             if GetCursorPos(&mut cursor) != 0 {
                 let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
                 if !monitor.is_null() && GetMonitorInfoW(monitor, &mut monitor_info) != 0 {
-                    let size = window.window().size();
                     let area = monitor_info.rcWork;
+                    // Keep the whole window inside the work area on small
+                    // screens or high DPI; the content scrolls when shortened.
+                    // `size()` is the client area; reserve the native title bar
+                    // (~32 logical px) so the outer window also fits.
+                    let scale = window.window().scale_factor();
+                    let margin = (16.0 * scale).round() as i32;
+                    let caption = (32.0 * scale).round() as i32;
+                    let max_width = (area.right - area.left - 2 * margin).max(1) as u32;
+                    let max_height = (area.bottom - area.top - 2 * margin - caption).max(1) as u32;
+                    // Open at the default size (fits the whole About page)
+                    // at the window's actual scale, never larger than the
+                    // work area. `size()` can still report the pre-show size
+                    // here, so it is computed from the logical default.
+                    let logical = slint::LogicalSize::new(
+                        window.get_default_width().min(max_width as f32 / scale),
+                        window.get_default_height().min(max_height as f32 / scale),
+                    );
+                    window.window().set_size(logical);
+                    let size = logical.to_physical(scale);
                     let x = area.left + ((area.right - area.left - size.width as i32) / 2);
-                    let y = area.top + ((area.bottom - area.top - size.height as i32) / 2);
+                    let y = area.top
+                        + ((area.bottom - area.top - size.height as i32 - caption) / 2).max(0);
                     window
                         .window()
                         .set_position(slint::PhysicalPosition::new(x, y));
@@ -1073,14 +1740,37 @@ fn show_settings_centered(window: &SettingsWindow) {
     }
 }
 
+/// The native window can be created a few event-loop turns after show();
+/// retry the title-bar coloring briefly until the handle exists.
+fn retry_title_bar(window: slint::Weak<SettingsWindow>, mode: ThemeMode, attempts: u8) {
+    if attempts == 0 {
+        return;
+    }
+    slint::Timer::single_shot(Duration::from_millis(50), move || {
+        if let Some(panel) = window.upgrade() {
+            if !theme::apply_title_bar(panel.window(), mode) {
+                retry_title_bar(panel.as_weak(), mode, attempts - 1);
+            }
+        }
+    });
+}
+
 fn open_repository() {
+    open_url("https://github.com/valenticus/agent-usage-monitor");
+}
+
+fn open_issues() {
+    open_url("https://github.com/valenticus/agent-usage-monitor/issues");
+}
+
+fn open_url(address: &str) {
+    #[cfg(not(windows))]
+    let _ = address;
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
         let operation: Vec<u16> = "open\0".encode_utf16().collect();
-        let url: Vec<u16> = "https://github.com/valenticus/agent-usage-monitor\0"
-            .encode_utf16()
-            .collect();
+        let url: Vec<u16> = address.encode_utf16().chain(std::iter::once(0)).collect();
         let _ = ShellExecuteW(
             std::ptr::null_mut(),
             operation.as_ptr(),
@@ -1128,15 +1818,13 @@ fn apply_popup_taskbar_style(window: &MainWindow) -> bool {
 
 fn system_light(settings: &AppSettings) -> bool {
     match settings.theme_mode {
-        ThemeMode::Graphite | ThemeMode::Navy => false,
+        ThemeMode::Graphite | ThemeMode::BluishDark => false,
         ThemeMode::Light => true,
-        ThemeMode::System => theme::system_prefers_light(),
     }
 }
 
 fn resolve_locale(settings: &AppSettings) -> Locale {
-    let system = localization::system_language();
-    Locale::resolve(settings.language, system.as_deref())
+    Locale::resolve(settings.language)
 }
 fn lock_settings(settings: &SharedSettings) -> AppSettings {
     settings
@@ -1151,30 +1839,27 @@ fn valid_settings_tab(tab: i32) -> bool {
     (0..=2).contains(&tab)
 }
 
-fn popup_visible_after_toggle(currently_visible: bool) -> bool {
-    !currently_visible
-}
 fn set_theme(settings: &mut AppSettings, value: &str, locale: Locale) {
     let labels = locale.settings();
     settings.theme_mode = if value == labels.graphite {
         ThemeMode::Graphite
     } else if value == labels.navy {
-        ThemeMode::Navy
+        ThemeMode::BluishDark
     } else if value == labels.light {
         ThemeMode::Light
     } else {
-        ThemeMode::System
+        ThemeMode::Graphite
     };
 }
-fn set_language(settings: &mut AppSettings, value: &str, locale: Locale) {
+fn set_language(settings: &mut AppSettings, value: &str, _locale: Locale) {
     settings.language = if value == "Українська" {
         Language::Ukrainian
     } else if value == "English" {
         Language::English
     } else if value == "Polski" {
         Language::Polish
-    } else if value == locale.settings().system_language {
-        Language::System
+    } else if value == "Русский" {
+        Language::Russian
     } else {
         return;
     };
@@ -1218,6 +1903,53 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threshold_legend_matches_scale_order_and_uses_configured_thresholds() {
+        let uk = threshold_legend(&Locale::Uk.settings(), 30, 15);
+        assert_eq!(
+            uk,
+            [
+                "Критично до 15%",
+                "Попередження 15\u{2060}–\u{2060}30%",
+                "Норма понад 30%"
+            ]
+        );
+        let en = threshold_legend(&Locale::En.settings(), 25, 10);
+        assert_eq!(
+            en,
+            [
+                "Critical up to 10%",
+                "Warning 10\u{2060}–\u{2060}25%",
+                "Normal above 25%"
+            ]
+        );
+        for locale in [Locale::Uk, Locale::Pl, Locale::En, Locale::Ru] {
+            let legend = threshold_legend(&locale.settings(), 25, 10);
+            assert!(legend[0].ends_with(" 10%"));
+            assert!(legend[1].ends_with(" 10\u{2060}–\u{2060}25%"));
+            // Only the space between label and range is a line-break opportunity.
+            assert!(!legend[1].contains(" 10–") && !legend[1].contains("– "));
+            assert!(legend[2].ends_with(" 25%"));
+        }
+    }
+
+    #[test]
+    fn repeated_manual_refresh_requests_coalesce_in_bounded_provider_queue() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        assert!(queue_manual_refresh(
+            "claude",
+            &sender,
+            ManualRefreshRequest { id: 1 }
+        ));
+        assert!(queue_manual_refresh(
+            "claude",
+            &sender,
+            ManualRefreshRequest { id: 2 }
+        ));
+        assert_eq!(receiver.try_recv().unwrap().id, 1);
+        assert!(receiver.try_recv().is_err());
+    }
     #[test]
     fn only_missing_cli_maps_to_unavailable() {
         assert_eq!(
@@ -1243,7 +1975,7 @@ mod tests {
             ..Default::default()
         }));
         assert!(!system_light(&AppSettings {
-            theme_mode: ThemeMode::Navy,
+            theme_mode: ThemeMode::BluishDark,
             ..Default::default()
         }));
         assert!(system_light(&AppSettings {
@@ -1266,12 +1998,10 @@ mod tests {
         let mut settings = AppSettings::default();
         set_theme(&mut settings, "Графітова", Locale::Uk);
         assert_eq!(settings.theme_mode, ThemeMode::Graphite);
-        set_theme(&mut settings, "Темно-синя", Locale::Uk);
-        assert_eq!(settings.theme_mode, ThemeMode::Navy);
+        set_theme(&mut settings, "Синювата темна", Locale::Uk);
+        assert_eq!(settings.theme_mode, ThemeMode::BluishDark);
         set_theme(&mut settings, "Світла", Locale::Uk);
         assert_eq!(settings.theme_mode, ThemeMode::Light);
-        set_theme(&mut settings, "Системна", Locale::Uk);
-        assert_eq!(settings.theme_mode, ThemeMode::System);
 
         set_language(&mut settings, "Українська", Locale::En);
         assert_eq!(settings.language, Language::Ukrainian);
@@ -1279,8 +2009,8 @@ mod tests {
         assert_eq!(settings.language, Language::English);
         set_language(&mut settings, "Polski", Locale::En);
         assert_eq!(settings.language, Language::Polish);
-        set_language(&mut settings, "System", Locale::En);
-        assert_eq!(settings.language, Language::System);
+        set_language(&mut settings, "Русский", Locale::En);
+        assert_eq!(settings.language, Language::Russian);
     }
 
     #[test]
@@ -1314,12 +2044,6 @@ mod tests {
         assert!(!loaded.codex_enabled);
         assert!(!loaded.claude_enabled);
         assert!(loaded.alerts_enabled);
-    }
-
-    #[test]
-    fn tray_popup_toggle_switches_between_open_and_hidden_states() {
-        assert!(popup_visible_after_toggle(false));
-        assert!(!popup_visible_after_toggle(true));
     }
 
     #[test]

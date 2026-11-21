@@ -1,4 +1,776 @@
-import { Button, ComboBox, Palette, ScrollView, Switch } from "std-widgets.slint";
+import { Palette } from "std-widgets.slint";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Design tokens (docs/design/AUM-design-spec-FINAL-v4.md, "Кольори").
+// kind: 0 = Graphite (default), 1 = Bluish Dark, 2 = Light.
+// Status levels: 0 = normal, 1 = warning, 2 = critical, 3 = neutral / no data.
+// ─────────────────────────────────────────────────────────────────────────────
+export global Theme {
+    in-out property <int> kind: 0;
+    out property <bool> light: kind == 2;
+    out property <bool> bluish: kind == 1;
+
+    out property <color> window-bg: light ? #f3f3f3 : (bluish ? #121923 : #202020);
+    out property <color> sidebar-bg: light ? #e8e8e8 : (bluish ? #0e141c : #1b1b1b);
+    out property <color> card-bg: light ? #ffffff : (bluish ? #19212d : #2b2b2b);
+    out property <color> input-bg: light ? #ffffff : (bluish ? #151c27 : #262626);
+    out property <color> button-bg: light ? #ffffff : (bluish ? #161e29 : #242424);
+    out property <color> border: light ? #dadada : (bluish ? #243040 : #3a3a3a);
+    out property <color> input-border: light ? #d9d9d9 : (bluish ? #2c3a4d : #3a3a3a);
+    out property <color> plan-border: light ? #d4d4d4 : (bluish ? #33425a : #4a4a4a);
+    out property <color> track: light ? #e3e5e8 : (bluish ? #2a3240 : #404040);
+    // Thin, low-contrast separator between providers in the cardless flyout.
+    out property <color> flyout-divider: light ? #dadada : (bluish ? #222c3a : #323232);
+    // Compact theme-aware tray context menu.
+    out property <color> menu-bg: light ? #fafafa : (bluish ? #192331 : #202020);
+    out property <color> menu-hover: light ? #ececec : (bluish ? #29384a : #333333);
+    out property <color> menu-pressed: light ? #e2e2e2 : (bluish ? #314459 : #3b3b3b);
+    out property <color> menu-divider: light ? #e2e2e2 : (bluish ? #263345 : #333333);
+    out property <color> hover: light ? #00000012 : #ffffff14;
+    out property <color> pressed: light ? #0000001f : #ffffff24;
+    out property <color> nav-active: light ? #00000012 : #ffffff14;
+    out property <color> popup-shadow: light ? #00000026 : #00000066;
+
+    // Text hierarchy. Light uses darker neutrals for readability:
+    // primary #171717, secondary #424242, status/reset #525252, disabled #737373.
+    out property <color> text-primary: light ? #171717 : (bluish ? #eaf0f6 : #f3f3f3);
+    out property <color> text-secondary: light ? #424242 : (bluish ? #b4bfcb : #c8c8c8);
+    out property <color> text-muted: light ? #525252 : (bluish ? #8c97a4 : #9c9c9c);
+    out property <color> text-disabled: light ? #737373 : (bluish ? #6b7684 : #7a7a7a);
+    out property <color> accent: light ? #4f6a8f : #6f87a8;
+
+    // Switches: neutral monochrome in every theme (never an accent colour).
+    // ON = darker/stronger grey track, white knob right; OFF = lighter grey
+    // track (with a grey outline on Light), white knob left. The knob also
+    // moves and grows, so the state never relies on colour alone.
+    out property <color> toggle-on-track: light ? #5c5c5c : #737373;
+    out property <color> toggle-on-track-hover: light ? #4d4d4d : #808080;
+    out property <color> toggle-off-track: light ? #d4d4d4 : #474747;
+    out property <color> toggle-off-track-hover: light ? #c8c8c8 : #525252;
+    out property <color> toggle-off-border: light ? #ababab : #5c5c5c;
+    out property <color> toggle-knob: #ffffff;
+
+    // Semantic quota colours. Warning is the approved natural yellow #FACC15
+    // in every theme (bars, legend dots, tray); small warning *text* on Light
+    // uses the darker #A16207 for contrast.
+    out property <color> warning-yellow: #facc15;
+    public pure function level-bar(level: int) -> color {
+        if (level == 0) { return light ? #1e9e64 : #5fbf8f; }
+        if (level == 1) { return warning-yellow; }
+        if (level == 2) { return light ? #d13b4a : #e4707a; }
+        return light ? #aab3bc : #6b7380;
+    }
+    public pure function level-text(level: int) -> color {
+        if (level == 0) { return light ? #167c52 : #5fbf8f; }
+        if (level == 1) { return light ? #a16207 : warning-yellow; }
+        if (level == 2) { return light ? #c0283a : #e4707a; }
+        return text-muted;
+    }
+    public pure function level-chip(level: int) -> color {
+        if (level == 0) { return light ? #1e9e641f : #5fbf8f24; }
+        if (level == 1) { return light ? #facc1533 : #facc1526; }
+        if (level == 2) { return light ? #d13b4a1f : #e4707a24; }
+        return light ? #0000000f : #ffffff14;
+    }
+    // Legend dots show the same colour as the scale segment they describe.
+    public pure function legend-dot(level: int) -> color {
+        return level-bar(level);
+    }
+    public pure function level-for(value: float, available: bool, warning: int, critical: int) -> int {
+        if (!available) { return 3; }
+        if (value <= critical) { return 2; }
+        if (value <= warning) { return 1; }
+        return 0;
+    }
+}
+
+// Shared UI typeface. Segoe UI Variable Text is resolved through fontique
+// (DirectWrite system collection) and its wght axis is applied, so 400/500/600
+// are real instances, not synthesized bold.
+export global Typography {
+    in-out property <string> family: "Segoe UI Variable Text";
+}
+
+// Settings navigation icons (own drawings in the sliders-horizontal / bell /
+// info shapes), on a 16×16 grid that maps 1:1 to the 16 px icon at 100 %:
+// every horizontal and vertical stroke runs through a pixel centre (x.5), so
+// a stroke covers one full pixel row/column instead of being smeared across
+// two (the 24-grid set put lines at e.g. y = 5.33 px, which looked heavy and
+// blurry). All three share one stroke width and optical size.
+global NavIcons {
+    // Three tracks 4 px apart; each track has a 3 px break (≥ 1.5 px clear
+    // gap after the round caps) with a short vertical knob on one edge of it.
+    out property <string> sliders: "M2.5 4.5H8.5 M11.5 4.5H14.5 M11.5 2.5V6.5 M2.5 8.5H5.5 M8.5 8.5H14.5 M5.5 6.5V10.5 M2.5 12.5H9.5 M12.5 12.5H14.5 M12.5 10.5V14.5";
+    // Bell: 8 px body with a rounded top on a base line, and a separate
+    // clapper arc 1 px clear of the base.
+    out property <string> bell: "M4.5 10.5V6.5a4 4 0 0 1 8 0V10.5 M2.5 10.5H14.5 M7 13a1.5 1.5 0 0 0 3 0";
+    // Info: 12 px circle, stem and dot on the same centre column.
+    out property <string> info: "M14.5 8.5a6 6 0 1 1 -12 0a6 6 0 1 1 12 0 M8.5 7.5V11.5 M8.5 5.5h0.01";
+}
+
+// Line icons on a 24×24 grid (own drawings, not third-party artwork), drawn
+// with one thin stroke (Icon.stroke) at a 16 px optical size.
+global Icons {
+    // Two slider tracks with round knobs (8 grid units apart so the tracks do
+    // not merge into a solid glyph at 16 px).
+    out property <string> sliders: "M4 8h2.5 M11.5 8H20 M11.5 8a2.5 2.5 0 1 0 -5 0a2.5 2.5 0 1 0 5 0 M4 16h8.5 M17.5 16H20 M17.5 16a2.5 2.5 0 1 0 -5 0a2.5 2.5 0 1 0 5 0";
+    // Window with an outward arrow (context menu "Open").
+    out property <string> open: "M13.5 4H20v6.5 M20 4l-8 8 M18 14.5V19a1 1 0 0 1 -1 1H5a1 1 0 0 1 -1 -1V7a1 1 0 0 1 1 -1h4.5";
+    // Power symbol (context menu "Exit").
+    out property <string> power: "M12 3.5v8 M7.4 6.6a7 7 0 1 0 9.2 0";
+    out property <string> bell: "M6 17V11a6 6 0 0 1 12 0v6l1.5 1.5h-15z M10 21h4";
+    out property <string> info: "M21 12a9 9 0 1 1 -18 0a9 9 0 1 1 18 0 M12 11v5.5 M12 7.6v0.2";
+    out property <string> refresh: "M20 12a8 8 0 1 1 -2.34 -5.66 M20 4v4.5h-4.5";
+    // Eight-tooth settings gear with a hub (own drawing).
+    out property <string> gear: "M18.95 10.14 L21.48 10.5 L21.48 13.5 L18.95 13.86 L18.24 15.6 L19.77 17.64 L17.64 19.77 L15.6 18.24 L13.86 18.95 L13.5 21.48 L10.5 21.48 L10.14 18.95 L8.4 18.24 L6.36 19.77 L4.23 17.64 L5.76 15.6 L5.05 13.86 L2.52 13.5 L2.52 10.5 L5.05 10.14 L5.76 8.4 L4.23 6.36 L6.36 4.23 L8.4 5.76 L10.14 5.05 L10.5 2.52 L13.5 2.52 L13.86 5.05 L15.6 5.76 L17.64 4.23 L19.77 6.36 L18.24 8.4 Z M15 12a3 3 0 1 1 -6 0a3 3 0 1 1 6 0";
+    out property <string> close: "M6.5 6.5l11 11 M17.5 6.5l-11 11";
+    out property <string> chevron: "M6.5 9.5l5.5 5.5l5.5 -5.5";
+    out property <string> external: "M8 16l8 -8 M9.5 8h6.5v6.5";
+    out property <string> lock: "M6.5 11h11v9h-11z M8.5 11V8a3.5 3.5 0 0 1 7 0v3";
+    out property <string> shield: "M12 3l7 3v5.5c0 4.5 -3 7.5 -7 9.5c-4 -2 -7 -5 -7 -9.5V6z";
+}
+
+component Icon inherits Rectangle {
+    in property <string> commands;
+    in property <color> tint: Theme.text-secondary;
+    in property <length> stroke: 1.5px;
+    // Drawing grid of `commands` (24 for the general set, 16 for NavIcons).
+    in property <float> grid: 24;
+    width: 16px;
+    height: 16px;
+    Path {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: root.grid;
+        viewbox-height: root.grid;
+        commands: root.commands;
+        stroke: root.tint;
+        stroke-width: root.stroke;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
+}
+
+// Provider mark: shown only when a user-supplied official file exists for the
+// current theme (see provider_icons.rs). There is no invented fallback glyph:
+// without a permitted official asset the card shows the provider name only.
+component ProviderMark inherits Rectangle {
+    in property <image> source;
+    // Raster marks are pre-scaled to exactly size × scale device pixels.
+    in property <length> size: 16px;
+    width: root.size;
+    height: root.size;
+    Image {
+        width: root.width;
+        height: root.height;
+        source: root.source;
+        image-fit: contain;
+    }
+}
+
+// AUM brand symbol: two vertical bars (left Codex, right Claude) on a dark tile.
+component AumMark inherits Rectangle {
+    in property <length> size: 32px;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size * 56 / 256;
+    background: @linear-gradient(180deg, #252f3e 0%, #0f141b 100%);
+    for bar[index] in [{ x: 58, fill: 0.8, green: true }, { x: 146, fill: 0.46, green: false }]: Rectangle {
+        x: root.size * bar.x / 256;
+        y: root.size * 52 / 256;
+        width: root.size * 52 / 256;
+        height: root.size * 152 / 256;
+        border-radius: root.size * 15 / 256;
+        background: #ffffff2e;
+        clip: true;
+        Rectangle {
+            x: 0px;
+            y: parent.height * (1 - bar.fill);
+            width: parent.width;
+            height: parent.height * bar.fill;
+            border-radius: root.size * 15 / 256;
+            background: bar.green ? #5fbf8f : #d6a84f;
+        }
+    }
+}
+
+component ToggleSwitch inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled();
+    width: 40px;
+    height: 22px;
+    // Disabled switches stay visible on every theme (0.4 nearly hid the
+    // light OFF track on white cards).
+    opacity: root.enabled ? 1 : 0.55;
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.toggled(); }
+
+    track := Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: self.height / 2;
+        background: root.checked
+            ? (touch.has-hover ? Theme.toggle-on-track-hover : Theme.toggle-on-track)
+            : (touch.has-hover ? Theme.toggle-off-track-hover : Theme.toggle-off-track);
+        border-width: root.checked ? 0px : 1px;
+        border-color: Theme.toggle-off-border;
+        animate background { duration: 120ms; }
+    }
+    knob := Rectangle {
+        property <length> base: root.checked ? 16px : 12px;
+        width: touch.pressed ? self.base + 3px : self.base;
+        height: self.base;
+        x: root.checked ? (root.width - 3px - self.width) : (touch.pressed ? 5px : 5px);
+        y: (root.height - self.height) / 2;
+        border-radius: self.height / 2;
+        background: Theme.toggle-knob;
+        animate x, width, height { duration: 140ms; easing: ease-out; }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(); }
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+component Card inherits Rectangle {
+    background: Theme.card-bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout {
+        @children
+    }
+}
+
+component SectionLabel inherits Text {
+    height: 24px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    color: Theme.text-secondary;
+    vertical-alignment: center;
+}
+
+component StatusChip inherits Rectangle {
+    in property <string> text;
+    in property <int> level: 0;
+    height: 20px;
+    border-radius: 10px;
+    background: Theme.level-chip(root.level);
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            font-size: 12px;
+            color: Theme.level-text(root.level);
+            vertical-alignment: center;
+        }
+    }
+}
+
+component PlanChip inherits Rectangle {
+    in property <string> text;
+    height: 18px;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: Theme.plan-border;
+    background: transparent;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            font-size: 12px;
+            color: Theme.text-secondary;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> active;
+    callback clicked();
+    height: 40px;
+    border-radius: 8px;
+    background: root.active ? Theme.nav-active : (touch.pressed ? Theme.pressed : (touch.has-hover ? Theme.hover : transparent));
+    accessible-role: tab;
+    accessible-label: root.text;
+    Icon {
+        x: 14px;
+        y: 12px;
+        commands: root.icon;
+        grid: 16;
+        // Same geometry, stroke and colour in both states: the active item is
+        // shown by its background (and label), never by a heavier icon.
+        tint: Theme.text-secondary;
+    }
+    Text {
+        x: 42px;
+        width: root.width - 50px;
+        height: root.height;
+        text: root.text;
+        font-size: 13px;
+        font-weight: root.active ? 500 : 400;
+        color: root.active ? Theme.text-primary : Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component HeaderButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> tooltip;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: !root.enabled ? transparent : (touch.pressed ? Theme.pressed : (touch.has-hover ? Theme.hover : transparent));
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: button;
+    accessible-label: root.tooltip;
+    Icon {
+        x: 6px;
+        y: 6px;
+        commands: root.icon;
+        tint: Theme.text-secondary;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SettingsButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> external: false;
+    in property <bool> small: false;
+    callback clicked();
+    height: root.small ? 24px : 32px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.input-border;
+    background: Theme.button-bg;
+    accessible-role: button;
+    accessible-label: root.text;
+    Rectangle {
+        border-radius: parent.border-radius;
+        background: touch.pressed ? Theme.pressed : (touch.has-hover ? Theme.hover : transparent);
+    }
+    HorizontalLayout {
+        padding-left: root.small ? 12px : 14px;
+        padding-right: root.small ? 12px : 14px;
+        spacing: 10px;
+        alignment: center;
+        Text {
+            text: root.text;
+            font-size: 13px;
+            font-weight: 500;
+            color: Theme.text-primary;
+            vertical-alignment: center;
+        }
+        if root.external: VerticalLayout {
+            alignment: center;
+            Icon {
+                width: 14px;
+                height: 14px;
+                commands: Icons.external;
+                tint: Theme.text-primary;
+            }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Dropdown inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index;
+    in property <bool> open-up: false;
+    callback selected(string);
+    property <length> item-height: 32px;
+    property <length> popup-height: root.model.length * root.item-height + 8px;
+    height: 34px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.input-border;
+    background: Theme.input-bg;
+    accessible-role: combobox;
+    accessible-value: root.model[root.current-index];
+    Rectangle {
+        border-radius: parent.border-radius;
+        background: touch.pressed ? Theme.pressed : (touch.has-hover ? Theme.hover : transparent);
+    }
+    Text {
+        x: 13px;
+        width: root.width - 46px;
+        height: root.height;
+        text: root.model[root.current-index];
+        font-size: 13px;
+        color: Theme.text-primary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Icon {
+        x: root.width - 28px;
+        y: (root.height - 14px) / 2;
+        width: 14px;
+        height: 14px;
+        commands: Icons.chevron;
+        tint: Theme.text-secondary;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { popup.show(); }
+    }
+    popup := PopupWindow {
+        x: 0px;
+        y: root.open-up ? -root.popup-height - 4px : root.height + 4px;
+        width: root.width;
+        height: root.popup-height;
+        Rectangle {
+            background: Theme.input-bg;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.input-border;
+            drop-shadow-blur: 12px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.popup-shadow;
+            VerticalLayout {
+                padding: 4px;
+                for item[index] in root.model: option := Rectangle {
+                    height: root.item-height;
+                    border-radius: 4px;
+                    background: option-touch.has-hover ? Theme.hover : (index == root.current-index ? Theme.nav-active : transparent);
+                    Text {
+                        x: 9px;
+                        width: parent.width - 18px;
+                        height: parent.height;
+                        text: item;
+                        font-size: 13px;
+                        font-weight: index == root.current-index ? 500 : 400;
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    option-touch := TouchArea {
+                        clicked => {
+                            root.current-index = index;
+                            root.selected(item);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One row inside a settings card: title, optional description, trailing control.
+component SettingsRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> strong: false;
+    // The description reports a problem (e.g. state could not be verified).
+    in property <bool> error: false;
+    in property <length> vertical-padding: 7px;
+    min-height: 54px;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 24px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            padding-top: root.vertical-padding;
+            padding-bottom: root.vertical-padding;
+            spacing: 0px;
+            Text {
+                text: root.title;
+                font-size: root.strong ? 14px : 13px;
+                font-weight: root.strong ? 600 : 400;
+                color: Theme.text-primary;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                font-size: 12px;
+                color: root.error ? Theme.level-text(1) : Theme.text-muted;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            @children
+        }
+    }
+}
+
+// Settings provider header: mark, name, connection chip, update age, switch.
+component ProviderSettingsHeader inherits Rectangle {
+    in property <string> name;
+    in property <string> state;
+    in property <int> state-level;
+    in property <string> detail;
+    in property <bool> enabled;
+    in property <image> icon;
+    in property <bool> has-icon;
+    callback toggled();
+    min-height: 73px;
+    // [official mark] | name + chip / wrapping detail | switch. The detail text
+    // wraps (never truncates) so diagnostic messages stay readable in UA/PL/EN/RU.
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 15px;
+        padding-bottom: 11px;
+        spacing: 11px;
+        if root.has-icon: VerticalLayout {
+            padding-top: 5px;
+            alignment: start;
+            ProviderMark { source: root.icon; }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 1px;
+            alignment: start;
+            HorizontalLayout {
+                height: 26px;
+                spacing: 10px;
+                alignment: start;
+                Text {
+                    text: root.name;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    StatusChip {
+                        text: root.state;
+                        level: root.state-level;
+                    }
+                }
+            }
+            Text {
+                text: root.detail;
+                font-size: 12px;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            padding-top: 5px;
+            padding-left: 13px;
+            alignment: start;
+            ToggleSwitch {
+                checked: root.enabled;
+                toggled => { root.toggled(); }
+            }
+        }
+    }
+}
+
+// One legend entry: colour dot + label (left-aligned after the dot). A label
+// that has to wrap keeps the dot centred on its first line (13 px text,
+// ~17 px line).
+component LegendItem inherits HorizontalLayout {
+    in property <int> level;
+    in property <string> text;
+    spacing: 6px;
+    VerticalLayout {
+        padding-top: 4px;
+        alignment: start;
+        Rectangle {
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: Theme.legend-dot(root.level);
+        }
+    }
+    Text {
+        text: root.text;
+        font-size: 13px;
+        color: Theme.text-secondary;
+        wrap: word-wrap;
+    }
+}
+
+// Three-band warning/critical threshold visualisation with legend.
+component ThresholdBar inherits Rectangle {
+    in property <int> warning-threshold: 25;
+    in property <int> critical-threshold: 10;
+    in property <string> normal-label;
+    in property <string> warning-label;
+    in property <string> critical-label;
+    property <length> bar-width: root.width - 32px;
+    property <length> critical-width: root.bar-width * clamp(root.critical-threshold, 0, 100) / 100;
+    property <length> warning-width: root.bar-width * clamp(root.warning-threshold - root.critical-threshold, 0, 100) / 100;
+    property <length> gap: 2px;
+    if root.critical-width > 0px: Rectangle {
+        x: 16px;
+        y: 14px;
+        width: max(0px, root.critical-width - root.gap / 2);
+        height: 8px;
+        border-top-left-radius: 4px;
+        border-bottom-left-radius: 4px;
+        background: Theme.level-bar(2);
+    }
+    if root.warning-width > 0px: Rectangle {
+        x: 16px + root.critical-width + (root.critical-width > 0px ? root.gap / 2 : 0px);
+        y: 14px;
+        width: max(0px, root.warning-width - root.gap);
+        height: 8px;
+        border-top-left-radius: root.critical-width > 0px ? 0px : 4px;
+        border-bottom-left-radius: root.critical-width > 0px ? 0px : 4px;
+        background: Theme.level-bar(1);
+    }
+    Rectangle {
+        x: 16px + root.critical-width + root.warning-width + root.gap / 2;
+        y: 14px;
+        width: max(0px, root.bar-width - root.critical-width - root.warning-width - root.gap / 2);
+        height: 8px;
+        border-top-right-radius: 4px;
+        border-bottom-right-radius: 4px;
+        background: Theme.level-bar(0);
+    }
+    // Legend: same left-to-right order as the scale (critical, warning,
+    // normal). The three entries are sized by their measured text and
+    // spread over exactly the scale width (first on its left edge, last on its
+    // right edge, at least 12 px apart). Only when the three labels do not
+    // fit on one line does the layout shrink them and a label wraps between
+    // words (the number range itself never breaks, see threshold_legend()).
+    // The block grows with the wrapped height.
+    legend := HorizontalLayout {
+        x: 16px;
+        y: 30px;
+        width: root.bar-width;
+        height: self.preferred-height;
+        spacing: 12px;
+        alignment: space-between;
+        // Only the middle entry (the longest label in every language) gives
+        // way when space is short; the outer entries keep their width.
+        LegendItem {
+            horizontal-stretch: 0;
+            level: 2;
+            text: root.critical-label;
+        }
+        LegendItem {
+            horizontal-stretch: 1;
+            level: 1;
+            text: root.warning-label;
+        }
+        LegendItem {
+            horizontal-stretch: 0;
+            level: 0;
+            text: root.normal-label;
+        }
+    }
+    height: legend.y + legend.height + 10px;
+}
+
+component FeatureRow inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    height: 40px;
+    Icon {
+        x: 17px;
+        y: (root.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        commands: root.icon;
+        tint: Theme.text-secondary;
+    }
+    Text {
+        x: 45px;
+        width: root.width - 61px;
+        height: root.height;
+        text: root.text;
+        font-size: 13px;
+        color: Theme.text-primary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// ─────────────────────────────── Flyout ──────────────────────────────────────
+// One window, two presentations of the same data:
+//   compact = hover / temporary preview (no header buttons),
+//   full    = pinned flyout (refresh, settings, close; draggable header).
+
+// Shared column grid of the flyout (logical px). One grid for compact and
+// full presentations: label | 10 | bar (rest) | 12 | percent | 16 | reset.
+// Checked on screen in UA/PL/EN/RU: the longest labels ("Тиждень",
+// "5 godz.", "Tydzień") fit 56 px at 12 px; "100%" fits 40 px at 13 px
+// medium; the longest countdowns ("4 год 59 хв", "4 ч 59 мин") fit 78 px.
+//
+// Shared row centreline. Every row is ONE horizontal layout whose children
+// are all centred on the row; text is laid out on its line box
+// (ascent 2210 + descent 514, Segoe UI / Segoe UI Variable, 2048 units/em),
+// so a text's optical centre is not the box centre:
+// - mixed-case text (labels, countdowns, names, status) has its optical
+//   centre between cap height (1434) and x-height (1024):
+//   (2210 - 514) / 2 - (1434 + 1024) / 4 = 233.5 units = 0.114 em below the
+//   box centre;
+// - digit-only text ("98%") is centred on the cap height:
+//   0.064 em below the box centre, i.e. 0.05 em above the mixed axis.
+// The row axis is the mixed-text optical centre. Shapes (icon, dot, bar)
+// are moved onto it, and digits by the remaining 0.05 em. All offsets come
+// from these metrics, are the same for every language, and are rounded to
+// whole logical pixels so shapes keep crisp edges.
+global FlyoutGrid {
+    out property <length> side-pad: 16px;
+    out property <length> label-width: 56px;
+    out property <length> label-gap: 10px;
+    out property <length> bar-gap: 12px;
+    out property <length> percent-width: 40px;
+    out property <length> reset-gap: 16px;
+    out property <length> reset-width: 78px;
+    out property <length> bar-height: 6px;
+    out property <length> percent-font-size: 13px;
+    out property <length> header-font-size: 14px;
+    // Quota rows: 12/13 px text → round(13 × 0.114) = 1 px.
+    out property <length> quota-shape-offset: round(self.percent-font-size * 233.5 / 2048 / 1px) * 1px;
+    // "98%": round(13 × 0.05) = 1 px.
+    out property <length> digit-offset: round(self.percent-font-size * 102.5 / 2048 / 1px) * 1px;
+    // Header rows mix a 14 px name and 12 px status: the axis uses their
+    // mean size, round(13 × 0.114) = 1 px.
+    out property <length> status-font-size: 12px;
+    out property <length> header-shape-offset: round((self.header-font-size + self.status-font-size) / 2 * 233.5 / 2048 / 1px) * 1px;
+}
+
+// Centres one shape on a row and then moves it down by `offset`, onto the
+// row's text axis (padding-top of 2 × offset shifts a centred child by offset).
+component AxisSlot inherits VerticalLayout {
+    in property <length> offset;
+    alignment: center;
+    padding-top: root.offset * 2;
+    @children
+}
 
 component QuotaRow inherits Rectangle {
     in property <string> label;
@@ -6,36 +778,78 @@ component QuotaRow inherits Rectangle {
     in property <string> reset;
     in property <float> value;
     in property <bool> available;
-    in property <int> theme-kind;
-    background: transparent;
-    height: 26px;
-    Text { x: 0px; y: 0px; width: 52px; height: 20px; text: root.label; color: root.theme-kind == 2 ? #66717e : #b5b5b5; font-size: 10px; vertical-alignment: center; }
-    Rectangle {
-        x: 56px; y: 7px; width: 102px; height: 7px; border-radius: 4px;
-        background: root.theme-kind == 2 ? #e0e5ea : (root.theme-kind == 0 ? #3a3a3a : #293440);
-        Rectangle {
-            x: 0px; y: 0px;
-            width: root.available ? parent.width * min(100, max(0, root.value)) / 100 : 0px;
-            height: parent.height; border-radius: 4px;
-            background: {
-                if (!root.available) { root.theme-kind == 2 ? #aab3bc : #46515d }
-                else if (root.value < 25) { #e35c65 }
-                else if (root.value < 50) { #dca743 }
-                else { #51ae7c }
+    in property <int> warning-threshold;
+    in property <int> critical-threshold;
+    in property <bool> compact: false;
+    property <int> level: Theme.level-for(root.value, root.available, root.warning-threshold, root.critical-threshold);
+    height: root.compact ? 24px : 28px;
+    // One row layout: label | gap | bar | gap | percent | gap | countdown.
+    HorizontalLayout {
+        spacing: 0px;
+        Text {
+            width: FlyoutGrid.label-width;
+            text: root.label;
+            font-size: 12px;
+            color: Theme.text-secondary;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle { width: FlyoutGrid.label-gap; }
+        AxisSlot {
+            horizontal-stretch: 1;
+            offset: FlyoutGrid.quota-shape-offset;
+            Rectangle {
+                height: FlyoutGrid.bar-height;
+                border-radius: FlyoutGrid.bar-height / 2;
+                background: Theme.track;
+                if root.available && root.value > 0: Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: max(FlyoutGrid.bar-height, parent.width * min(100, root.value) / 100);
+                    height: parent.height;
+                    border-radius: parent.border-radius;
+                    background: Theme.level-bar(root.level);
+                }
             }
         }
+        Rectangle { width: FlyoutGrid.bar-gap; }
+        AxisSlot {
+            width: FlyoutGrid.percent-width;
+            offset: FlyoutGrid.digit-offset;
+            Text {
+                text: root.remaining;
+                font-size: FlyoutGrid.percent-font-size;
+                font-weight: 500;
+                color: root.available ? Theme.level-text(root.level) : Theme.text-disabled;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle { width: FlyoutGrid.reset-gap; }
+        Text {
+            width: FlyoutGrid.reset-width;
+            text: root.reset;
+            font-size: 12px;
+            color: Theme.text-muted;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
     }
-    Text { x: 164px; y: 0px; width: 44px; height: 20px; text: root.remaining; color: root.theme-kind == 2 ? #202a35 : #eff3f7; font-size: 12px; font-weight: 650; horizontal-alignment: right; vertical-alignment: center; }
-    Text { x: 214px; y: 0px; width: 122px; height: 20px; text: root.reset; color: root.theme-kind == 2 ? #66717e : #8794a3; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
 }
 
+// One provider block of the cardless flyout (Variant A): no own background,
+// border or radius; it sits directly on the shared flyout surface.
 component ProviderSection inherits Rectangle {
+    in property <bool> compact: false;
     in property <string> provider-name;
+    in property <image> icon;
+    in property <bool> has-icon;
+    in property <string> plan-label;
+    in property <string> status-label;
+    in property <int> status-level;
     in property <string> five-label;
     in property <string> weekly-label;
-    in property <string> plan-label;
-    in property <string> state-label;
-    in property <color> state-color;
     in property <string> five-remaining;
     in property <string> five-reset;
     in property <float> five-value;
@@ -44,24 +858,97 @@ component ProviderSection inherits Rectangle {
     in property <string> weekly-reset;
     in property <float> weekly-value;
     in property <bool> weekly-available;
-    in property <int> theme-kind;
-    in property <image> icon;
-    in property <bool> icon-available;
+    in property <int> warning-threshold;
+    in property <int> critical-threshold;
+    // Name row + two quota rows; must match MainWindow.section-height.
+    property <length> header-height: root.compact ? 24px : 28px;
+    property <length> row-height: root.compact ? 24px : 28px;
+    height: root.header-height + root.row-height * 2;
     background: transparent;
-    height: 78px;
-    Image { x: 0px; y: 2px; width: 18px; height: 18px; source: root.icon; image-fit: contain; visible: root.icon-available; }
-    Text { x: 24px; y: 0px; width: 82px; height: 22px; text: root.provider-name; color: root.theme-kind == 2 ? #1b2631 : #f1f1f1; font-size: 13px; font-weight: 650; vertical-alignment: center; }
-    Text { x: 88px; y: 1px; width: 170px; height: 20px; text: root.state-label; color: root.state-color; font-size: 9px; vertical-alignment: center; overflow: elide; }
-    Rectangle { x: 260px; y: 1px; width: 76px; height: 20px; border-radius: 8px; background: root.theme-kind == 2 ? #eef1f5 : (root.theme-kind == 0 ? #383838 : #243140); visible: root.plan-label != ""; }
-    Text { x: 264px; y: 1px; width: 72px; height: 20px; text: root.plan-label; color: root.theme-kind == 2 ? #65717d : #b5b5b5; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
-    QuotaRow { x: 0px; y: 25px; width: 336px; label: root.five-label; remaining: root.five-remaining; reset: root.five-reset; value: root.five-value; available: root.five-available; theme-kind: root.theme-kind; }
-    QuotaRow { x: 0px; y: 51px; width: 336px; label: root.weekly-label; remaining: root.weekly-remaining; reset: root.weekly-reset; value: root.weekly-value; available: root.weekly-available; theme-kind: root.theme-kind; }
+    // Header: ONE row layout for the whole width: [14 px mark] 8 [name] [badge]
+    // … [dot] 6 [status]. Mark and dot sit on the row's text axis.
+    HorizontalLayout {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.header-height;
+        spacing: 0px;
+        if root.has-icon: AxisSlot {
+            offset: FlyoutGrid.header-shape-offset;
+            ProviderMark {
+                size: 14px;
+                source: root.icon;
+            }
+        }
+        if root.has-icon: Rectangle { width: 8px; }
+        Text {
+            text: root.provider-name;
+            font-size: FlyoutGrid.header-font-size;
+            font-weight: 600;
+            color: Theme.text-primary;
+            vertical-alignment: center;
+        }
+        if root.plan-label != "": Rectangle { width: 8px; }
+        if root.plan-label != "": AxisSlot {
+            offset: FlyoutGrid.header-shape-offset;
+            PlanChip { text: root.plan-label; }
+        }
+        // Flexible gap: pushes the freshness group to the content edge.
+        Rectangle { horizontal-stretch: 1; }
+        AxisSlot {
+            offset: FlyoutGrid.header-shape-offset;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: Theme.level-bar(root.status-level);
+            }
+        }
+        Rectangle { width: 6px; }
+        Text {
+            max-width: 150px;
+            text: root.status-label;
+            font-size: 12px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    QuotaRow {
+        x: 0px;
+        y: root.header-height;
+        width: root.width;
+        compact: root.compact;
+        label: root.five-label;
+        remaining: root.five-remaining;
+        reset: root.five-reset;
+        value: root.five-value;
+        available: root.five-available;
+        warning-threshold: root.warning-threshold;
+        critical-threshold: root.critical-threshold;
+    }
+    QuotaRow {
+        x: 0px;
+        y: root.header-height + root.row-height;
+        width: root.width;
+        compact: root.compact;
+        label: root.weekly-label;
+        remaining: root.weekly-remaining;
+        reset: root.weekly-reset;
+        value: root.weekly-value;
+        available: root.weekly-available;
+        warning-threshold: root.warning-threshold;
+        critical-threshold: root.critical-threshold;
+    }
 }
 
 export component MainWindow inherits Window {
+    in property <bool> compact: false;
     in property <bool> demo-mode: false;
-    in property <int> theme-kind: 1;
-    in property <color> accent-color: #0078d4;
+    in property <int> theme-kind: 0;
+    in property <int> warning-threshold: 25;
+    in property <int> critical-threshold: 10;
+    in property <color> accent-color: #6f87a8;
     in property <image> codex-icon;
     in property <bool> codex-icon-available: false;
     in property <image> claude-icon;
@@ -70,6 +957,7 @@ export component MainWindow inherits Window {
     in property <bool> claude-enabled: true;
     in property <string> codex-plan: "";
     in property <string> codex-status: "";
+    in property <int> codex-status-level: 3;
     in property <color> codex-status-color: #98a3af;
     in property <string> codex-five-remaining: "—";
     in property <string> codex-five-reset: "";
@@ -81,6 +969,7 @@ export component MainWindow inherits Window {
     in property <bool> codex-weekly-available: false;
     in property <string> claude-plan: "";
     in property <string> claude-status: "";
+    in property <int> claude-status-level: 3;
     in property <color> claude-status-color: #98a3af;
     in property <string> claude-five-remaining: "—";
     in property <string> claude-five-reset: "";
@@ -95,67 +984,346 @@ export component MainWindow inherits Window {
     in property <string> demo-label: "";
     in property <string> settings-label: "";
     in property <string> disabled-label: "";
+    // Kept for the window's accessible name; no longer drawn as a heading.
     in property <string> usage-title-label: "";
     in property <string> refresh-label: "";
+    // No longer shown (column headings were removed); kept for API stability.
+    in property <string> remaining-heading: "";
+    in property <string> reset-heading: "";
+    in property <string> close-label: "";
     in property <bool> refresh-enabled: false;
     callback open-settings();
     callback refresh-requested();
+    callback close-flyout();
+    callback start-drag();
+    callback refresh-finished();
 
-    title: "Agent Usage Monitor";
-    width: 370px;
-    height: (codex-enabled && claude-enabled) ? 208px : ((codex-enabled || claude-enabled) ? 118px : 78px);
+    // Cardless Variant A layout: one shared surface, provider sections placed
+    // directly on it and separated by one thin low-contrast line.
+    property <int> section-count: (root.codex-enabled ? 1 : 0) + (root.claude-enabled ? 1 : 0);
+    // Full: a 28 px action row (8 px from the top) above the content.
+    // Compact: no actions, content starts right at the top padding.
+    property <length> top-pad: root.compact ? 12px : 8px;
+    property <length> actions-height: 28px;
+    property <length> sections-top: root.compact ? root.top-pad : root.top-pad + root.actions-height + 4px;
+    // Name row + 2 quota rows (see ProviderSection).
+    property <length> section-height: root.compact ? 24px + 2 * 24px : 28px + 2 * 28px;
+    property <length> divider-above: root.compact ? 8px : 10px;
+    property <length> divider-below: root.compact ? 8px : 10px;
+    property <length> section-gap: root.divider-above + 1px + root.divider-below;
+    property <length> bottom-pad: root.compact ? 12px : 14px;
+    property <length> content-width: root.flyout-width - FlyoutGrid.side-pad * 2;
+    // Logical size, also read by Rust to position the window near the tray.
+    // Always wider than tall (horizontal rectangle).
+    out property <length> flyout-width: 440px;
+    out property <length> flyout-height: root.section-count == 0
+        ? root.sections-top + 48px + root.bottom-pad
+        : root.sections-top + root.section-count * root.section-height + (root.section-count - 1) * root.section-gap + root.bottom-pad;
+
+    title: "AgentUsageMonitor";
+    width: root.flyout-width;
+    height: root.flyout-height;
     no-frame: true;
-    background: transparent;
-    default-font-family: "Segoe UI";
-    default-font-size: 12px;
+    // Opaque: the software renderer presents through GDI without per-pixel
+    // alpha, so "transparent" pixels would show as black. Windows 11 DWM
+    // rounds and antialiases the corners (see flyout.rs apply_native_corners).
+    background: Theme.window-bg;
+    default-font-family: Typography.family;
+    default-font-size: 13px;
+    accessible-role: groupbox;
+    accessible-label: root.usage-title-label;
+
+    init => { Theme.kind = root.theme-kind; }
+    changed theme-kind => { Theme.kind = root.theme-kind; }
     public function apply-theme-palette() {
+        Theme.kind = root.theme-kind;
         Palette.color-scheme = root.theme-kind == 2 ? ColorScheme.light : ColorScheme.dark;
     }
 
-    property <color> page-background: root.theme-kind == 2 ? #f8fafc : (root.theme-kind == 0 ? #202020 : #111923);
-    property <color> page-border: root.theme-kind == 2 ? #cbd2da : (root.theme-kind == 0 ? #414141 : #2b3541);
-    property <color> primary-text: root.theme-kind == 2 ? #202a35 : #f1f1f1;
-    property <color> secondary-text: root.theme-kind == 2 ? #4e5a66 : #b5b5b5;
-    property <color> card-background: root.theme-kind == 2 ? #ffffff : (root.theme-kind == 0 ? #2b2b2b : #19232f);
-    property <color> card-border: root.theme-kind == 2 ? #d9dfe5 : (root.theme-kind == 0 ? #414141 : #293440);
-
+    // Full-bleed surface: no own radius or outline. A second, larger Slint
+    // radius inside DWM's clip left dark wedges, and its 1 px stroke doubled
+    // the DWM border.
     Rectangle {
-        x: 1px; y: 1px; width: parent.width - 2px; height: parent.height - 2px;
-        background: root.page-background;
-        border-color: root.page-border;
-        border-width: 1px; border-radius: 14px;
+        background: Theme.window-bg;
     }
-    Text { x: 16px; y: 6px; width: 148px; height: 22px; text: root.usage-title-label; color: root.primary-text; font-size: 13px; font-weight: 650; vertical-alignment: center; }
-    Button { x: 170px; y: 5px; width: 44px; height: 24px; text: "↻"; enabled: root.refresh-enabled; accessible-label: root.refresh-label; clicked => { root.refresh-requested(); } }
-    Button { x: 216px; y: 5px; width: 88px; height: 24px; text: root.settings-label; clicked => { root.open-settings(); } }
-    Button { x: parent.width - 34px; y: 5px; width: 22px; height: 24px; text: "×"; clicked => { root.close(); } }
-    if root.demo-mode: Text { x: 16px; y: 190px; width: 230px; height: 12px; text: root.demo-label; color: #bc8128; font-size: 9px; vertical-alignment: center; }
 
-    Rectangle { x: 12px; y: 28px; width: parent.width - 24px; height: 78px; border-radius: 10px; background: root.card-background; border-color: root.card-border; border-width: 1px; visible: root.codex-enabled; }
-    Rectangle { x: 12px; y: 112px; width: parent.width - 24px; height: 78px; border-radius: 10px; background: root.card-background; border-color: root.card-border; border-width: 1px; visible: root.claude-enabled; }
+    // ── Actions (full flyout only): top right; icon glyphs end on the 16 px
+    // content edge (28 px button, 16 px glyph, 6 px inner margin). ──
+    property <length> actions-right: root.flyout-width - FlyoutGrid.side-pad + 6px;
+    property <length> actions-left: root.actions-right - 3 * 28px - 2 * 2px;
+    if !root.compact: TouchArea {
+        // Drag region: the whole action row left of the buttons.
+        x: 0px;
+        y: 0px;
+        width: root.actions-left;
+        height: root.sections-top;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.start-drag();
+            }
+        }
+    }
+    if !root.compact: HeaderButton {
+        x: root.actions-left;
+        y: root.top-pad;
+        icon: Icons.refresh;
+        tooltip: root.refresh-label;
+        enabled: root.refresh-enabled;
+        clicked => { root.refresh-requested(); }
+    }
+    if !root.compact: HeaderButton {
+        x: root.actions-left + 30px;
+        y: root.top-pad;
+        icon: Icons.gear;
+        tooltip: root.settings-label;
+        clicked => { root.open-settings(); }
+    }
+    if !root.compact: HeaderButton {
+        x: root.actions-left + 60px;
+        y: root.top-pad;
+        icon: Icons.close;
+        tooltip: root.close-label;
+        clicked => { root.close-flyout(); }
+    }
 
-    ProviderSection {
-        x: 20px; y: 29px; width: 330px; visible: root.codex-enabled;
-        provider-name: "Codex"; icon: root.codex-icon; icon-available: root.codex-icon-available; plan-label: root.codex-plan; state-label: root.codex-status; state-color: root.codex-status-color;
-        five-label: root.five-label; weekly-label: root.weekly-label;
-        five-remaining: root.codex-five-remaining; five-reset: root.codex-five-reset; five-value: root.codex-five-value; five-available: root.codex-five-available;
-        weekly-remaining: root.codex-weekly-remaining; weekly-reset: root.codex-weekly-reset; weekly-value: root.codex-weekly-value; weekly-available: root.codex-weekly-available;
-        theme-kind: root.theme-kind;
+    // ── Provider sections (no cards): Codex, divider, Claude ──
+    if root.codex-enabled: ProviderSection {
+        x: FlyoutGrid.side-pad;
+        y: root.sections-top;
+        width: root.content-width;
+        compact: root.compact;
+        provider-name: "Codex";
+        icon: root.codex-icon;
+        has-icon: root.codex-icon-available;
+        plan-label: root.codex-plan;
+        status-label: root.codex-status;
+        status-level: root.codex-status-level;
+        five-label: root.five-label;
+        weekly-label: root.weekly-label;
+        five-remaining: root.codex-five-remaining;
+        five-reset: root.codex-five-reset;
+        five-value: root.codex-five-value;
+        five-available: root.codex-five-available;
+        weekly-remaining: root.codex-weekly-remaining;
+        weekly-reset: root.codex-weekly-reset;
+        weekly-value: root.codex-weekly-value;
+        weekly-available: root.codex-weekly-available;
+        warning-threshold: root.warning-threshold;
+        critical-threshold: root.critical-threshold;
     }
-    ProviderSection {
-        x: 20px; y: root.codex-enabled ? 113px : 29px; width: 330px; visible: root.claude-enabled;
-        provider-name: "Claude"; icon: root.claude-icon; icon-available: root.claude-icon-available; plan-label: root.claude-plan; state-label: root.claude-status; state-color: root.claude-status-color;
-        five-label: root.five-label; weekly-label: root.weekly-label;
-        five-remaining: root.claude-five-remaining; five-reset: root.claude-five-reset; five-value: root.claude-five-value; five-available: root.claude-five-available;
-        weekly-remaining: root.claude-weekly-remaining; weekly-reset: root.claude-weekly-reset; weekly-value: root.claude-weekly-value; weekly-available: root.claude-weekly-available;
-        theme-kind: root.theme-kind;
+    // One thin divider on the content grid, only when both providers are shown.
+    if root.section-count == 2: Rectangle {
+        x: FlyoutGrid.side-pad;
+        y: root.sections-top + root.section-height + root.divider-above;
+        width: root.content-width;
+        height: 1px;
+        background: Theme.flyout-divider;
     }
-    if !root.codex-enabled && !root.claude-enabled: Text { x: 16px; y: 36px; width: parent.width - 32px; height: 24px; text: root.disabled-label; color: root.secondary-text; horizontal-alignment: center; vertical-alignment: center; }
+    if root.claude-enabled: ProviderSection {
+        x: FlyoutGrid.side-pad;
+        y: root.sections-top + (root.codex-enabled ? root.section-height + root.section-gap : 0px);
+        width: root.content-width;
+        compact: root.compact;
+        provider-name: "Claude";
+        icon: root.claude-icon;
+        has-icon: root.claude-icon-available;
+        plan-label: root.claude-plan;
+        status-label: root.claude-status;
+        status-level: root.claude-status-level;
+        five-label: root.five-label;
+        weekly-label: root.weekly-label;
+        five-remaining: root.claude-five-remaining;
+        five-reset: root.claude-five-reset;
+        five-value: root.claude-five-value;
+        five-available: root.claude-five-available;
+        weekly-remaining: root.claude-weekly-remaining;
+        weekly-reset: root.claude-weekly-reset;
+        weekly-value: root.claude-weekly-value;
+        weekly-available: root.claude-weekly-available;
+        warning-threshold: root.warning-threshold;
+        critical-threshold: root.critical-threshold;
+    }
+    if root.section-count == 0: Rectangle {
+        x: FlyoutGrid.side-pad;
+        y: root.sections-top;
+        width: root.content-width;
+        height: 48px;
+        Text {
+            text: root.disabled-label;
+            color: Theme.text-secondary;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
 }
 
+// ─────────────────────────────── Tray menu ───────────────────────────────────
+// Compact theme-aware replacement for the native (always white) HMENU. Opaque
+// surface with system (DWM) rounded corners and shadow, like the flyout; the
+// software renderer cannot draw transparent rounded corners.
+
+component MenuItem inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> highlighted;
+    callback activated();
+    callback hovered();
+    height: 32px;
+    border-radius: 4px;
+    background: touch.pressed ? Theme.menu-pressed : (root.highlighted ? Theme.menu-hover : transparent);
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.activated(); }
+    Icon {
+        x: 10px;
+        y: (root.height - 16px) / 2;
+        commands: root.icon;
+        tint: Theme.text-secondary;
+    }
+    Text {
+        x: 36px;
+        width: root.width - 46px;
+        height: root.height;
+        text: root.text;
+        font-size: 13px;
+        color: Theme.text-primary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    touch := TouchArea {
+        moved => { root.hovered(); }
+        changed has-hover => {
+            if (self.has-hover) { root.hovered(); }
+        }
+        clicked => { root.activated(); }
+    }
+}
+
+export component TrayMenu inherits Window {
+    in property <int> theme-kind: 0;
+    in property <string> open-label: "";
+    in property <string> refresh-label: "";
+    in property <string> settings-label: "";
+    in property <string> exit-label: "";
+    // -1 = nothing highlighted (pointer not over an item, no key pressed yet).
+    in-out property <int> highlighted: -1;
+    // 0 Open, 1 Refresh, 2 Settings, 3 Exit.
+    callback activated(int);
+    callback dismissed();
+    out property <length> menu-width: 232px;
+    out property <length> menu-height: 4px + 3 * 32px + 9px + 32px + 4px;
+
+    title: "AgentUsageMonitor menu";
+    width: root.menu-width;
+    height: root.menu-height;
+    no-frame: true;
+    background: Theme.menu-bg;
+    default-font-family: Typography.family;
+    default-font-size: 13px;
+
+    init => { Theme.kind = root.theme-kind; }
+    changed theme-kind => { Theme.kind = root.theme-kind; }
+
+    // Called by Rust each time the menu opens.
+    public function reset() {
+        Theme.kind = root.theme-kind;
+        root.highlighted = -1;
+        keys.focus();
+    }
+
+    function activate(index: int) {
+        if (index >= 0 && index <= 3) {
+            root.activated(index);
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.dismissed();
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.highlighted = root.highlighted < 0 ? 0 : mod(root.highlighted + 1, 4);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.highlighted = root.highlighted < 0 ? 3 : mod(root.highlighted + 3, 4);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.highlighted = 0;
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.highlighted = 3;
+                return accept;
+            }
+            if (event.text == Key.Return || event.text == " ") {
+                root.activate(root.highlighted);
+                return accept;
+            }
+            reject
+        }
+        // Outside click: another window became active.
+        focus-lost(reason) => {
+            if (reason == FocusReason.window-activation) {
+                root.dismissed();
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 0px;
+        MenuItem {
+            text: root.open-label;
+            icon: Icons.open;
+            highlighted: root.highlighted == 0;
+            hovered => { root.highlighted = 0; }
+            activated => { root.activate(0); }
+        }
+        MenuItem {
+            text: root.refresh-label;
+            icon: Icons.refresh;
+            highlighted: root.highlighted == 1;
+            hovered => { root.highlighted = 1; }
+            activated => { root.activate(1); }
+        }
+        MenuItem {
+            text: root.settings-label;
+            icon: Icons.gear;
+            highlighted: root.highlighted == 2;
+            hovered => { root.highlighted = 2; }
+            activated => { root.activate(2); }
+        }
+        Rectangle {
+            height: 9px;
+            Rectangle {
+                x: 8px;
+                y: 4px;
+                width: parent.width - 16px;
+                height: 1px;
+                background: Theme.menu-divider;
+            }
+        }
+        MenuItem {
+            text: root.exit-label;
+            icon: Icons.power;
+            highlighted: root.highlighted == 3;
+            hovered => { root.highlighted = 3; }
+            activated => { root.activate(3); }
+        }
+    }
+}
+
+// ─────────────────────────────── Settings ────────────────────────────────────
+
 export component SettingsWindow inherits Window {
-    in property <int> theme-kind: 1;
-    in property <color> accent-color: #0078d4;
+    in property <int> theme-kind: 0;
+    in property <color> accent-color: #6f87a8;
+    in property <image> window-icon;
     in property <image> codex-icon;
     in property <bool> codex-icon-available: false;
     in property <image> claude-icon;
@@ -164,9 +1332,13 @@ export component SettingsWindow inherits Window {
     in property <bool> codex-enabled: true;
     in property <bool> claude-enabled: true;
     in property <bool> claude-cli-refresh-enabled: false;
+    in property <bool> startup-enabled: false;
+    in property <bool> startup-state-known: true;
     in property <bool> alerts-enabled: true;
     in property <bool> exhausted-alerts-enabled: true;
     in property <bool> include-weekly: true;
+    in property <int> warning-threshold: 25;
+    in property <int> critical-threshold: 10;
     in-out property <int> theme-index: 0;
     in-out property <int> language-index: 0;
     in-out property <int> warning-index: 0;
@@ -183,27 +1355,53 @@ export component SettingsWindow inherits Window {
     in property <string> about-label: "";
     in property <string> appearance-label: "";
     in property <string> providers-label: "";
+    in property <string> thresholds-label: "";
+    in property <string> display-label: "";
+    in property <string> connections-label: "";
     in property <string> theme-name-label: "";
     in property <string> language-name-label: "";
     in property <string> codex-description: "";
     in property <string> claude-description: "";
     in property <string> codex-state: "";
     in property <string> claude-state: "";
+    in property <int> codex-state-level: 3;
+    in property <int> claude-state-level: 3;
+    in property <string> alerts-title: "";
     in property <string> alerts-description: "";
     in property <string> claude-refresh-label: "";
     in property <string> claude-refresh-description: "";
+    in property <string> startup-label: "";
+    in property <string> startup-description: "";
     in property <string> warning-name-label: "";
+    in property <string> warning-description: "";
     in property <string> critical-name-label: "";
+    in property <string> critical-description: "";
     in property <string> exhausted-name-label: "";
+    in property <string> exhausted-description: "";
     in property <string> weekly-name-label: "";
+    in property <string> weekly-description: "";
     in property <string> duration-name-label: "";
+    in property <string> duration-description: "";
+    in property <string> legend-normal: "";
+    in property <string> legend-warning: "";
+    in property <string> legend-critical: "";
+    in property <string> show-test-label: "";
+    in property <string> app-version: "";
     in property <string> about-product: "AgentUsageMonitor";
     in property <string> about-tagline: "";
     in property <string> about-version: "";
     in property <string> about-author: "";
     in property <string> about-repository: "";
+    in property <string> about-report-issue: "";
     in property <string> about-license: "";
     in property <string> about-technologies: "";
+    in property <string> about-feature-tray: "";
+    in property <string> about-feature-local: "";
+    in property <string> about-feature-agents: "";
+    in property <string> codex-source: "";
+    in property <string> claude-source: "";
+    in property <string> legal-note: "";
+    in property <string> copyright-line: "";
     in property <string> source-note: "";
     callback select-tab(int);
     callback theme-selected(string);
@@ -217,178 +1415,488 @@ export component SettingsWindow inherits Window {
     callback toggle-codex();
     callback toggle-claude();
     callback toggle-claude-cli-refresh();
+    callback toggle-startup();
+    callback show-test-notification();
     callback open-repository();
+    callback open-issues();
     callback close-settings();
 
     title: "AgentUsageMonitor — " + root.title-label;
-    preferred-width: 720px;
-    preferred-height: 600px;
+    icon: root.window-icon;
+    // Default size, also read by Rust when opening (clamped to the monitor
+    // work area; the content scrolls only when the window is shorter).
+    // Smallest default that shows the whole About page without scrolling in
+    // UA/PL/EN/RU (measured: ~617 px of content incl. the 16 px minimum spacer).
+    // Also fits 150 % scaling on a 1080p screen (688 px logical work area).
+    out property <length> default-width: 720px;
+    out property <length> default-height: 640px;
+    preferred-width: root.default-width;
+    preferred-height: root.default-height;
     min-width: 680px;
-    min-height: 560px;
-    default-font-family: "Segoe UI";
-    default-font-size: 13px;
+    // Low enough for 200 % scaling on a 1080p screen (516 px logical work area).
+    min-height: 420px;
+    default-font-family: Typography.family;
+    default-font-size: 14px;
+    background: Theme.window-bg;
+
+    init => { Theme.kind = root.theme-kind; }
+    changed theme-kind => { Theme.kind = root.theme-kind; }
     public function apply-theme-palette() {
+        Theme.kind = root.theme-kind;
         Palette.color-scheme = root.theme-kind == 2 ? ColorScheme.light : ColorScheme.dark;
     }
-    property <color> page-background: root.theme-kind == 2 ? #f3f6fa : (root.theme-kind == 0 ? #202020 : #10161f);
-    property <color> sidebar-background: root.theme-kind == 2 ? #edf1f6 : (root.theme-kind == 0 ? #191919 : #151d28);
-    property <color> card-background: root.theme-kind == 2 ? #ffffff : (root.theme-kind == 0 ? #2b2b2b : #19232f);
-    property <color> border-color-value: root.theme-kind == 2 ? #dce3eb : (root.theme-kind == 0 ? #414141 : #2a3746);
-    property <color> primary-text: root.theme-kind == 2 ? #202c39 : #f1f1f1;
-    property <color> secondary-text: root.theme-kind == 2 ? #344252 : #d0d0d0;
-    property <color> muted-text: root.theme-kind == 2 ? #5d6976 : #b5b5b5;
-    property <color> subtle-text: root.theme-kind == 2 ? #687584 : #a8a8a8;
-    background: root.page-background;
 
+    // Sidebar: 200px, padding 20/12, header padding 0 14 20.
     Rectangle {
-        x: 0px; y: 0px; width: parent.width; height: parent.height;
-        background: root.page-background;
+        x: 0px;
+        y: 0px;
+        width: 200px;
+        height: root.height;
+        background: Theme.sidebar-bg;
     }
     Rectangle {
-        x: 0px; y: 0px; width: 200px; height: parent.height;
-        background: root.sidebar-background;
+        x: 200px;
+        y: 0px;
+        width: 1px;
+        height: root.height;
+        background: Theme.border;
+    }
+    AumMark {
+        x: 26px;
+        y: 22px;
+        size: 32px;
     }
     Text {
-        x: 20px; y: 24px; width: 172px; height: 48px;
-        text: "AgentUsageMonitor"; font-size: 15px; font-weight: 700;
-        color: root.theme-kind == 2 ? #1b2633 : #f1f1f1;
+        x: 69px;
+        y: 19px;
+        width: 120px;
+        height: 22px;
+        text: "AUM";
+        font-size: 16px;
+        font-weight: 600;
+        color: Theme.text-primary;
         vertical-alignment: center;
     }
     Text {
-        x: 20px; y: 68px; width: 172px; height: 34px;
-        text: root.title-label; font-size: 12px;
-        color: root.theme-kind == 2 ? #5e6a78 : #9aa8b7;
-        vertical-alignment: center; wrap: word-wrap;
+        x: 69px;
+        y: 39px;
+        width: 125px;
+        height: 18px;
+        text: root.title-label;
+        font-size: 13px;
+        color: Theme.text-muted;
+        vertical-alignment: center;
+        overflow: elide;
     }
-    for tab[index] in [root.general-label, root.notifications-label, root.about-label] : Rectangle {
-        x: 12px; y: 128px + index * 48px; width: 176px; height: 40px; background: transparent;
-        Rectangle { x: 0px; y: 7px; width: 3px; height: 26px; border-radius: 2px; background: root.accent-color; visible: root.selected-tab == index; }
-        Button {
-            x: 4px; y: 0px; width: 172px; height: 40px; text: tab;
-            checkable: false; checked: root.selected-tab == index;
-            clicked => { root.select-tab(index); }
-        }
-        if index == 0 : Rectangle { x: 17px; y: 12px; width: 15px; height: 2px; border-radius: 1px; background: root.theme-kind == 2 ? #596572 : #c7c7c7; }
-        if index == 0 : Rectangle { x: 17px; y: 18px; width: 15px; height: 2px; border-radius: 1px; background: root.theme-kind == 2 ? #596572 : #c7c7c7; }
-        if index == 0 : Rectangle { x: 17px; y: 24px; width: 15px; height: 2px; border-radius: 1px; background: root.theme-kind == 2 ? #596572 : #c7c7c7; }
-        if index == 1 : Rectangle { x: 20px; y: 12px; width: 10px; height: 12px; border-radius: 4px; background: root.theme-kind == 2 ? #596572 : #c7c7c7; }
-        if index == 1 : Rectangle { x: 22px; y: 25px; width: 6px; height: 3px; border-radius: 2px; background: root.theme-kind == 2 ? #596572 : #c7c7c7; }
-        if index == 2 : Rectangle { x: 17px; y: 12px; width: 16px; height: 16px; border-radius: 8px; border-color: root.theme-kind == 2 ? #596572 : #c7c7c7; border-width: 1px; background: transparent; }
-        if index == 2 : Text { x: 17px; y: 12px; width: 16px; height: 16px; text: "i"; font-weight: 700; color: root.theme-kind == 2 ? #596572 : #c7c7c7; horizontal-alignment: center; vertical-alignment: center; }
+    NavItem {
+        x: 12px;
+        y: 78px;
+        width: 176px;
+        text: root.general-label;
+        icon: NavIcons.sliders;
+        active: root.selected-tab == 0;
+        clicked => { root.select-tab(0); }
     }
-    Rectangle { x: 200px; y: 0px; width: 1px; height: parent.height; background: root.border-color-value; }
+    NavItem {
+        x: 12px;
+        y: 122px;
+        width: 176px;
+        text: root.notifications-label;
+        icon: NavIcons.bell;
+        active: root.selected-tab == 1;
+        clicked => { root.select-tab(1); }
+    }
+    NavItem {
+        x: 12px;
+        y: 166px;
+        width: 176px;
+        text: root.about-label;
+        icon: NavIcons.info;
+        active: root.selected-tab == 2;
+        clicked => { root.select-tab(2); }
+    }
+    Text {
+        x: 27px;
+        y: root.height - 40px;
+        width: 160px;
+        height: 24px;
+        // About already shows the version chip beside the product name.
+        visible: root.selected-tab != 2;
+        text: root.app-version;
+        color: Theme.text-muted;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
 
-    if root.selected-tab == 0 : ScrollView {
-        x: 224px; y: 24px; width: parent.width - 248px; height: parent.height - 48px;
-        VerticalLayout {
-            width: parent.width;
-            spacing: 8px;
+    // Content: padding 28 / 32 / 24 / 32, sections 20 apart, label 24 + 4.
+    content := Flickable {
+        x: 201px;
+        y: 0px;
+        width: root.width - 201px;
+        height: root.height;
+        content-width: self.width;
+        content-height: max(self.height, page.preferred-height);
+        page := VerticalLayout {
+            width: content.width;
+            padding-top: 28px;
+            padding-left: 32px;
+            padding-right: 32px;
+            padding-bottom: 24px;
+            spacing: 0px;
             alignment: start;
-            Text { text: root.general-label; font-size: 24px; font-weight: 650; color: root.theme-kind == 2 ? #1b2633 : #f1f4f8; }
-            Text { text: root.appearance-label; font-size: 14px; font-weight: 650; color: root.theme-kind == 2 ? #344252 : #cad3de; }
-            VerticalLayout {
-                width: parent.width; spacing: 4px; alignment: start;
+
+            Text {
+                height: 28px;
+                text: root.selected-tab == 0 ? root.general-label : (root.selected-tab == 1 ? root.notifications-label : root.about-label);
+                font-size: 22px;
+                font-weight: 600;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+            }
+
+            // ── General ──
+            if root.selected-tab == 0: VerticalLayout {
+                spacing: 0px;
+                Rectangle { height: 20px; }
+                SectionLabel { text: root.appearance-label; }
+                Rectangle { height: 4px; }
+                Card {
+                    VerticalLayout {
+                        SettingsRow {
+                            min-height: 55px;
+                            title: root.theme-name-label;
+                            Dropdown {
+                                width: 160px;
+                                model: root.theme-options;
+                                current-index <=> root.theme-index;
+                                selected(value) => { root.theme-selected(value); }
+                            }
+                        }
+                        Divider { }
+                        SettingsRow {
+                            min-height: 55px;
+                            title: root.language-name-label;
+                            Dropdown {
+                                width: 160px;
+                                model: root.language-options;
+                                current-index <=> root.language-index;
+                                selected(value) => { root.language-selected(value); }
+                            }
+                        }
+                    }
+                }
+                Rectangle { height: 8px; }
+                Card {
+                    SettingsRow {
+                        title: root.startup-label;
+                        description: root.startup-description;
+                        error: !root.startup-state-known;
+                        ToggleSwitch {
+                            checked: root.startup-enabled;
+                            enabled: root.startup-state-known;
+                            toggled => { root.toggle-startup(); }
+                        }
+                    }
+                }
+                Rectangle { height: 20px; }
+                SectionLabel { text: root.providers-label; }
+                Rectangle { height: 4px; }
+                Card {
+                    ProviderSettingsHeader {
+                        name: "Codex";
+                        icon: root.codex-icon;
+                        has-icon: root.codex-icon-available;
+                        state: root.codex-state;
+                        state-level: root.codex-state-level;
+                        detail: root.codex-description;
+                        enabled: root.codex-enabled;
+                        toggled => { root.toggle-codex(); }
+                    }
+                }
+                Rectangle { height: 8px; }
+                Card {
+                    VerticalLayout {
+                        ProviderSettingsHeader {
+                            name: "Claude";
+                            icon: root.claude-icon;
+                            has-icon: root.claude-icon-available;
+                            state: root.claude-state;
+                            state-level: root.claude-state-level;
+                            detail: root.claude-description;
+                            enabled: root.claude-enabled;
+                            toggled => { root.toggle-claude(); }
+                        }
+                        Divider { }
+                        SettingsRow {
+                            title: root.claude-refresh-label;
+                            description: root.claude-refresh-description;
+                            ToggleSwitch {
+                                checked: root.claude-cli-refresh-enabled;
+                                enabled: root.claude-enabled;
+                                toggled => { root.toggle-claude-cli-refresh(); }
+                            }
+                        }
+                        // Claude data-source note, inside the Claude card and on
+                        // its 16 px content edge, with a small info icon.
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-top: 0px;
+                            padding-bottom: 12px;
+                            spacing: 8px;
+                            VerticalLayout {
+                                padding-top: 2px;
+                                alignment: start;
+                                Icon {
+                                    width: 14px;
+                                    height: 14px;
+                                    commands: Icons.info;
+                                    tint: Theme.text-muted;
+                                }
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: root.source-note;
+                                font-size: 12px;
+                                color: Theme.text-muted;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Notifications ──
+            if root.selected-tab == 1: VerticalLayout {
+                spacing: 0px;
+                Rectangle { height: 20px; }
+                Card {
+                    SettingsRow {
+                        min-height: 78px;
+                        strong: true;
+                        vertical-padding: 12px;
+                        title: root.alerts-title;
+                        description: root.alerts-description;
+                        ToggleSwitch {
+                            checked: root.alerts-enabled;
+                            toggled => { root.toggle-alerts(); }
+                        }
+                    }
+                }
+                Rectangle { height: 20px; }
+                SectionLabel { text: root.thresholds-label; }
+                Rectangle { height: 4px; }
+                Card {
+                    VerticalLayout {
+                        ThresholdBar {
+                            warning-threshold: root.warning-threshold;
+                            critical-threshold: root.critical-threshold;
+                            normal-label: root.legend-normal;
+                            warning-label: root.legend-warning;
+                            critical-label: root.legend-critical;
+                        }
+                        Divider { }
+                        SettingsRow {
+                            title: root.warning-name-label;
+                            description: root.warning-description;
+                            Dropdown {
+                                width: 100px;
+                                model: root.warning-options;
+                                current-index <=> root.warning-index;
+                                selected(value) => { root.warning-selected(value); }
+                            }
+                        }
+                        Divider { }
+                        SettingsRow {
+                            title: root.critical-name-label;
+                            description: root.critical-description;
+                            Dropdown {
+                                width: 100px;
+                                model: root.critical-options;
+                                current-index <=> root.critical-index;
+                                selected(value) => { root.critical-selected(value); }
+                            }
+                        }
+                    }
+                }
+                Rectangle { height: 20px; }
                 HorizontalLayout {
-                    height: 36px;
-                    Text { text: root.theme-name-label; color: root.theme-kind == 2 ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; }
-                    ComboBox { width: 180px; model: root.theme-options; current-index <=> root.theme-index; selected(value) => { root.theme-selected(value); } }
+                    height: 24px;
+                    SectionLabel {
+                        horizontal-stretch: 1;
+                        text: root.display-label;
+                    }
+                    SettingsButton {
+                        small: true;
+                        text: root.show-test-label;
+                        clicked => { root.show-test-notification(); }
+                    }
                 }
+                Rectangle { height: 4px; }
+                Card {
+                    VerticalLayout {
+                        SettingsRow {
+                            title: root.exhausted-name-label;
+                            description: root.exhausted-description;
+                            ToggleSwitch {
+                                checked: root.exhausted-alerts-enabled;
+                                toggled => { root.toggle-exhausted-alerts(); }
+                            }
+                        }
+                        Divider { }
+                        SettingsRow {
+                            title: root.weekly-name-label;
+                            description: root.weekly-description;
+                            ToggleSwitch {
+                                checked: root.include-weekly;
+                                toggled => { root.toggle-weekly(); }
+                            }
+                        }
+                        Divider { }
+                        SettingsRow {
+                            title: root.duration-name-label;
+                            description: root.duration-description;
+                            Dropdown {
+                                width: 100px;
+                                open-up: true;
+                                model: root.duration-options;
+                                current-index <=> root.duration-index;
+                                selected(value) => { root.duration-selected(value); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── About ──
+            if root.selected-tab == 2: VerticalLayout {
+                spacing: 0px;
+                // Fill the viewport below the page title (28 top + 28 title +
+                // 24 bottom padding) so the footer sits at the bottom edge.
+                min-height: content.height - 80px;
+                Rectangle { height: 10px; }
                 HorizontalLayout {
-                    height: 36px;
-                    Text { text: root.language-name-label; color: root.theme-kind == 2 ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; }
-                    ComboBox { width: 180px; model: root.language-options; current-index <=> root.language-index; selected(value) => { root.language-selected(value); } }
-                }
-            }
-            Text { text: root.providers-label; font-size: 14px; font-weight: 650; color: root.theme-kind == 2 ? #344252 : #cad3de; }
-            Rectangle {
-                width: parent.width; height: 76px; border-radius: 8px;
-                background: root.card-background;
-                border-color: root.border-color-value; border-width: 1px;
-                Rectangle { x: 16px; y: 14px; width: 24px; height: 24px; border-radius: 6px; background: root.theme-kind == 2 ? #f2f4f7 : (root.theme-kind == 0 ? #383838 : #243140); visible: root.codex-icon-available; }
-                Image { x: 20px; y: 18px; width: 16px; height: 16px; source: root.codex-icon; image-fit: contain; visible: root.codex-icon-available; }
-                Text { x: 48px; y: 14px; width: 125px; height: 24px; text: "Codex"; font-weight: 650; color: root.primary-text; vertical-alignment: center; }
-                Text { x: 16px; y: 40px; width: parent.width - 92px; height: 28px; text: root.codex-state + " · " + root.codex-description; color: root.muted-text; font-size: 11px; vertical-alignment: center; wrap: word-wrap; }
-                Switch { x: parent.width - 70px; y: 16px; checked: root.codex-enabled; toggled => { root.toggle-codex(); } }
-            }
-            Rectangle {
-                width: parent.width; height: 134px; border-radius: 8px;
-                background: root.card-background;
-                border-color: root.border-color-value; border-width: 1px;
-                Rectangle { x: 16px; y: 14px; width: 24px; height: 24px; border-radius: 6px; background: root.theme-kind == 2 ? #f2f4f7 : (root.theme-kind == 0 ? #383838 : #243140); visible: root.claude-icon-available; }
-                Image { x: 20px; y: 18px; width: 16px; height: 16px; source: root.claude-icon; image-fit: contain; visible: root.claude-icon-available; }
-                Text { x: 48px; y: 14px; width: 125px; height: 24px; text: "Claude"; font-weight: 650; color: root.primary-text; vertical-alignment: center; }
-                Text { x: 16px; y: 40px; width: parent.width - 92px; height: 34px; text: root.claude-state + " · " + root.claude-description; color: root.muted-text; font-size: 11px; vertical-alignment: center; wrap: word-wrap; }
-                Switch { x: parent.width - 70px; y: 16px; checked: root.claude-enabled; toggled => { root.toggle-claude(); } }
-                Text { x: 16px; y: 80px; width: parent.width - 92px; height: 22px; text: root.claude-refresh-label; color: root.muted-text; font-size: 11px; vertical-alignment: center; }
-                Switch { x: parent.width - 70px; y: 78px; checked: root.claude-cli-refresh-enabled; toggled => { root.toggle-claude-cli-refresh(); } }
-                Text { x: 16px; y: 104px; width: parent.width - 32px; height: 24px; text: root.claude-refresh-description; color: root.theme-kind == 2 ? #687584 : #8998a8; font-size: 10px; vertical-alignment: center; wrap: word-wrap; }
-            }
-            Text { text: root.source-note; color: root.theme-kind == 2 ? #687584 : #8998a8; font-size: 11px; wrap: word-wrap; vertical-stretch: 0; }
-        }
-    }
-    if root.selected-tab == 1 : ScrollView {
-        x: 224px; y: 24px; width: parent.width - 248px; height: parent.height - 48px;
-        VerticalLayout {
-            width: parent.width; spacing: 8px; alignment: start;
-            Text { text: root.notifications-label; font-size: 24px; font-weight: 650; color: root.theme-kind == 2 ? #1b2633 : #f1f4f8; }
-            Rectangle {
-                width: parent.width; height: 76px; border-radius: 8px;
-                background: root.card-background;
-                border-color: root.border-color-value; border-width: 1px;
-                Text { x: 16px; y: 12px; width: parent.width - 90px; height: 24px; text: root.notifications-label; font-weight: 650; color: root.theme-kind == 2 ? #202c39 : #edf2f7; vertical-alignment: center; }
-                Text { x: 16px; y: 38px; width: parent.width - 90px; height: 24px; text: root.alerts-description; color: root.theme-kind == 2 ? #687584 : #9eacbb; font-size: 11px; vertical-alignment: center; wrap: word-wrap; }
-                Switch { x: parent.width - 70px; y: 26px; checked: root.alerts-enabled; toggled => { root.toggle-alerts(); } }
-            }
-            Rectangle {
-                width: parent.width; height: 240px; border-radius: 8px;
-                background: root.card-background;
-                border-color: root.border-color-value; border-width: 1px;
-                VerticalLayout {
-                    x: 16px; y: 8px; width: parent.width - 32px; spacing: 5px;
-                    HorizontalLayout {
-                        height: 42px;
-                        Text { text: root.warning-name-label; color: root.theme-kind == 2 ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
-                        ComboBox { width: 104px; model: root.warning-options; current-index <=> root.warning-index; selected(value) => { root.warning-selected(value); } }
-                    }
-                    HorizontalLayout {
-                        height: 42px;
-                        Text { text: root.critical-name-label; color: root.theme-kind == 2 ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
-                        ComboBox { width: 104px; model: root.critical-options; current-index <=> root.critical-index; selected(value) => { root.critical-selected(value); } }
-                    }
-                    HorizontalLayout {
-                        height: 38px;
-                        Text { text: root.exhausted-name-label; color: root.theme-kind == 2 ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
-                        Switch { checked: root.exhausted-alerts-enabled; toggled => { root.toggle-exhausted-alerts(); } }
-                    }
-                    HorizontalLayout {
-                        height: 38px;
-                        Text { text: root.weekly-name-label; color: root.theme-kind == 2 ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
-                        Switch { checked: root.include-weekly; toggled => { root.toggle-weekly(); } }
-                    }
-                    HorizontalLayout {
-                        height: 38px;
-                        Text { text: root.duration-name-label; color: root.theme-kind == 2 ? #344252 : #dbe2eb; vertical-alignment: center; horizontal-stretch: 1; }
-                        ComboBox { width: 104px; model: root.duration-options; current-index <=> root.duration-index; selected(value) => { root.duration-selected(value); } }
+                    height: 64px;
+                    spacing: 17px;
+                    AumMark { size: 64px; }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: start;
+                            Text {
+                                text: root.about-product;
+                                font-size: 21px;
+                                font-weight: 600;
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                StatusChip {
+                                    text: root.app-version;
+                                    level: 3;
+                                }
+                            }
+                        }
+                        Text {
+                            text: root.about-tagline;
+                            font-size: 13px;
+                            color: Theme.text-secondary;
+                            overflow: elide;
+                        }
                     }
                 }
-            }
-        }
-    }
-    if root.selected-tab == 2 : VerticalLayout {
-        x: 224px; y: 24px; width: parent.width - 248px; height: parent.height - 48px; spacing: 10px; alignment: start;
-        Text { text: root.about-product; font-size: 24px; font-weight: 650; color: root.theme-kind == 2 ? #1b2633 : #f1f4f8; }
-        Rectangle {
-            width: parent.width; height: 230px; border-radius: 10px;
-            background: root.card-background;
-            border-color: root.border-color-value; border-width: 1px;
-            VerticalLayout {
-                x: 20px; y: 18px; width: parent.width - 40px; spacing: 12px; alignment: start;
-                Text { text: root.about-tagline; color: root.theme-kind == 2 ? #657281 : #a1afbe; wrap: word-wrap; }
-                Text { text: root.about-version; color: root.theme-kind == 2 ? #344252 : #dbe2eb; }
-                Text { text: root.about-author; color: root.theme-kind == 2 ? #344252 : #dbe2eb; }
-                Button { text: root.about-repository; primary: false; clicked => { root.open-repository(); } }
-                Text { text: root.about-license; color: root.theme-kind == 2 ? #687584 : #9eacbb; font-size: 11px; wrap: word-wrap; }
-                Text { text: root.about-technologies; color: root.theme-kind == 2 ? #687584 : #9eacbb; font-size: 11px; wrap: word-wrap; }
+                Rectangle { height: 16px; }
+                Card {
+                    VerticalLayout {
+                        FeatureRow {
+                            icon: Icons.refresh;
+                            text: root.about-feature-tray;
+                        }
+                        Divider { }
+                        FeatureRow {
+                            icon: Icons.lock;
+                            text: root.about-feature-local;
+                        }
+                        Divider { }
+                        FeatureRow {
+                            icon: Icons.shield;
+                            text: root.about-feature-agents;
+                        }
+                    }
+                }
+                Rectangle { height: 16px; }
+                SectionLabel { text: root.connections-label; }
+                Rectangle { height: 4px; }
+                Card {
+                    VerticalLayout {
+                        SettingsRow {
+                            title: "Codex";
+                            description: root.codex-source;
+                            StatusChip {
+                                text: root.codex-state;
+                                level: root.codex-state-level;
+                            }
+                        }
+                        Divider { }
+                        SettingsRow {
+                            title: "Claude";
+                            description: root.claude-source;
+                            StatusChip {
+                                text: root.claude-state;
+                                level: root.claude-state-level;
+                            }
+                        }
+                    }
+                }
+                Rectangle { height: 16px; }
+                // Two equal-width actions spanning the content column, 12 px apart.
+                Rectangle {
+                    height: 32px;
+                    SettingsButton {
+                        x: 0px;
+                        width: (parent.width - 12px) / 2;
+                        text: root.about-repository;
+                        external: true;
+                        clicked => { root.open-repository(); }
+                    }
+                    SettingsButton {
+                        x: (parent.width + 12px) / 2;
+                        width: (parent.width - 12px) / 2;
+                        text: root.about-report-issue;
+                        external: true;
+                        clicked => { root.open-issues(); }
+                    }
+                }
+                Rectangle { height: 16px; }
+                HorizontalLayout {
+                    alignment: center;
+                    Text {
+                        max-width: 420px;
+                        text: root.legal-note;
+                        font-size: 12px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+                // Pushes the copyright footer to the bottom of the content area;
+                // keeps at least 16 px from the disclaimer and scrolls when short.
+                Rectangle {
+                    min-height: 16px;
+                    vertical-stretch: 1;
+                }
+                Divider { }
+                Rectangle { height: 10px; }
+                Text {
+                    text: root.copyright-line;
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
 use crate::{
@@ -27,24 +27,27 @@ pub struct ClaudeUsageSnapshot {
 
 impl ClaudeUsageSnapshot {
     pub fn merge(&mut self, incoming: Self) {
-        fn newer(old: &Option<ClaudeUsageWindow>, new: &Option<ClaudeUsageWindow>) -> bool {
-            match (old, new) {
+        fn merge_window(old: &mut Option<ClaudeUsageWindow>, new: Option<ClaudeUsageWindow>) {
+            let replace = match (old.as_ref(), new.as_ref()) {
                 (_, None) => false,
                 (None, Some(_)) => true,
-                (Some(old), Some(new)) => {
-                    new.observed_at > old.observed_at
-                        || (new.observed_at == old.observed_at
-                            && new.source == ClaudeUsageSource::StatusLine
-                            && old.source != ClaudeUsageSource::StatusLine)
+                (Some(previous), Some(next)) => {
+                    next.observed_at > previous.observed_at
+                        || (next.observed_at == previous.observed_at
+                            && next.source == ClaudeUsageSource::StatusLine
+                            && previous.source != ClaudeUsageSource::StatusLine)
                 }
+            };
+            if replace {
+                let Some(mut next) = new else { return };
+                if next.resets_at.is_none() {
+                    next.resets_at = old.as_ref().and_then(|previous| previous.resets_at);
+                }
+                *old = Some(next);
             }
         }
-        if newer(&self.five_hour, &incoming.five_hour) {
-            self.five_hour = incoming.five_hour;
-        }
-        if newer(&self.weekly, &incoming.weekly) {
-            self.weekly = incoming.weekly;
-        }
+        merge_window(&mut self.five_hour, incoming.five_hour);
+        merge_window(&mut self.weekly, incoming.weekly);
     }
 
     pub fn to_provider_snapshot(&self) -> Option<ProviderSnapshot> {
@@ -155,6 +158,57 @@ pub fn parse_claude_cli_usage(input: &str, observed_at: i64) -> ClaudeUsageSnaps
     result
 }
 
+fn parse_reset(text: &str, observed_at: i64) -> Option<i64> {
+    let (date_and_time, zone) = text.rsplit_once('(')?;
+    let zone = zone.trim_end_matches(')').trim().parse::<Tz>().ok()?;
+    let date_and_time = date_and_time.trim().strip_prefix("resets")?.trim();
+    let base = Utc
+        .timestamp_opt(observed_at, 0)
+        .single()?
+        .with_timezone(&zone);
+    let mut candidate = None;
+    let (month_day, time_text) = date_and_time.split_once(", ")?;
+    for year in [base.year(), base.year().saturating_add(1)] {
+        let date_text = format!("{month_day} {year}");
+        let date = NaiveDate::parse_from_str(&date_text, "%b %d %Y")
+            .or_else(|_| NaiveDate::parse_from_str(&date_text, "%b %e %Y"))
+            .ok()?;
+        let time = parse_cli_time(time_text)?;
+        let naive = date.and_time(time);
+        if let chrono::LocalResult::Single(value) = zone.from_local_datetime(&naive) {
+            let timestamp = value.timestamp();
+            if timestamp >= observed_at.saturating_sub(86_400)
+                && timestamp <= observed_at.saturating_add(8 * 86_400)
+            {
+                candidate = Some(timestamp);
+                break;
+            }
+        }
+    }
+    candidate
+}
+
+fn parse_cli_time(input: &str) -> Option<NaiveTime> {
+    if let Ok(time) = NaiveTime::parse_from_str(input, "%I:%M%P") {
+        return Some(time);
+    }
+    if let Ok(time) = NaiveTime::parse_from_str(input, "%I:%M %P") {
+        return Some(time);
+    }
+    // Recent Claude CLI output can round resets to an hour, e.g. "5pm".
+    let normalized = input.trim().to_ascii_lowercase();
+    let (hour, afternoon) = if let Some(hour) = normalized.strip_suffix("am") {
+        (hour.trim(), false)
+    } else {
+        (normalized.strip_suffix("pm")?.trim(), true)
+    };
+    let hour = hour.parse::<u32>().ok()?;
+    if !(1..=12).contains(&hour) {
+        return None;
+    }
+    NaiveTime::from_hms_opt(hour % 12 + if afternoon { 12 } else { 0 }, 0, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +268,44 @@ mod tests {
     }
 
     #[test]
+    fn newer_window_without_reset_keeps_the_last_known_reset_timestamp() {
+        let mut snapshot = ClaudeUsageSnapshot {
+            five_hour: Some(ClaudeUsageWindow {
+                used_percent: Some(40.0),
+                resets_at: Some(500),
+                observed_at: 100,
+                source: ClaudeUsageSource::BackgroundCli,
+            }),
+            weekly: Some(ClaudeUsageWindow {
+                used_percent: Some(30.0),
+                resets_at: Some(900),
+                observed_at: 100,
+                source: ClaudeUsageSource::BackgroundCli,
+            }),
+        };
+        snapshot.merge(ClaudeUsageSnapshot {
+            five_hour: Some(ClaudeUsageWindow {
+                used_percent: Some(35.0),
+                resets_at: None,
+                observed_at: 101,
+                source: ClaudeUsageSource::StatusLine,
+            }),
+            weekly: Some(ClaudeUsageWindow {
+                used_percent: Some(25.0),
+                resets_at: None,
+                observed_at: 101,
+                source: ClaudeUsageSource::StatusLine,
+            }),
+        });
+        let five = snapshot.five_hour.unwrap();
+        let weekly = snapshot.weekly.unwrap();
+        assert_eq!(five.used_percent, Some(35.0));
+        assert_eq!(five.resets_at, Some(500));
+        assert_eq!(weekly.used_percent, Some(25.0));
+        assert_eq!(weekly.resets_at, Some(900));
+    }
+
+    #[test]
     fn parses_only_session_and_all_model_weekly_lines_with_partial_values() {
         let input = "Current session: 8% used · resets Jul 13, 3:29pm (Europe/Warsaw)\nCurrent week (all models): 67% used\nCurrent week (Sonnet): 99% used";
         let result = parse_claude_cli_usage(input, 1_783_000_000);
@@ -270,38 +362,27 @@ mod tests {
         );
         assert_eq!(unknown.five_hour.unwrap().resets_at, None);
     }
-}
 
-fn parse_reset(text: &str, observed_at: i64) -> Option<i64> {
-    let (date_and_time, zone) = text.rsplit_once('(')?;
-    let zone = zone.trim_end_matches(')').trim().parse::<Tz>().ok()?;
-    let date_and_time = date_and_time.trim().strip_prefix("resets")?.trim();
-    let base = Utc
-        .timestamp_opt(observed_at, 0)
-        .single()?
-        .with_timezone(&zone);
-    let mut candidate = None;
-    let (month_day, time_text) = date_and_time.split_once(", ")?;
-    for year in [base.year(), base.year().saturating_add(1)] {
-        let date_text = format!("{month_day} {year}");
-        let date = NaiveDate::parse_from_str(&date_text, "%b %d %Y")
-            .or_else(|_| NaiveDate::parse_from_str(&date_text, "%b %e %Y"))
-            .ok()?;
-        let time = NaiveTime::parse_from_str(time_text, "%I:%M%P")
-            .or_else(|_| NaiveTime::parse_from_str(time_text, "%I:%M %P"))
-            .ok()?;
-        let naive = date.and_time(time);
-        if let chrono::LocalResult::Single(value) = zone.from_local_datetime(&naive) {
-            let timestamp = value.timestamp();
-            if timestamp >= observed_at.saturating_sub(86_400)
-                && timestamp <= observed_at.saturating_add(8 * 86_400)
-            {
-                candidate = Some(timestamp);
-                break;
-            }
-        }
+    #[test]
+    fn parses_cli_resets_rounded_to_the_hour() {
+        let zone: Tz = "Europe/Warsaw".parse().unwrap();
+        let observed = zone
+            .with_ymd_and_hms(2026, 11, 21, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let parsed = parse_claude_cli_usage(
+            "Current session: 8% used · resets Nov 22, 5pm (Europe/Warsaw)",
+            observed,
+        );
+        let reset = parsed.five_hour.unwrap().resets_at.unwrap();
+        let local = Utc
+            .timestamp_opt(reset, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&zone);
+        assert_eq!(local.hour(), 17);
+        assert_eq!(local.minute(), 0);
+        assert_eq!(local.day(), 22);
     }
-    candidate
 }
-
-use chrono::Datelike;

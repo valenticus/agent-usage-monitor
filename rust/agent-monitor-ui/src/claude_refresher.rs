@@ -4,6 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
+use crate::ManualRefreshRequest;
 use agent_usage_monitor_core::{ClaudeUsageSnapshot, parse_claude_cli_usage};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -11,8 +12,25 @@ use tokio_util::sync::CancellationToken;
 const TIMEOUT: Duration = Duration::from_secs(90);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(10 * 60);
+static CLAUDE_RESET_DIAGNOSTIC_WRITTEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-pub async fn refresh_once(cancel: &CancellationToken) -> Result<ClaudeUsageSnapshot, String> {
+pub(crate) enum ClaudeRefreshEvent {
+    Completed {
+        request_id: Option<u64>,
+        snapshot: ClaudeUsageSnapshot,
+    },
+    Failed {
+        request_id: Option<u64>,
+        timed_out: bool,
+    },
+}
+
+pub async fn refresh_once(
+    cancel: &CancellationToken,
+    request_id: Option<u64>,
+    observed_at: i64,
+) -> Result<ClaudeUsageSnapshot, String> {
     let command = if cfg!(windows) {
         let mut command = Command::new("cmd.exe");
         command.args([
@@ -27,13 +45,15 @@ pub async fn refresh_once(cancel: &CancellationToken) -> Result<ClaudeUsageSnaps
         command.args(["-p", "--no-session-persistence", "/usage"]);
         command
     };
-    run_command(command, TIMEOUT, cancel).await
+    run_command(command, TIMEOUT, cancel, request_id, observed_at).await
 }
 
 async fn run_command(
     mut command: Command,
     timeout: Duration,
     cancel: &CancellationToken,
+    request_id: Option<u64>,
+    observed_at: i64,
 ) -> Result<ClaudeUsageSnapshot, String> {
     command
         .stdout(Stdio::piped())
@@ -45,6 +65,7 @@ async fn run_command(
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
     }
+    let cli_started = std::time::Instant::now();
     let mut child = command
         .spawn()
         .map_err(|_| "could not start Claude CLI".to_string())?;
@@ -77,6 +98,11 @@ async fn run_command(
         }
         Some(Err(_)) => {
             terminate_tree(pid, &mut child).await;
+            eprintln!(
+                "CLAUDE_REFRESH: cli_timed_out request_id={} timeout_ms={}",
+                request_id.map_or_else(|| "background".into(), |id| id.to_string()),
+                timeout.as_millis()
+            );
             return Err(format!(
                 "Claude CLI refresh timed out after {} seconds",
                 timeout.as_secs()
@@ -85,12 +111,58 @@ async fn run_command(
         Some(Ok(Err(_))) => return Err("Claude CLI process failed".into()),
         Some(Ok(Ok(output))) => output,
     };
+    eprintln!(
+        "CLAUDE_REFRESH: cli_finished request_id={} cli_ms={} result={}",
+        request_id.map_or_else(|| "background".into(), |id| id.to_string()),
+        cli_started.elapsed().as_millis(),
+        if status.success() {
+            "success"
+        } else {
+            "nonzero_exit"
+        }
+    );
     if !status.success() {
         return Err(format!("Claude CLI exited with status {status}"));
     }
     let stdout = String::from_utf8_lossy(&stdout);
-    let snapshot = parse_claude_cli_usage(&stdout, now_unix());
+    let parse_started = std::time::Instant::now();
+    let snapshot = parse_claude_cli_usage(&stdout, observed_at);
+    eprintln!(
+        "CLAUDE_REFRESH: parse_completed request_id={} parse_ms={}",
+        request_id.map_or_else(|| "background".into(), |id| id.to_string()),
+        parse_started.elapsed().as_millis()
+    );
+    if !CLAUDE_RESET_DIAGNOSTIC_WRITTEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let reset_text_present = |prefix: &str| {
+            stdout.lines().any(|line| {
+                line.trim()
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.split_once("% used"))
+                    .is_some_and(|(_, reset)| {
+                        reset
+                            .trim()
+                            .trim_start_matches('·')
+                            .trim()
+                            .starts_with("resets ")
+                    })
+            })
+        };
+        eprintln!(
+            "CLAUDE_RESET: /usage 5-hour source_text={} parsed={} weekly source_text={} parsed={}",
+            reset_text_present("Current session:"),
+            snapshot
+                .five_hour
+                .as_ref()
+                .is_some_and(|window| window.resets_at.is_some()),
+            reset_text_present("Current week (all models):"),
+            snapshot
+                .weekly
+                .as_ref()
+                .is_some_and(|window| window.resets_at.is_some()),
+        );
+    }
     if snapshot.five_hour.is_none() && snapshot.weekly.is_none() {
+        eprintln!("CLAUDE_SOURCE: /usage contained no recognized quota lines");
         return Err("Claude CLI returned no recognized quota values".into());
     }
     Ok(snapshot)
@@ -124,32 +196,46 @@ async fn terminate_tree(_pid: Option<u32>, child: &mut tokio::process::Child) {
 
 pub async fn run(
     settings: tokio::sync::watch::Receiver<crate::settings::AppSettings>,
-    sender: tokio::sync::mpsc::Sender<ClaudeUsageSnapshot>,
+    sender: tokio::sync::mpsc::Sender<ClaudeRefreshEvent>,
+    refresh_requests: tokio::sync::mpsc::Receiver<ManualRefreshRequest>,
     cancellation: CancellationToken,
 ) {
     run_with_intervals(
         settings,
         sender,
+        refresh_requests,
         cancellation,
         REFRESH_INTERVAL,
         FAILURE_COOLDOWN,
-        |cancel| Box::pin(async move { refresh_once(&cancel).await }),
+        |cancel, request_id, observed_at| {
+            Box::pin(async move { refresh_once(&cancel, request_id, observed_at).await })
+        },
     )
     .await;
 }
 
 type RefreshFuture = Pin<Box<dyn Future<Output = Result<ClaudeUsageSnapshot, String>> + Send>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitResult {
+    Elapsed,
+    Manual(ManualRefreshRequest),
+    Disabled,
+    Cancelled,
+}
+
 async fn run_with_intervals<F>(
     mut settings: tokio::sync::watch::Receiver<crate::settings::AppSettings>,
-    sender: tokio::sync::mpsc::Sender<ClaudeUsageSnapshot>,
+    sender: tokio::sync::mpsc::Sender<ClaudeRefreshEvent>,
+    mut refresh_requests: tokio::sync::mpsc::Receiver<ManualRefreshRequest>,
     cancellation: CancellationToken,
     refresh_interval: Duration,
     failure_cooldown: Duration,
     mut refresh: F,
 ) where
-    F: FnMut(CancellationToken) -> RefreshFuture,
+    F: FnMut(CancellationToken, Option<u64>, i64) -> RefreshFuture,
 {
+    let mut pending_manual = None;
     loop {
         if cancellation.is_cancelled() {
             break;
@@ -159,11 +245,30 @@ async fn run_with_intervals<F>(
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 changed = settings.changed() => if changed.is_err() { break; },
+                request = refresh_requests.recv() => {
+                    if let Some(request) = request {
+                        eprintln!("CLAUDE_REFRESH: skipped request_id={} reason=opt_in_disabled", request.id);
+                    } else { break; }
+                }
             }
             continue;
         }
+        let request = pending_manual
+            .take()
+            .or_else(|| refresh_requests.try_recv().ok());
+        let request_id = request.map(|request| request.id);
+        let observed_at = now_unix();
+        eprintln!(
+            "CLAUDE_REFRESH: started request_id={} source={}",
+            request_id.map_or_else(|| "background".into(), |id| id.to_string()),
+            if request_id.is_some() {
+                "manual"
+            } else {
+                "background"
+            }
+        );
         let operation_cancel = cancellation.child_token();
-        let mut operation = refresh(operation_cancel.clone());
+        let mut operation = refresh(operation_cancel.clone(), request_id, observed_at);
         let result = loop {
             tokio::select! {
                 result = &mut operation => break Some(result),
@@ -184,43 +289,85 @@ async fn run_with_intervals<F>(
             }
         };
         let Some(result) = result else { continue };
-        match result {
+        let delay = match result {
             Ok(snapshot) => {
                 let current = settings.borrow().clone();
                 if !current.claude_enabled || !current.claude_cli_refresh_enabled {
                     continue;
                 }
-                if sender.send(snapshot).await.is_err() {
+                if sender
+                    .send(ClaudeRefreshEvent::Completed {
+                        request_id,
+                        snapshot,
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
-                if !wait_while_enabled(&mut settings, &cancellation, refresh_interval).await {
-                    continue;
-                }
+                eprintln!(
+                    "CLAUDE_REFRESH: completed request_id={} source={}",
+                    request_id.map_or_else(|| "background".into(), |id| id.to_string()),
+                    if request_id.is_some() {
+                        "manual"
+                    } else {
+                        "background"
+                    }
+                );
+                refresh_interval
             }
-            Err(_) => {
-                if !wait_while_enabled(&mut settings, &cancellation, failure_cooldown).await {
-                    continue;
+            Err(error) => {
+                let timed_out = error.contains("timed out");
+                let kind = if timed_out { "timed_out" } else { "failed" };
+                eprintln!(
+                    "CLAUDE_REFRESH: {kind} request_id={} source={}",
+                    request_id.map_or_else(|| "background".into(), |id| id.to_string()),
+                    if request_id.is_some() {
+                        "manual"
+                    } else {
+                        "background"
+                    }
+                );
+                if sender
+                    .send(ClaudeRefreshEvent::Failed {
+                        request_id,
+                        timed_out,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
+                failure_cooldown
             }
+        };
+        match wait_for_next(&mut settings, &cancellation, &mut refresh_requests, delay).await {
+            WaitResult::Manual(request) => pending_manual = Some(request),
+            WaitResult::Elapsed | WaitResult::Disabled => {}
+            WaitResult::Cancelled => break,
         }
     }
 }
 
-async fn wait_while_enabled(
+async fn wait_for_next(
     settings: &mut tokio::sync::watch::Receiver<crate::settings::AppSettings>,
     cancellation: &CancellationToken,
+    refresh_requests: &mut tokio::sync::mpsc::Receiver<ManualRefreshRequest>,
     duration: Duration,
-) -> bool {
+) -> WaitResult {
     let sleep = tokio::time::sleep(duration);
     tokio::pin!(sleep);
     loop {
         tokio::select! {
-            _ = cancellation.cancelled() => return false,
-            _ = &mut sleep => return true,
+            _ = cancellation.cancelled() => return WaitResult::Cancelled,
+            _ = &mut sleep => return WaitResult::Elapsed,
+            request = refresh_requests.recv() => {
+                return request.map_or(WaitResult::Cancelled, WaitResult::Manual);
+            }
             changed = settings.changed() => {
-                if changed.is_err() { return false; }
+                if changed.is_err() { return WaitResult::Cancelled; }
                 let current = settings.borrow().clone();
-                if !current.claude_enabled || !current.claude_cli_refresh_enabled { return false; }
+                if !current.claude_enabled || !current.claude_cli_refresh_enabled { return WaitResult::Disabled; }
             }
         }
     }
@@ -235,7 +382,7 @@ fn now_unix() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{RefreshFuture, run_command, run_with_intervals};
+    use super::{ManualRefreshRequest, RefreshFuture, run_command, run_with_intervals};
     use agent_usage_monitor_core::parse_claude_cli_usage;
     use std::sync::{
         Arc,
@@ -261,16 +408,18 @@ mod tests {
     async fn default_disabled_scheduler_does_not_call_the_refresher() {
         let (settings_tx, settings_rx) = watch::channel(crate::settings::AppSettings::default());
         let (sender, _receiver) = mpsc::channel(2);
+        let (_request_sender, request_receiver) = mpsc::channel(1);
         let cancellation = CancellationToken::new();
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         let task = tokio::spawn(run_with_intervals(
             settings_rx,
             sender,
+            request_receiver,
             cancellation.clone(),
             Duration::from_millis(10),
             Duration::from_millis(10),
-            move |_| {
+            move |_, _, _| {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok(parse_claude_cli_usage("Current session: 2% used", 100)) })
                     as RefreshFuture
@@ -288,6 +437,7 @@ mod tests {
         let initial = crate::settings::AppSettings::default();
         let (settings_tx, settings_rx) = watch::channel(initial.clone());
         let (sender, mut receiver) = mpsc::channel(2);
+        let (_request_sender, request_receiver) = mpsc::channel(1);
         let cancellation = CancellationToken::new();
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
@@ -297,10 +447,11 @@ mod tests {
         let task = tokio::spawn(run_with_intervals(
             settings_rx,
             sender,
+            request_receiver,
             cancellation.clone(),
             Duration::from_millis(20),
             Duration::from_millis(20),
-            move |operation_cancel| {
+            move |operation_cancel, _, _| {
                 let count = observed.fetch_add(1, Ordering::SeqCst) + 1;
                 let started = started.clone();
                 Box::pin(async move {
@@ -343,20 +494,24 @@ mod tests {
 
     #[tokio::test]
     async fn failed_refresh_uses_cooldown_before_retrying() {
-        let mut enabled = crate::settings::AppSettings::default();
-        enabled.claude_cli_refresh_enabled = true;
+        let enabled = crate::settings::AppSettings {
+            claude_cli_refresh_enabled: true,
+            ..Default::default()
+        };
         let (_settings_tx, settings_rx) = watch::channel(enabled);
         let (sender, _receiver) = mpsc::channel(2);
+        let (_request_sender, request_receiver) = mpsc::channel(1);
         let cancellation = CancellationToken::new();
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         let task = tokio::spawn(run_with_intervals(
             settings_rx,
             sender,
+            request_receiver,
             cancellation.clone(),
             Duration::from_secs(1),
             Duration::from_millis(80),
-            move |_| {
+            move |_, _, _| {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Err("stub failure".into()) }) as RefreshFuture
             },
@@ -365,6 +520,66 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(calls.load(Ordering::SeqCst) >= 2);
+        cancellation.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_bypasses_failure_cooldown_and_runs_once() {
+        use super::ClaudeRefreshEvent;
+
+        let enabled = crate::settings::AppSettings {
+            claude_enabled: true,
+            claude_cli_refresh_enabled: true,
+            ..Default::default()
+        };
+        let (_settings_tx, settings_rx) = watch::channel(enabled);
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (request_sender, request_receiver) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let task = tokio::spawn(run_with_intervals(
+            settings_rx,
+            sender,
+            request_receiver,
+            cancellation.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            move |operation_cancel, request_id, _observed_at| {
+                let call = observed.fetch_add(1, Ordering::SeqCst) + 1;
+                Box::pin(async move {
+                    if call == 1 {
+                        return Err("stub failure".into());
+                    }
+                    assert_eq!(request_id, Some(42));
+                    tokio::select! {
+                        _ = operation_cancel.cancelled() => Err("cancelled".into()),
+                        _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(parse_claude_cli_usage("Current session: 2% used", 102)),
+                    }
+                }) as RefreshFuture
+            },
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ClaudeRefreshEvent::Failed { .. })
+        ));
+        request_sender
+            .send(ManualRefreshRequest { id: 42 })
+            .await
+            .unwrap();
+        let completed = tokio::time::timeout(Duration::from_millis(500), receiver.recv())
+            .await
+            .expect("manual refresh waited for the background cooldown")
+            .expect("scheduler ended before the manual result");
+        assert!(matches!(
+            completed,
+            ClaudeRefreshEvent::Completed {
+                request_id: Some(42),
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         cancellation.cancel();
         task.await.unwrap();
     }
@@ -387,13 +602,13 @@ mod tests {
             directory.path(),
             "@echo off\necho Current session: 8%% used\nexit /b 0\n",
         );
-        let snapshot = run_command(command, Duration::from_secs(2), &token)
+        let snapshot = run_command(command, Duration::from_secs(2), &token, None, 100)
             .await
             .unwrap();
         assert_eq!(snapshot.five_hour.unwrap().used_percent, Some(8.0));
 
         let command = stub_command(directory.path(), "@echo off\nexit /b 7\n");
-        let failure = run_command(command, Duration::from_secs(2), &token)
+        let failure = run_command(command, Duration::from_secs(2), &token, None, 100)
             .await
             .unwrap_err();
         assert!(failure.contains("exited with status"));
@@ -410,7 +625,7 @@ mod tests {
             marker.display()
         );
         let command = stub_command(directory.path(), &body);
-        let failure = run_command(command, Duration::from_millis(100), &token)
+        let failure = run_command(command, Duration::from_millis(100), &token, None, 100)
             .await
             .unwrap_err();
         assert!(failure.contains("timed out"));
