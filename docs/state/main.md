@@ -42,16 +42,17 @@ v0.1.1: https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.1.1
 Decision: B (`opt-level = "s"`, no Thin LTO); no further size experiments. The shipped v0.1.1 app EXE is 14,967,808 B (B plus the icon fixes).
 
 ## Git state
-- `main` = `origin/main` = `b24d207` before the post-release documentation commits; pushed normally, never forced.
-- The unpublished history was cleaned before the first push: the obsolete design reference images were never published.
-- Other worktrees: the Kilo Code pool worktree `flaxen-marmoset` (`ef5b3a5`, clean) is managed by Kilo; leave it.
+- Only branch: `main`, pushed normally (never forced) and in sync with `origin/main`. The remote has `main` only.
+- The unpublished history was cleaned before the first push, so the obsolete design reference images were never published.
+- Worktrees: the main checkout and the Kilo Code pool worktree `flaxen-marmoset` (`ef5b3a5`, clean). The Kilo worktree is managed by Kilo; leave it.
 
-## Planned post-release cleanup (2026-11-21, approved)
-- Remove local build outputs: `rust/target/{debug,release,x86_64-pc-windows-msvc,tmp,installer,installer-0.1.1}`. Keep `rust/target/installer-0.1.1-final/`.
-- Remove the Codex benchmark worktree (`git worktree remove`) and its `%TEMP%\AUM-size-bench-ddd862b9-20261121` folder; remove `%TEMP%\aum-preview-appdata` and the Claude session scratchpad.
-- Delete the local branch `backup/pre-history-cleanup-v0.1.1` (pre-cleanup history; its tree differs from `main` only in this file). Do not expire the reflog or run aggressive GC.
-- Delete the merged remote branch `origin/feat/ui-redesign-themes` and remove `docs/state/feat-ui-redesign-themes.md`.
-- Keep: tags and releases, `assets/`, the user's `%APPDATA%` settings, the Kilo worktree, and the ignored local provider PNG overrides.
+## Post-release cleanup (2026-11-21, done)
+- Removed local build outputs: `rust/target/{debug,release,x86_64-pc-windows-msvc,tmp,installer,installer-0.1.1}`. Kept `rust/target/installer-0.1.1-final/`, a byte-identical copy of the published v0.1.1 assets. The next build of any kind starts from a clean cache.
+- Removed the Codex benchmark worktree (`git worktree remove`) and the `%TEMP%\AUM-size-bench-ddd862b9-20261121` folder (results recorded above). Also removed `%TEMP%\aum-preview-appdata` and the Claude session scratchpad.
+- Deleted the local branch `backup/pre-history-cleanup-v0.1.1`. All its commits are in `main` with identical patches, except the replaced image add/remove cycle. The reflog was not expired and no aggressive GC was run, so its objects stay until normal Git expiry.
+- Deleted the merged remote branch `feat/ui-redesign-themes` (`ddd862b`, an ancestor of `main` and the `v0.1.0` tag) and its state file.
+- About 20.3 GB of disk space was freed on C:.
+- Kept: tags and releases, `assets/`, the user's `%APPDATA%\Agent Usage Monitor`, the Kilo worktree, and the ignored local provider PNG overrides.
 
 ## Decisions (and why)
 - Provider marks: tracked approved SVGs (`rust/agent-monitor-ui/assets/providers/`) are embedded by `build.rs`; provenance and approval are in `docs/design/brand-assets.md`. Local overrides in `%APPDATA%\Agent Usage Monitor\provider-icons` win over bundled files; build-time overrides apply only with `AUM_PROVIDER_ICONS_DIR`. All sources are trimmed to visible artwork; the optical scale is per provider (Codex 0.90, Claude 1.00).
