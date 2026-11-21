@@ -863,6 +863,10 @@ component ProviderSection inherits Rectangle {
     // Name row + two quota rows; must match MainWindow.section-height.
     property <length> header-height: root.compact ? 24px : 28px;
     property <length> row-height: root.compact ? 24px : 28px;
+    // Give the Codex mark 18 px (about 29% larger) while keeping the combined
+    // mark + gap width at 22 px, so provider names and following content align.
+    property <length> provider-icon-size: root.provider-name == "Codex" ? 18px : 14px;
+    property <length> provider-icon-gap: 22px - root.provider-icon-size;
     height: root.header-height + root.row-height * 2;
     background: transparent;
     // Header: ONE row layout for the whole width: [14 px mark] 8 [name] [badge]
@@ -876,11 +880,11 @@ component ProviderSection inherits Rectangle {
         if root.has-icon: AxisSlot {
             offset: FlyoutGrid.header-shape-offset;
             ProviderMark {
-                size: 14px;
+                size: root.provider-icon-size;
                 source: root.icon;
             }
         }
-        if root.has-icon: Rectangle { width: 8px; }
+        if root.has-icon: Rectangle { width: root.provider-icon-gap; }
         Text {
             text: root.provider-name;
             font-size: FlyoutGrid.header-font-size;
