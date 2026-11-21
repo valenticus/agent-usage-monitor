@@ -23,6 +23,9 @@ raw-window-handle.workspace = true
 
 # Encodes the notification identity PNG and decodes embedded provider marks.
 png = "0.18"
+# Rasterizes provider SVGs so their transparent margins can be trimmed like PNGs.
+# Same version Slint already builds for its own SVG rendering (no new crates).
+resvg = { version = "0.49", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # WinRT toast notifications (ToastNotificationManager) with AUM's own AppUserModelID.

@@ -10,6 +10,10 @@ const MAX_ICON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_SOURCE_EDGE: u32 = 4096;
 /// Raster sources are trimmed and kept at most this large after loading.
 const MASTER_EDGE: u32 = 256;
+/// SVGs are rasterized with their longer canvas side at this many px before
+/// trimming, so even artwork that fills only a quarter of its canvas still
+/// yields a full `MASTER_EDGE` master.
+const SVG_RENDER_EDGE: u32 = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Provider {
@@ -59,12 +63,14 @@ pub fn candidates(provider: Provider, light: bool) -> &'static [&'static str] {
     }
 }
 
-/// A decoded source: SVGs stay vector (Slint renders them at display size);
-/// PNGs are trimmed to their visible content, squared and kept as a small
-/// straight-alpha RGBA master for exact-size downscaling.
+/// A decoded source. SVGs and PNGs alike are trimmed to their visible
+/// content, squared and kept as a small straight-alpha RGBA master for
+/// exact-size downscaling. Trimming matters for SVGs too: the original OpenAI
+/// Blossom artwork fills only 49.5 % of its 716-unit viewBox while the Claude
+/// Spark fills 99.6 % of its 94-unit one, so untrimmed vectors at the same
+/// box size showed the Codex mark at half the Claude mark's visible size.
 #[derive(Clone)]
 enum Source {
-    Vector(Image),
     Raster {
         rgba: Vec<u8>,
         width: u32,
@@ -92,7 +98,6 @@ impl ProviderIcons {
         scale_factor: f32,
     ) -> Option<Image> {
         match self.sources.get(&(provider, light))? {
-            Source::Vector(image) => Some(image.clone()),
             Source::Raster {
                 rgba,
                 width,
@@ -212,7 +217,7 @@ fn load_source(path: &Path) -> Option<Source> {
     }
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
-        "svg" => Image::load_from_path(path).ok().map(Source::Vector),
+        "svg" => load_svg_bytes(&std::fs::read(path).ok()?),
         "png" => load_png(path),
         _ => None,
     }
@@ -228,10 +233,41 @@ fn load_embedded_source(name: &str, bytes: &[u8]) -> Option<Source> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "svg" => Image::load_from_svg_data(bytes).ok().map(Source::Vector),
+        "svg" => load_svg_bytes(bytes),
         "png" => load_png_bytes(bytes),
         _ => None,
     }
+}
+
+/// Renders an SVG (file bytes are never modified) with its longer canvas side
+/// at `SVG_RENDER_EDGE` px, aspect ratio preserved, then runs the pixels
+/// through the PNG trim and resampling pipeline.
+fn load_svg_bytes(bytes: &[u8]) -> Option<Source> {
+    use resvg::{tiny_skia, usvg};
+    if bytes.len() as u64 > MAX_ICON_BYTES {
+        return None;
+    }
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let longest = size.width().max(size.height());
+    if !(longest.is_finite() && longest > 0.0) {
+        return None;
+    }
+    let scale = SVG_RENDER_EDGE as f32 / longest;
+    let width = ((size.width() * scale).ceil() as u32).clamp(1, SVG_RENDER_EDGE);
+    let height = ((size.height() * scale).ceil() as u32).clamp(1, SVG_RENDER_EDGE);
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for pixel in pixmap.pixels() {
+        let color = pixel.demultiply();
+        rgba.extend_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
+    }
+    raster_from_rgba(rgba, width, height)
 }
 
 fn load_png(path: &Path) -> Option<Source> {
@@ -446,6 +482,72 @@ mod tests {
         for light in [false, true] {
             assert!(icons.icon(Provider::Codex, light, 20.0, 1.0).is_some());
             assert!(icons.icon(Provider::Claude, light, 20.0, 1.0).is_some());
+        }
+    }
+
+    /// Visible (alpha > 0) bounds of an icon as (left, top, right, bottom).
+    fn visible_bounds(image: &Image) -> (u32, u32, u32, u32) {
+        let buffer = image.to_rgba8().unwrap();
+        let width = buffer.width();
+        let (mut bounds, mut any) = ((u32::MAX, u32::MAX, 0, 0), false);
+        for (index, pixel) in buffer.as_slice().iter().enumerate() {
+            if pixel.a > 0 {
+                let (x, y) = (index as u32 % width, index as u32 / width);
+                bounds = (
+                    bounds.0.min(x),
+                    bounds.1.min(y),
+                    bounds.2.max(x + 1),
+                    bounds.3.max(y + 1),
+                );
+                any = true;
+            }
+        }
+        assert!(any, "icon has visible pixels");
+        bounds
+    }
+
+    #[test]
+    fn svg_is_trimmed_to_visible_artwork_and_scaled_to_exact_physical_size() {
+        let directory = tempfile::tempdir().unwrap();
+        // Generic test asset: content is half the canvas, centred.
+        std::fs::write(
+            directory.path().join("codex-on-dark.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\" viewBox=\"0 0 4 4\"><rect x=\"1\" y=\"1\" width=\"2\" height=\"2\" fill=\"#ffffff\"/></svg>",
+        )
+        .unwrap();
+        let icons = load_from_directory(directory.path());
+        for (scale, expected) in [(1.0, 14), (1.25, 18), (1.5, 21), (2.0, 28)] {
+            let image = icons.icon(Provider::Codex, false, 14.0, scale).unwrap();
+            assert_eq!(image.size().width, expected);
+            assert_eq!(image.size().height, expected);
+            assert_eq!(visible_bounds(&image), (0, 0, expected, expected));
+            assert_eq!(pixel(&image, 0, 0).a, 255);
+        }
+    }
+
+    /// The bundled Codex and Claude marks have very different viewBox
+    /// padding; after trimming, both span the full icon box at every size, so
+    /// they read equally large in the flyout (14 px) and Settings (16 px).
+    #[test]
+    fn bundled_provider_marks_fill_the_same_visible_box() {
+        let empty = tempfile::tempdir().unwrap();
+        let (icons, _) = load_icons(bundled::BUNDLED, empty.path());
+        for logical in [14.0f32, 16.0] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let edge = (logical * scale).round() as u32;
+                for light in [false, true] {
+                    for provider in [Provider::Codex, Provider::Claude] {
+                        let image = icons.icon(provider, light, logical, scale).unwrap();
+                        let (left, top, right, bottom) = visible_bounds(&image);
+                        // Allow one device px of antialiasing slack per side.
+                        assert!(
+                            left <= 1 && top <= 1 && right + 1 >= edge && bottom + 1 >= edge,
+                            "{provider:?} light={light} {logical}px@{scale}: \
+                             bounds {left},{top}-{right},{bottom} in {edge}"
+                        );
+                    }
+                }
+            }
         }
     }
 

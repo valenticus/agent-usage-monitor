@@ -155,6 +155,7 @@ dependencies = [
  "chrono",
  "png",
  "raw-window-handle",
+ "resvg",
  "serde",
  "serde_json",
  "slint",
