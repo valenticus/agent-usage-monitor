@@ -10,9 +10,9 @@
 ; - Start menu shortcut; desktop shortcut only when chosen.
 ; - Optional per-user Windows sign-in launch, disabled by default; no automatic updates or telemetry.
 ; - Provider (Codex/Claude) marks are embedded inside agent-usage-monitor.exe
-;   when present at build time (rust/agent-monitor-ui/assets/provider-icons,
-;   git-ignored); no loose logo files are installed. Public distribution
-;   needs the brand owners' permission (docs/design/brand-assets.md).
+;   by build.rs from the tracked original SVGs in
+;   rust/agent-monitor-ui/assets/providers/; no loose logo files are
+;   installed. Provenance and distribution approval: docs/design/brand-assets.md.
 ;   The user's %APPDATA%\Agent Usage Monitor\provider-icons folder is never
 ;   touched.
 ; - Settings are kept on upgrade and uninstall unless the user explicitly
