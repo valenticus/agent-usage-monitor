@@ -191,6 +191,7 @@ fn load_icons(embedded: &[(&str, &[u8])], directory: &Path) -> (ProviderIcons, S
                     })
                 });
             if let Some((source, origin)) = found {
+                let source = with_optical_scale(source, optical_scale(provider));
                 sources.insert((provider, light), source);
                 origins.push(((provider, light), origin));
             }
@@ -203,6 +204,50 @@ fn load_icons(embedded: &[(&str, &[u8])], directory: &Path) -> (ProviderIcons, S
         },
         origins,
     )
+}
+
+/// Share of the icon box the trimmed artwork may fill. Claude is the visual
+/// reference (1.0). The OpenAI Blossom is a dense closed ring whose visible
+/// edge runs all the way round, so at the same trimmed size it reads larger
+/// and heavier than the open Claude Spark; it is drawn at 90 % of the box.
+fn optical_scale(provider: Provider) -> f32 {
+    match provider {
+        Provider::Codex => 0.90,
+        Provider::Claude => 1.0,
+    }
+}
+
+/// Centres the trimmed master in a larger transparent square so the artwork
+/// fills `scale` of the box. The padding is equal on every side (the margin
+/// is rounded to whole master pixels), so area resampling keeps the symbol
+/// centred at every physical size. A scale of 1.0 returns the source as is.
+fn with_optical_scale(source: Source, scale: f32) -> Source {
+    let Source::Raster {
+        rgba,
+        width,
+        height,
+    } = source;
+    if !(scale > 0.0 && scale < 1.0) {
+        return Source::Raster {
+            rgba,
+            width,
+            height,
+        };
+    }
+    let margin = ((width as f32 / scale - width as f32) / 2.0).round() as u32;
+    let edge = width + 2 * margin;
+    let mut padded = vec![0u8; (edge * edge * 4) as usize];
+    for y in 0..height {
+        let source = (y * width * 4) as usize;
+        let target = (((margin + y) * edge + margin) * 4) as usize;
+        let length = (width * 4) as usize;
+        padded[target..target + length].copy_from_slice(&rgba[source..source + length]);
+    }
+    Source::Raster {
+        rgba: padded,
+        width: edge,
+        height: edge,
+    }
 }
 
 #[cfg(test)]
@@ -506,18 +551,95 @@ mod tests {
         bounds
     }
 
+    /// Linear fill of the box (sqrt of alpha coverage) and the horizontal and
+    /// vertical balance of the ink (left − right, top − bottom halves, as a
+    /// share of all ink). A full opaque square gives (1.0, 0.0, 0.0).
+    fn fill_and_balance(image: &Image) -> (f32, f32, f32) {
+        let buffer = image.to_rgba8().unwrap();
+        let (width, height) = (buffer.width(), buffer.height());
+        let (mut total, mut horizontal, mut vertical) = (0.0f32, 0.0f32, 0.0f32);
+        for (index, pixel) in buffer.as_slice().iter().enumerate() {
+            let alpha = pixel.a as f32 / 255.0;
+            let (x, y) = (index as u32 % width, index as u32 / width);
+            total += alpha;
+            horizontal += if x * 2 + 1 < width {
+                alpha
+            } else if x * 2 + 1 > width {
+                -alpha
+            } else {
+                0.0
+            };
+            vertical += if y * 2 + 1 < height {
+                alpha
+            } else if y * 2 + 1 > height {
+                -alpha
+            } else {
+                0.0
+            };
+        }
+        (
+            (total / (width * height) as f32).sqrt(),
+            horizontal / total,
+            vertical / total,
+        )
+    }
+
+    /// Claude is the visual reference at full size; Codex alone is drawn at
+    /// 90 % of the same box, centred, at every container size, scale and theme.
+    #[test]
+    fn codex_has_provider_specific_optical_scale_and_claude_is_unchanged() {
+        assert_eq!(optical_scale(Provider::Claude), 1.0);
+        assert_eq!(optical_scale(Provider::Codex), 0.90);
+        let directory = tempfile::tempdir().unwrap();
+        // Generic full-bleed square in every slot (not a provider mark).
+        for name in [
+            "codex-on-dark.png",
+            "codex-on-light.png",
+            "claude-on-dark.png",
+            "claude-on-light.png",
+        ] {
+            write_png(&directory.path().join(name), 256, 256, [255, 255, 255]);
+        }
+        let icons = load_from_directory(directory.path());
+        for logical in [14.0f32, 16.0] {
+            for scale in [1.0f32, 1.25, 1.5, 2.0] {
+                let edge = (logical * scale).round() as u32;
+                for light in [false, true] {
+                    let claude = icons.icon(Provider::Claude, light, logical, scale).unwrap();
+                    let codex = icons.icon(Provider::Codex, light, logical, scale).unwrap();
+                    // Containers are unchanged: both images are exactly edge².
+                    assert_eq!((claude.size().width, claude.size().height), (edge, edge));
+                    assert_eq!((codex.size().width, codex.size().height), (edge, edge));
+                    let label = format!("{logical}px@{scale} light={light}");
+                    let (fill, _, _) = fill_and_balance(&claude);
+                    assert!((fill - 1.0).abs() < 1e-3, "Claude {label}: fill {fill}");
+                    let (fill, horizontal, vertical) = fill_and_balance(&codex);
+                    assert!((fill - 0.90).abs() < 0.01, "Codex {label}: fill {fill}");
+                    assert!(
+                        horizontal.abs() < 1e-3,
+                        "Codex {label}: off-centre x {horizontal}"
+                    );
+                    assert!(
+                        vertical.abs() < 1e-3,
+                        "Codex {label}: off-centre y {vertical}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn svg_is_trimmed_to_visible_artwork_and_scaled_to_exact_physical_size() {
         let directory = tempfile::tempdir().unwrap();
         // Generic test asset: content is half the canvas, centred.
         std::fs::write(
-            directory.path().join("codex-on-dark.svg"),
+            directory.path().join("claude-on-dark.svg"),
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\" viewBox=\"0 0 4 4\"><rect x=\"1\" y=\"1\" width=\"2\" height=\"2\" fill=\"#ffffff\"/></svg>",
         )
         .unwrap();
         let icons = load_from_directory(directory.path());
         for (scale, expected) in [(1.0, 14), (1.25, 18), (1.5, 21), (2.0, 28)] {
-            let image = icons.icon(Provider::Codex, false, 14.0, scale).unwrap();
+            let image = icons.icon(Provider::Claude, false, 14.0, scale).unwrap();
             assert_eq!(image.size().width, expected);
             assert_eq!(image.size().height, expected);
             assert_eq!(visible_bounds(&image), (0, 0, expected, expected));
@@ -526,26 +648,36 @@ mod tests {
     }
 
     /// The bundled Codex and Claude marks have very different viewBox
-    /// padding; after trimming, both span the full icon box at every size, so
-    /// they read equally large in the flyout (14 px) and Settings (16 px).
+    /// padding. After trimming, the Claude Spark spans the full icon box and
+    /// the Blossom sits centred inside it with only its optical inset, in the
+    /// flyout (14 px) and Settings (16 px) at every scale.
     #[test]
-    fn bundled_provider_marks_fill_the_same_visible_box() {
+    fn bundled_provider_marks_are_trimmed_and_centred() {
         let empty = tempfile::tempdir().unwrap();
         let (icons, _) = load_icons(bundled::BUNDLED, empty.path());
         for logical in [14.0f32, 16.0] {
             for scale in [1.0, 1.25, 1.5, 2.0] {
                 let edge = (logical * scale).round() as u32;
                 for light in [false, true] {
-                    for provider in [Provider::Codex, Provider::Claude] {
-                        let image = icons.icon(provider, light, logical, scale).unwrap();
-                        let (left, top, right, bottom) = visible_bounds(&image);
-                        // Allow one device px of antialiasing slack per side.
-                        assert!(
-                            left <= 1 && top <= 1 && right + 1 >= edge && bottom + 1 >= edge,
-                            "{provider:?} light={light} {logical}px@{scale}: \
-                             bounds {left},{top}-{right},{bottom} in {edge}"
-                        );
-                    }
+                    let label = format!("light={light} {logical}px@{scale}");
+                    let claude = icons.icon(Provider::Claude, light, logical, scale).unwrap();
+                    let (left, top, right, bottom) = visible_bounds(&claude);
+                    // Allow one device px of antialiasing slack per side.
+                    assert!(
+                        left <= 1 && top <= 1 && right + 1 >= edge && bottom + 1 >= edge,
+                        "Claude {label}: bounds {left},{top}-{right},{bottom} in {edge}"
+                    );
+                    let codex = icons.icon(Provider::Codex, light, logical, scale).unwrap();
+                    let (left, top, right, bottom) = visible_bounds(&codex);
+                    // 5 % inset per side (≤ 1.6 device px at 32 px) plus antialiasing.
+                    assert!(
+                        left <= 2 && top <= 2 && right + 2 >= edge && bottom + 2 >= edge,
+                        "Codex {label}: bounds {left},{top}-{right},{bottom} in {edge}"
+                    );
+                    assert!(
+                        left.abs_diff(edge - right) <= 1 && top.abs_diff(edge - bottom) <= 1,
+                        "Codex {label}: not centred, bounds {left},{top}-{right},{bottom} in {edge}"
+                    );
                 }
             }
         }
@@ -556,14 +688,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         // Content is half the canvas, like the supplied Blossom files.
         write_png(
-            &directory.path().join("codex-on-dark.png"),
+            &directory.path().join("claude-on-dark.png"),
             64,
             32,
             [255, 255, 255],
         );
         let icons = load_from_directory(directory.path());
         for (scale, expected) in [(1.0, 20), (1.25, 25), (1.5, 30), (2.0, 40)] {
-            let image = icons.icon(Provider::Codex, false, 20.0, scale).unwrap();
+            let image = icons.icon(Provider::Claude, false, 20.0, scale).unwrap();
             assert_eq!(image.size().width, expected);
             assert_eq!(image.size().height, expected);
             // Margins were trimmed: the corner is fully opaque content.
