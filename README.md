@@ -1,52 +1,146 @@
-# Agent Usage Monitor (AUM)
+<div align="center">
 
-**A lightweight, open-source Windows desktop monitor for AI coding-assistant usage, built with Rust and Slint.**
+<img src="assets/icon.png" width="96" alt="Agent Usage Monitor app icon">
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-15243D?style=flat&labelColor=15243D)](LICENSE) ![Platform: Windows](https://img.shields.io/badge/Platform-Windows-15243D?style=flat&labelColor=15243D) ![Rust](https://img.shields.io/badge/Rust-Slint-15243D?style=flat&labelColor=15243D)
+# Agent Usage Monitor
 
-> **Development status:** Active development. A polished release, screenshots, and installation packages will be published when ready. Until then, follow the source-build instructions below; feature availability and integrations may change.
+**Keep Codex and Claude Code usage limits in view while you work.**
 
-Agent Usage Monitor helps developers keep an eye on their AI coding-assistant usage without repeatedly switching away from their workflow. It combines a provider-neutral monitoring core with a small native Windows interface and local, privacy-conscious settings.
+[![License: MIT](https://img.shields.io/badge/License-MIT-15243D?style=flat-square)](LICENSE)
+![Platform: Windows](https://img.shields.io/badge/Platform-Windows-15243D?style=flat-square)
+![Rust](https://img.shields.io/badge/Rust-Slint-15243D?style=flat-square)
+![Languages](https://img.shields.io/badge/Languages-English%20%7C%20Ukrainian%20%7C%20Polish-15243D?style=flat-square)
 
-## What it does
+<img src="assets/hero.png" alt="Agent Usage Monitor showcase artwork">
 
-- **Codex:** reads rate-limit information using the experimental `codex app-server` interface, with initial refresh and periodic updates in live mode.
-- **Claude Code (opt-in):** receives only supported usage windows from Claude Code's documented status-line input through a local bridge. It never silently edits an existing status-line configuration.
-- **At a glance:** remaining percentages and independent reset countdowns, with unavailable or stale data clearly distinguished from valid values.
-- **Windows integration:** notification-area tray icon, compact quota popup, Settings window, and notification alerts.
-- **Personalization:** dark, light, and system themes; Ukrainian, English, and Polish localization.
-- **Local-first:** saves settings and alert state under the user's application data directory. It does not store authentication credentials or tokens.
+</div>
+
+> **Version 0.1.0 · Development build.** This project is under active development. The screenshots below are supplied showcase artwork and may depict an earlier UI iteration. They illustrate the project’s visual direction; use the feature list and limitations below as the source of truth for current behavior. No installer or released binary is currently promised.
+
+Agent Usage Monitor (AUM) is a small Windows desktop app built with **Rust** and **Slint**. It presents supported AI coding-assistant usage windows, remaining percentages, reset countdowns, and local alerts in a compact interface.
+
+## Features
+
+- **Codex usage:** reads rate-limit information through the `codex app-server` interface. Live mode makes an initial request and refreshes every five minutes.
+- **Claude Code (opt-in):** an optional local bridge accepts supported usage fields from Claude Code’s documented status-line JSON input. AUM does not edit Claude settings or read credentials or transcripts.
+- **Usage at a glance:** separate 5-hour and weekly windows, remaining percentages, reset countdowns, and clear unavailable or stale states.
+- **Windows notification area:** tray menu actions to show or hide the quota popup, open Settings, and quit; Windows notifications for configured usage thresholds.
+- **Settings:** enable or disable providers, configure warning and critical thresholds, weekly alerts, and notification duration.
+- **Appearance:** System, Dark, and Light themes; English, Ukrainian, and Polish interface localization.
+- **Local-first preferences:** settings and alert state are stored locally in the user’s application data folder. AUM does not store provider credentials or tokens.
 
 ### Current limitations
 
-This is a **development build, not a finished public release**. Quota-driven tray-icon refresh is not yet connected, high-DPI screenshot comparisons remain outstanding, and integration availability depends on upstream provider interfaces. Claude Code usage is session-driven and may be missing or stale. No promises of stable installation packages or released binaries are implied.
+- AUM is a development build; packaged installers and stable release binaries are not provided here.
+- Claude status-line values are session-driven. They can be absent until Claude Code supplies them and can become stale when no new status-line input arrives.
+- The tray icon is currently neutral; live quota-driven tray-icon updates are not connected.
+- Windows notification delivery follows the user’s Windows notification and focus settings.
+- Physical high-DPI appearance still needs manual review at multiple Windows scaling levels.
 
-## License & reuse
+## Showcase
 
-This project is released under the **[MIT License](LICENSE)**.
+The following images are included from the supplied showcase archive. Some show a design iteration that predates the current Rust/Slint UI and may include controls or behavior that are not present in this version.
 
-You may **use, copy, modify, merge, publish, distribute, sublicense, and sell** copies of the software, including in commercial projects, subject to the license terms. **You must retain the original copyright notice and MIT permission notice** in copies or substantial portions of the software.
+### Quota views
 
-Copyright © 2026 **Valentyn Fetisov**. The software is provided **“AS IS”**, without warranty. MIT permits reuse; it does not require derivatives to be open-source. Third-party dependencies, trademarks, and provider assets may have separate conditions.
+<table>
+<tr>
+<td width="50%"><img src="assets/main-dark.png" alt="Dark quota view from the supplied showcase"></td>
+<td width="50%"><img src="assets/main-light.png" alt="Light quota view from the supplied showcase"></td>
+</tr>
+</table>
 
-## Build and run
+<img src="assets/tray.png" alt="Tray and quota popup showcase">
 
-Install a stable Rust toolchain with the `x86_64-pc-windows-msvc` target and Windows SDK / Visual Studio C++ Build Tools. From `rust/`:
+### Settings and appearance
+
+<table>
+<tr>
+<td width="50%"><img src="assets/settings-dark.png" alt="Dark settings showcase"></td>
+<td width="50%"><img src="assets/settings-light.png" alt="Light settings showcase"></td>
+</tr>
+</table>
+
+<img src="assets/themes.png" alt="Theme showcase">
+
+### Languages and notifications
+
+<img src="assets/languages.png" alt="Localization showcase">
+
+<img src="assets/notifications.png" alt="Notification settings showcase">
+
+### About
+
+<img src="assets/about.png" alt="About and connection status showcase">
+
+## Setup
+
+### Requirements
+
+- Windows 10 or later
+- Stable Rust toolchain (the workspace declares Rust 1.85)
+- `x86_64-pc-windows-msvc` target
+- Visual Studio C++ Build Tools and the Windows SDK
+- Codex CLI for live Codex data
+
+Install the Rust target if needed:
 
 ```powershell
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --workspace
+rustup target add x86_64-pc-windows-msvc
+```
+
+### Build from source
+
+Clone the repository and build the workspace from the `rust/` directory:
+
+```powershell
+git clone https://github.com/valenticus/agent-usage-monitor.git
+cd agent-usage-monitor/rust
+cargo build --workspace --release
+```
+
+The desktop executable is `target\release\agent-usage-monitor.exe`. The optional Claude bridge executable is `target\release\agent-usage-monitor-claude-bridge.exe`.
+
+### Run modes
+
+From the `rust/` directory, run the clearly labeled sample data mode:
+
+```powershell
 cargo run -p agent-usage-monitor-ui --bin agent-usage-monitor -- --demo
 ```
 
-Use `--live` for live Codex data. Claude integration is opt-in with `--enable-claude-bridge`; see [`docs/claude-status-line.md`](docs/claude-status-line.md). Demo values are labeled as samples. Settings and alert state are stored locally under `%APPDATA%\Agent Usage Monitor`.
+Run with live Codex data:
 
-## Project layout
+```powershell
+cargo run -p agent-usage-monitor-ui --bin agent-usage-monitor -- --live
+```
 
-- `rust/agent-monitor-core`: provider models, Codex integration, alerts, and Claude bridge.
-- `rust/agent-monitor-ui`: Slint UI, settings, localization, themes, and Windows tray integration.
-- `docs/`: essential integration and architecture research notes.
+Enable the Claude status-line bridge explicitly alongside live mode:
 
-The executable is `agent-usage-monitor.exe`. See `rust/agent-monitor-ui/README.md` for current features and limitations.
+```powershell
+cargo run -p agent-usage-monitor-ui --bin agent-usage-monitor -- --live --enable-claude-bridge
+```
+
+Claude setup is manual and opt-in. Review [`docs/claude-status-line.md`](docs/claude-status-line.md) before configuring a status-line command. AUM does not modify Claude’s settings, and its bridge does not compose with or preserve an existing status-line command automatically.
+
+## Portable use
+
+AUM does not require an installer for a local source build. To run the built app from a folder or removable drive, copy `agent-usage-monitor.exe` and any required runtime files produced by your build into that folder and launch the executable. The app stores its preferences and alert state separately under `%APPDATA%\Agent Usage Monitor`; those files are not stored beside the executable. This is portable in the sense that the app can be launched from a chosen folder, but its settings are per-user rather than fully self-contained. No prebuilt portable package is currently published.
+
+## Project structure
+
+- `rust/agent-monitor-core/` — provider models, Codex access, alerts, and the opt-in Claude bridge.
+- `rust/agent-monitor-ui/` — Slint interface, settings, themes, localization, and Windows tray integration.
+- `docs/` — provider integration notes and project research.
+
+See the [UI crate README](rust/agent-monitor-ui/README.md) for implementation details and current limitations.
+
+## License
+
+Agent Usage Monitor is licensed under the [MIT License](LICENSE). Copyright © 2026 Valentyn Fetisov. You may use, modify, distribute, and sell copies under the license terms; copies or substantial portions must retain the copyright and permission notices. The software is provided “AS IS,” without warranty. Third-party dependencies, names, and marks may have separate terms.
+
+## Links
+
+- [Source repository](https://github.com/valenticus/agent-usage-monitor)
+- [Claude Code status-line setup](docs/claude-status-line.md)
+- [MIT License](LICENSE)
