@@ -1,48 +1,28 @@
-# Provider brand assets
+# Third-party provider marks
 
-Update, 21 November 2026 (v0.1.0 pre-release): the approved local marks (OpenAI Blossom white/black, unmodified; Claude Spark recoloured to #FFFFFF and #111111) can be embedded into a local build from the git-ignored `rust/agent-monitor-ui/assets/provider-icons/` folder. Permission is **still unresolved**. OpenAI's marks terms require use "exactly as provided" and per the brand guidelines. Anthropic requires prior written approval and forbids colour alterations, so the recoloured Spark variants are not compliant as they stand. Builds containing these marks are for private review only until permission is granted.
+## Separate from the MIT license
 
-Earlier status (superseded by the update above), 21 November 2026: **unresolved.** No official provider logos are bundled, because neither owner's published terms permit a third-party app to embed them without prior permission. Until official artwork is permitted, the Codex and Claude cards show the provider name only. No substitute mark is drawn, so nothing invented stands in for the real logos. Earlier placeholders (`>_`, a sparkle, and the "Cx"/"Cl" tiles) were removed.
+The project owner has approved distribution of the existing Codex and Claude provider assets in AUM. The files remain the property and trademarks of their respective owners. This project-side approval does not transfer ownership or change the owners' terms. The marks are **not** licensed under this repository's MIT license; MIT applies to AUM's own code and original project assets only.
 
-Provider logos are never used in the AUM application icon, the tray icon, installer branding or the window title. AUM's own identity is the two-bar mark.
+The provider marks are used only inside their corresponding provider cards. They are not used in AUM's application icon, tray indicator, installer branding, or product name.
 
-## Official sources reviewed
+## Bundled source files and provenance
 
-| Owner | Official source | What is offered | Terms for third parties |
-| --- | --- | --- | --- |
-| OpenAI | https://openai.com/brand/ | A "Download logos" button in the Blossom section. The page shows images such as `Blossom_Light.svg`. The full guide at brand.openai.com did not render for automated review. | Under "How to use our Logos", allowed use includes "Use the logo only when it directly relates to OpenAI services" and "Use the logo exactly as provided". Not allowed: "Use the logo without permission or outside OpenAI's terms". Permission is non-exclusive and non-transferable, and OpenAI "may terminate permission … at any time". |
-| OpenAI (Codex) | https://chatgpt.com/codex/ | Marketing copy only. No Codex-specific mark or brand kit was found. | Not applicable. |
-| Anthropic | https://www.anthropic.com/legal/trademark-guidelines (effective 1 Aug 2024; PDF linked from that page) | No public logo files. "We will supply an image (or images) of the trademark(s) for your use". | "You may only use our trademarks as specifically permitted by us and only in materials we approve beforehand." No alterations of color, font or proportion are allowed. |
-| Anthropic | https://www.anthropic.com/news → "Download press kit" (`/press-kit`, redirects to a ZIP on assets.claude.com) | An official media-asset ZIP. Its contents were not inspected. | The trademark guidelines above still apply, so approval is required. |
+The three tracked SVG files in `rust/agent-monitor-ui/assets/providers/` are copied byte-for-byte from the owners' official asset packages:
 
-No page documents an official pair of dark-background and light-background variants for either provider.
-
-## How to obtain permission
-
-| Owner | Contact | What to send |
+| Tracked file | Official source and package path | Use |
 | --- | --- | --- |
-| OpenAI | partnercomms@openai.com (logo permission requests). Legal questions: legal@openai.com. | The project name and repository URL, and that it is an independent, open-source tray utility showing the user's own Codex quota. Explain that a 16 px unmodified mark would appear only inside the Codex card, never in AUM's name, icon or branding. Ask which official files to use on dark and light backgrounds, and whether redistribution inside the MIT repository is allowed or the files must stay user-supplied. |
-| Anthropic | marketing@anthropic.com. The guidelines name this address for parties with an existing business relationship; press@anthropic.com is listed for media. | The same details for the Claude card. Anthropic says it supplies the approved images itself. |
+| `OAI_OpenAI-Blossom_White.svg` | [OpenAI Brand](https://openai.com/brand/) logo package, `OpenAI-logos/SVGs/OAI_OpenAI-Blossom_White.svg` | Codex card on dark themes |
+| `OAI_OpenAI-Blossom_Black.svg` | [OpenAI Brand](https://openai.com/brand/) logo package, `OpenAI-logos/SVGs/OAI_OpenAI-Blossom_Black.svg` | Codex card on Light theme |
+| `Claude Spark - Clay.svg` | [Anthropic Press Kit](https://www.anthropic.com/press-kit) package, `Anthropic media resources/Anthropic logos/Claude logos/3 Claude Spark/SVG/Claude Spark - Clay.svg` | Claude card on all themes |
 
-Record any written permission next to the asset files, in a separate `third_party/` folder with its own notice, outside the MIT-licensed code. Do not treat the permission as covering anything beyond what it states.
+OpenAI does not publish a separate Codex mark in that package; AUM uses the OpenAI Blossom to identify the Codex provider card. The Anthropic Spark source is kept unmodified and in its supplied color. The prior local white and dark raster derivatives are not used by clean-checkout builds.
 
-## Local official artwork supplied by the user (supported now)
+`build.rs` embeds the tracked SVG bytes into the executable. The build does not download assets. User-provided build and runtime icon fallback paths remain available as documented in `docs/provider-icons.md`.
 
-A user who is permitted to use the marks can place unmodified official SVG files in `%APPDATA%\Agent Usage Monitor\provider-icons\`:
+## Owner guidance
 
-| File | Used for |
-| --- | --- |
-| `codex-on-dark.svg`, `claude-on-dark.svg` | Graphite and Bluish Dark themes |
-| `codex-on-light.svg`, `claude-on-light.svg` | Light theme |
-| `codex.svg`, `claude.svg` | Fallback for a variant that is missing |
+- [OpenAI brand guidelines](https://openai.com/brand/) identify OpenAI names and marks as OpenAI property, require use to follow its terms, and say to use marks as provided. The downloaded logo package is supplied through that page.
+- [Anthropic trademark guidelines](https://www.anthropic.com/legal/trademark-guidelines) govern use of Anthropic and Claude marks. The official press kit supplies the SVG source referenced above.
 
-Recheck, 21 November 2026 — official sources for these files:
-
-| Provider | Official download | Gate | Candidate file (unmodified) |
-| --- | --- | --- | --- |
-| Claude | https://www.anthropic.com/press-kit → ZIP on assets.claude.com | No click-through, but the trademark guidelines require Anthropic's prior approval of the material | `Anthropic media resources/Anthropic logos/Claude logos/3 Claude Spark/SVG/Claude Spark - Clay.svg` (one colour that reads on dark and light). Save it as `claude.svg`. |
-| Codex (OpenAI) | https://openai.com/brand/ → "Download logos" (`https://cdn.openai.com/brand/openai-logos.zip`) | The page says "By using our logos, you agree to our Marks usage terms" | The Blossom mark: the white/light variant as `codex-on-dark.svg`, the black/dark variant as `codex-on-light.svg`. OpenAI publishes no separate Codex mark. |
-
-AUM did not download the OpenAI kit or install either mark, because doing so means accepting the owners' terms on the user's behalf. Placing the files is the user's decision.
-
-The variant switches automatically with the theme. It is shown at 16 px with its original proportions (contain fit), in the flyout, the compact preview and the Settings provider card. AUM never recolors, inverts or filters these files.
+These notes identify asset provenance and ownership; they do not grant permissions beyond the distribution approval recorded above. Do not describe the marks as AUM or MIT-licensed assets.

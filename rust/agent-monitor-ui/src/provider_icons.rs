@@ -18,8 +18,8 @@ pub enum Provider {
 }
 
 /// Lookup order per provider and background. The first readable, decodable
-/// file wins. Theme-specific PNGs come first (local display copies), then the
-/// original user-supplied files, then the SVG names supported earlier.
+/// file wins. Existing user-provided icon files remain supported as fallback;
+/// tracked original SVGs supply clean-checkout defaults.
 /// `ClaudeIcon-Rounded.png` / `ClaudeIcon-Square.png` (app tiles) are never
 /// candidates: the flyout shows the Claude Spark symbol only.
 pub fn candidates(provider: Provider, light: bool) -> &'static [&'static str] {
@@ -27,6 +27,7 @@ pub fn candidates(provider: Provider, light: bool) -> &'static [&'static str] {
         (Provider::Codex, false) => &[
             "codex-on-dark.png",
             "OAI_OpenAI-Blossom_White.png",
+            "OAI_OpenAI-Blossom_White.svg",
             "codex-on-dark.svg",
             "codex.png",
             "codex.svg",
@@ -34,6 +35,7 @@ pub fn candidates(provider: Provider, light: bool) -> &'static [&'static str] {
         (Provider::Codex, true) => &[
             "codex-on-light.png",
             "OAI_OpenAI-Blossom_Black.png",
+            "OAI_OpenAI-Blossom_Black.svg",
             "codex-on-light.svg",
             "codex.png",
             "codex.svg",
@@ -44,6 +46,7 @@ pub fn candidates(provider: Provider, light: bool) -> &'static [&'static str] {
             "claude.png",
             "claude.svg",
             "Claude Spark - Clay.png",
+            "Claude Spark - Clay.svg",
         ],
         (Provider::Claude, true) => &[
             "claude-on-light.png",
@@ -51,6 +54,7 @@ pub fn candidates(provider: Provider, light: bool) -> &'static [&'static str] {
             "claude.png",
             "claude.svg",
             "Claude Spark - Clay.png",
+            "Claude Spark - Clay.svg",
         ],
     }
 }
@@ -121,8 +125,8 @@ thread_local! {
     static LOCAL_ICONS: RefCell<Option<std::rc::Rc<ProviderIcons>>> = const { RefCell::new(None) };
 }
 
-/// Provider marks embedded into the executable by `build.rs` from the
-/// git-ignored `assets/provider-icons/` folder (empty when not provided).
+/// Provider marks embedded into the executable by `build.rs` from tracked
+/// original SVGs and optional user-supplied build overrides.
 mod bundled {
     include!(concat!(env!("OUT_DIR"), "/bundled_provider_icons.rs"));
 }
@@ -170,15 +174,15 @@ fn load_icons(embedded: &[(&str, &[u8])], directory: &Path) -> (ProviderIcons, S
             let found = names
                 .iter()
                 .find_map(|name| {
-                    let (_, bytes) = embedded.iter().find(|(bundled, _)| bundled == name)?;
-                    Some((load_png_bytes(bytes)?, (*name, Origin::Bundled)))
+                    Some((
+                        load_source(&directory.join(name))?,
+                        (*name, Origin::LocalFolder),
+                    ))
                 })
                 .or_else(|| {
                     names.iter().find_map(|name| {
-                        Some((
-                            load_source(&directory.join(name))?,
-                            (*name, Origin::LocalFolder),
-                        ))
+                        let (_, bytes) = embedded.iter().find(|(bundled, _)| bundled == name)?;
+                        Some((load_embedded_source(name, bytes)?, (*name, Origin::Bundled)))
                     })
                 });
             if let Some((source, origin)) = found {
@@ -210,6 +214,22 @@ fn load_source(path: &Path) -> Option<Source> {
     match extension.as_str() {
         "svg" => Image::load_from_path(path).ok().map(Source::Vector),
         "png" => load_png(path),
+        _ => None,
+    }
+}
+
+fn load_embedded_source(name: &str, bytes: &[u8]) -> Option<Source> {
+    if bytes.len() as u64 > MAX_ICON_BYTES {
+        return None;
+    }
+    match Path::new(name)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "svg" => Image::load_from_svg_data(bytes).ok().map(Source::Vector),
+        "png" => load_png_bytes(bytes),
         _ => None,
     }
 }
@@ -577,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_icons_win_and_local_folder_only_fills_missing_slots() {
+    fn local_icons_override_bundled_defaults_and_bundled_icons_fill_missing_slots() {
         let directory = tempfile::tempdir().unwrap();
         write_png(
             &directory.path().join("claude-on-dark.png"),
@@ -603,11 +623,12 @@ mod tests {
             [p.r, p.g, p.b]
         };
         assert_eq!(color(Provider::Codex, false), [255, 255, 255]);
-        assert_eq!(color(Provider::Claude, false), [200, 100, 50]);
+        assert_eq!(color(Provider::Claude, false), [1, 2, 3]);
         assert_eq!(color(Provider::Claude, true), [4, 5, 6]);
         assert!(!icons.has(Provider::Codex, true));
         let origin = |slot| origins.iter().find(|(s, _)| *s == slot).map(|(_, o)| o.1);
-        assert_eq!(origin((Provider::Claude, false)), Some(Origin::Bundled));
+        assert_eq!(origin((Provider::Codex, false)), Some(Origin::Bundled));
+        assert_eq!(origin((Provider::Claude, false)), Some(Origin::LocalFolder));
         assert_eq!(origin((Provider::Claude, true)), Some(Origin::LocalFolder));
     }
 
@@ -619,73 +640,31 @@ mod tests {
         assert!(!icons.has(Provider::Claude, false));
     }
 
-    /// The release build embeds the approved files; they must decode to the
-    /// same pixels as the previous file-based path (identical appearance) and
-    /// cover all four slots without the user's local folder.
+    /// A clean checkout embeds the original SVG files, and all four provider
+    /// slots resolve from those bytes without the user's local icon folder.
     #[test]
-    fn bundled_assets_match_file_rendering_and_need_no_local_folder() {
-        if bundled::BUNDLED.is_empty() {
-            eprintln!("no provider icons bundled in this build; skipped");
-            return;
-        }
+    fn tracked_svg_assets_match_file_rendering_and_fill_all_slots() {
         let assets = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets")
-            .join("provider-icons");
-        for (name, bytes) in bundled::BUNDLED {
-            let from_bytes = decode_png_rgba(bytes).expect("bundled PNG decodes");
+            .join("providers");
+        for name in [
+            "OAI_OpenAI-Blossom_White.svg",
+            "OAI_OpenAI-Blossom_Black.svg",
+            "Claude Spark - Clay.svg",
+        ] {
+            let (_, bytes) = bundled::BUNDLED
+                .iter()
+                .find(|(bundled_name, _)| *bundled_name == name)
+                .expect("tracked SVG is embedded");
+            let from_bytes = Image::load_from_svg_data(bytes).expect("embedded SVG decodes");
             let path = assets.join(name);
-            if path.is_file() {
-                let image = Image::load_from_path(&path).unwrap();
-                let buffer = image.to_rgba8().unwrap();
-                let from_file: Vec<u8> = buffer
-                    .as_slice()
-                    .iter()
-                    .flat_map(|p| [p.r, p.g, p.b, p.a])
-                    .collect();
-                assert_eq!(
-                    (from_bytes.1, from_bytes.2),
-                    (buffer.width(), buffer.height())
-                );
-                // Identical visible pixels. Fully transparent pixels may differ
-                // in RGB between decoders (Slint clears them); they never show
-                // and the resampler weights colour by alpha.
-                // Slint's file decoder stores premultiplied colour, so dark
-                // anti-aliased edge pixels come back with small RGB rounding;
-                // alpha must match exactly and colour within that rounding.
-                let mut max_delta = 0u8;
-                for (a, b) in from_bytes.0.chunks_exact(4).zip(from_file.chunks_exact(4)) {
-                    assert_eq!(a[3], b[3], "{name}: alpha differs");
-                    if a[3] != 0 {
-                        for channel in 0..3 {
-                            max_delta = max_delta.max(a[channel].abs_diff(b[channel]));
-                        }
-                    }
-                }
-                eprintln!("{name}: max colour delta vs file decoder {max_delta}");
-                assert!(max_delta <= 1, "{name}: colour delta {max_delta}");
-                // And identical final images at every displayed size.
-                let render = |source: Source, px: f32| -> Vec<u8> {
-                    let mut sources = HashMap::new();
-                    sources.insert((Provider::Codex, false), source);
-                    let icons = ProviderIcons {
-                        sources,
-                        scaled: RefCell::default(),
-                    };
-                    let image = icons.icon(Provider::Codex, false, px, 1.0).unwrap();
-                    let buffer = image.to_rgba8().unwrap();
-                    buffer
-                        .as_slice()
-                        .iter()
-                        .flat_map(|p| [p.r, p.g, p.b, p.a])
-                        .collect()
-                };
-                let via_file = load_png(&path).unwrap();
-                let via_bytes = load_png_bytes(bytes).unwrap();
-                for px in [14.0, 16.0, 18.0, 20.0, 21.0, 28.0, 32.0] {
-                    let same = render(via_file.clone(), px) == render(via_bytes.clone(), px);
-                    assert!(same, "{name}: rendered icon differs at {px} px");
-                }
-            }
+            let from_file = Image::load_from_path(&path).expect("source SVG loads");
+            assert_eq!(from_bytes.size(), from_file.size(), "{name}: size differs");
+            assert_eq!(
+                from_bytes.to_rgba8().unwrap().as_slice(),
+                from_file.to_rgba8().unwrap().as_slice(),
+                "{name}: embedded render differs from source file"
+            );
         }
         let empty = tempfile::tempdir().unwrap();
         let (icons, origins) = load_icons(bundled::BUNDLED, empty.path());
@@ -698,6 +677,27 @@ mod tests {
             origins
                 .iter()
                 .all(|(_, (_, origin))| *origin == Origin::Bundled)
+        );
+        assert_eq!(
+            origins
+                .iter()
+                .find(|(slot, _)| *slot == (Provider::Codex, false))
+                .map(|(_, (name, _))| *name),
+            Some("OAI_OpenAI-Blossom_White.svg")
+        );
+        assert_eq!(
+            origins
+                .iter()
+                .find(|(slot, _)| *slot == (Provider::Codex, true))
+                .map(|(_, (name, _))| *name),
+            Some("OAI_OpenAI-Blossom_Black.svg")
+        );
+        assert_eq!(
+            origins
+                .iter()
+                .find(|(slot, _)| *slot == (Provider::Claude, false))
+                .map(|(_, (name, _))| *name),
+            Some("Claude Spark - Clay.svg")
         );
     }
 

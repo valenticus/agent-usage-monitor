@@ -27,9 +27,9 @@ fn main() {
     }
 }
 
-/// Provider mark files that may be embedded, in the runtime's lookup names
-/// (see `provider_icons::candidates`). Only PNGs are embedded.
-const PROVIDER_ICON_FILES: [&str; 9] = [
+/// User-provided build overrides accepted by the runtime. These are bundled
+/// only when AUM_PROVIDER_ICONS_DIR is explicitly set.
+const OVERRIDE_PROVIDER_ICON_FILES: [&str; 18] = [
     "codex-on-dark.png",
     "OAI_OpenAI-Blossom_White.png",
     "codex-on-light.png",
@@ -39,51 +39,67 @@ const PROVIDER_ICON_FILES: [&str; 9] = [
     "claude-on-light.png",
     "claude.png",
     "Claude Spark - Clay.png",
+    "codex-on-dark.svg",
+    "codex-on-light.svg",
+    "codex.svg",
+    "OAI_OpenAI-Blossom_White.svg",
+    "OAI_OpenAI-Blossom_Black.svg",
+    "claude-on-dark.svg",
+    "claude-on-light.svg",
+    "claude.svg",
+    "Claude Spark - Clay.svg",
+];
+const TRACKED_PROVIDER_ICON_FILES: [&str; 3] = [
+    "OAI_OpenAI-Blossom_White.svg",
+    "OAI_OpenAI-Blossom_Black.svg",
+    "Claude Spark - Clay.svg",
 ];
 const MAX_PROVIDER_ICON_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Embeds provider marks found in `assets/provider-icons/` (or the folder in
-/// `AUM_PROVIDER_ICONS_DIR`) into the executable as `include_bytes!` data.
-/// The folder is git-ignored: third-party logos never enter the repository.
-/// Without the files the build still succeeds and the app falls back to the
-/// user's local `%APPDATA%\Agent Usage Monitor\provider-icons` folder.
+/// Embeds tracked original SVGs automatically. An optional directory can add
+/// user-supplied build overrides without affecting clean checkout builds.
 fn bundle_provider_icons() {
     println!("cargo:rerun-if-env-changed=AUM_PROVIDER_ICONS_DIR");
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let directory = std::env::var_os("AUM_PROVIDER_ICONS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| manifest.join("assets").join("provider-icons"));
-    println!("cargo:rerun-if-changed={}", directory.display());
+    let tracked_directory = manifest.join("assets").join("providers");
+    let mut sources: Vec<(PathBuf, &[&str])> = Vec::new();
+    if let Some(directory) = std::env::var_os("AUM_PROVIDER_ICONS_DIR") {
+        sources.push((PathBuf::from(directory), &OVERRIDE_PROVIDER_ICON_FILES));
+    }
+    sources.push((tracked_directory.clone(), &TRACKED_PROVIDER_ICON_FILES));
     let mut entries = String::new();
     let mut names = Vec::new();
-    for name in PROVIDER_ICON_FILES {
-        let path = directory.join(name);
-        println!("cargo:rerun-if-changed={}", path.display());
-        let Ok(metadata) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if !metadata.is_file() || metadata.len() > MAX_PROVIDER_ICON_BYTES {
-            println!("cargo:warning=Provider icon skipped (not a file or over 2 MiB): {name}");
-            continue;
+    for (directory, files) in sources {
+        println!("cargo:rerun-if-changed={}", directory.display());
+        for name in files {
+            let path = directory.join(name);
+            println!("cargo:rerun-if-changed={}", path.display());
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > MAX_PROVIDER_ICON_BYTES {
+                println!("cargo:warning=Provider icon skipped (not a file or over 2 MiB): {name}");
+                continue;
+            }
+            let absolute = path.canonicalize().unwrap_or(path);
+            entries.push_str(&format!(
+                "    ({name:?}, include_bytes!({:?})),\n",
+                absolute.to_string_lossy()
+            ));
+            names.push(name);
         }
-        let absolute = path.canonicalize().unwrap_or(path);
-        entries.push_str(&format!(
-            "    ({name:?}, include_bytes!({:?})),\n",
-            absolute.to_string_lossy()
-        ));
-        names.push(name);
     }
     if names.is_empty() {
         println!(
-            "cargo:warning=No provider icons bundled (none found in {}); the app will use the local provider-icons folder only",
-            directory.display()
+            "cargo:warning=No provider icons bundled (tracked sources missing in {})",
+            tracked_directory.display()
         );
     }
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(
         output.join("bundled_provider_icons.rs"),
         format!(
-            "/// Provider marks embedded at build time: (lookup name, PNG bytes).\npub const BUNDLED: &[(&str, &[u8])] = &[\n{entries}];\n"
+            "/// Provider marks embedded at build time: (lookup name, file bytes).\npub const BUNDLED: &[(&str, &[u8])] = &[\n{entries}];\n"
         ),
     )
     .expect("write bundled_provider_icons.rs");

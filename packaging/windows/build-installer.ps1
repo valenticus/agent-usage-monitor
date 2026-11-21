@@ -55,21 +55,20 @@ if (Test-Path $out) {
     New-Item -ItemType Directory -Force -Path $out | Out-Null
 }
 
-# Provider marks are embedded into the EXE by build.rs from this git-ignored
-# folder (see its README). They are never shipped as loose files.
-$iconDir = if ($env:AUM_PROVIDER_ICONS_DIR) { $env:AUM_PROVIDER_ICONS_DIR } else { Join-Path $rust 'agent-monitor-ui\assets\provider-icons' }
-$slots = [ordered]@{
-    'Codex dark'   = @('codex-on-dark.png', 'OAI_OpenAI-Blossom_White.png', 'codex.png')
-    'Codex light'  = @('codex-on-light.png', 'OAI_OpenAI-Blossom_Black.png', 'codex.png')
-    'Claude dark'  = @('claude-on-dark.png', 'claude.png', 'Claude Spark - Clay.png')
-    'Claude light' = @('claude-on-light.png', 'claude.png', 'Claude Spark - Clay.png')
-}
-$missing = @($slots.Keys | Where-Object { -not ($slots[$_] | Where-Object { Test-Path (Join-Path $iconDir $_) }) })
+# The tracked original SVGs are embedded automatically by build.rs. Keep the
+# optional bypass for maintainers intentionally building an unbranded variant.
+$providerDir = Join-Path $rust 'agent-monitor-ui\assets\providers'
+$providerAssets = @(
+    'OAI_OpenAI-Blossom_White.svg',
+    'OAI_OpenAI-Blossom_Black.svg',
+    'Claude Spark - Clay.svg'
+)
+$missing = @($providerAssets | Where-Object { -not (Test-Path (Join-Path $providerDir $_)) })
 if ($missing) {
-    $message = "Provider marks to embed are missing for: $($missing -join ', ') (folder: $iconDir)"
+    $message = "Tracked provider SVGs are missing: $($missing -join ', ') (folder: $providerDir)"
     if ($AllowMissingProviderIcons) { Write-Warning $message } else { throw "$message. Use -AllowMissingProviderIcons to build without them." }
 } else {
-    Write-Host "Provider marks to embed: all four slots present in $iconDir"
+    Write-Host "Tracked provider SVGs: all three present in $providerDir"
 }
 
 if (-not $SkipBuild) {

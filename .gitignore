@@ -10,6 +10,12 @@
 .env.*
 !.env.example
 
-# Third-party provider logos embedded only in local release builds; never committed.
+# Local provider icon overrides are not committed.
 rust/agent-monitor-ui/assets/provider-icons/*
 !rust/agent-monitor-ui/assets/provider-icons/README.md
+
+# Track only the approved original SVG sources; keep other provider assets ignored.
+rust/agent-monitor-ui/assets/providers/*
+!rust/agent-monitor-ui/assets/providers/OAI_OpenAI-Blossom_White.svg
+!rust/agent-monitor-ui/assets/providers/OAI_OpenAI-Blossom_Black.svg
+!rust/agent-monitor-ui/assets/providers/Claude Spark - Clay.svg
