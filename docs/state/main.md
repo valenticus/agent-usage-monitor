@@ -10,19 +10,19 @@
 - Provider SVG normalization (`b297f0d`):
   - Cause: the OpenAI Blossom artwork fills 49.5 % of its 716-unit viewBox; the Claude Spark fills 99.6 % of its 94-unit viewBox. At the same box size Codex looked about half as large.
   - Fix: SVGs are rasterized with `resvg` (the same 0.49 crate Slint already builds) and go through the PNG trim → square → area-resample pipeline in `rust/agent-monitor-ui/src/provider_icons.rs`. The Codex-only 18 px flyout size was removed; every mark uses a 14 px box in the flyout and a 16 px box in Settings.
-- Codex optical correction (`2b38b90`): after trimming, the dense closed Blossom still read slightly larger and heavier than the open Spark. Only the Codex master is padded so its artwork fills 90 % of the same box (`optical_scale`: Codex 0.90, Claude 1.0), centred for all themes and DPI. Claude rendering is unchanged.
-- Release profile (`6453b6f`): `[profile.release] opt-level = "s"` in `rust/Cargo.toml`. Thin LTO was not adopted; no further size experiments are planned.
-- Version 0.1.1 (`9f0f74d`): both crates, the two workspace entries in `Cargo.lock`, and the `AppVersion` fallback and manual-build example in `packaging/windows/AgentUsageMonitor.iss`. The app reads its version from `CARGO_PKG_VERSION` (About and the Codex `clientInfo`); the packaging script reads it from `agent-monitor-ui/Cargo.toml`. Historical v0.1.0 references in the design spec are unchanged.
-- Design references: 10 reference images were added in `7b3e7c4` and removed as obsolete in `843747d`. `docs/design/AUM-design-spec-FINAL-v4.md` and the implemented UI are the design source of truth; the cardless flyout, Variant A, is implemented. App screenshots live in `assets/`.
+- Codex optical correction (`1edfd99`): after trimming, the dense closed Blossom still read slightly larger and heavier than the open Spark. Only the Codex master is padded so its artwork fills 90 % of the same box (`optical_scale`: Codex 0.90, Claude 1.0), centred for all themes and DPI. Claude rendering is unchanged.
+- Release profile (`2ab3299`): `[profile.release] opt-level = "s"` in `rust/Cargo.toml`. Thin LTO was not adopted; no further size experiments are planned.
+- Version 0.1.1 (`191c931`): both crates, the two workspace entries in `Cargo.lock`, and the `AppVersion` fallback and manual-build example in `packaging/windows/AgentUsageMonitor.iss`. The app reads its version from `CARGO_PKG_VERSION` (About and the Codex `clientInfo`); the packaging script reads it from `agent-monitor-ui/Cargo.toml`. Historical v0.1.0 references in the design spec are unchanged.
+- Design spec aligned with the implemented UI (`8fd6bd2`): image-based reference sections removed. `docs/design/AUM-design-spec-FINAL-v4.md` and the implemented UI are the design source of truth; the cardless flyout, Variant A, is implemented. App screenshots live in `assets/`.
 - Repository cleanup: stale `battle-corleggy` worktree entry pruned; merged local branch `feat/ui-redesign-themes` deleted (the remote branch still exists). `CODEX-PROMPT-AUM.md` was moved to `C:\project\_archive\agent-usage-monitor\`.
 
-## v0.1.1 artifact validation (2026-11-21, `-j 2`, built from `9f0f74d`)
+## v0.1.1 artifact validation (2026-11-21, `-j 2`, built from `191c931`)
 - `cargo fmt --all --check` — passed.
 - `cargo test --locked --release --workspace` — 104/104 passed (Core 31, bridge 3, bridge process 1, UI 69, doc 0).
 - `cargo clippy --locked --workspace --all-targets --release -- -D warnings` — passed.
 - `cargo build --locked --release --target x86_64-pc-windows-msvc -p agent-usage-monitor-ui -p agent-usage-monitor-core --bins` — passed.
 - Packaging: `packaging/windows/build-installer.ps1 -SkipBuild` with Inno Setup 6 from `%LOCALAPPDATA%\Programs\Inno Setup 6`, always into a new empty folder (the v0.1.0 outputs in `rust/target/installer` are untouched).
-- **Final artifacts** (after the README update `38b4393`) in `rust/target/installer-0.1.1-final/`:
+- **Final artifacts** (after the README update `ca02780`) in `rust/target/installer-0.1.1-final/`:
   - `AgentUsageMonitor-0.1.1-win-x64-setup.exe` — 7,019,365 B, SHA-256 `1099D7223129C8199B413E94B711BFDF863335CCE3126DE0D20A9BCE5E337116`.
   - `AgentUsageMonitor-0.1.1-win-x64-portable.zip` — 6,696,634 B, SHA-256 `89B781D933EC1C684D31E4535689C97ADF1A275C1B7AA77A174AA7C1C88D17E9`.
   - The README in the ZIP and in the installer stage is byte-identical to the committed `README.md`.
@@ -35,17 +35,17 @@
 - Visual: provider icons were checked on a debug build at 100 % only. The release build and 125/150/200 % are not visually checked.
 
 ## Release readiness
-- README updated for v0.1.1 (`38b4393`); release notes and the proposed repo description were prepared outside the repo, in the session report.
+- README updated for v0.1.1 (`ca02780`); release notes and the proposed repo description were prepared outside the repo, in the session report.
 - No hard blockers. Optional: a visual check of the release binary and at higher DPI.
-- Decision pending: whether to remove the obsolete reference-image blobs from unpublished history before the first push (below).
+- Proposed repo description: "Windows tray app that keeps Codex and Claude Code usage limits, reset countdowns and alerts in view. Built with Rust and Slint. MIT licensed."
 
-## Unpublished history
-- The 10 design reference images (7,106,066 B in 10 blobs) were added in `7b3e7c4` and removed in `843747d`. Neither commit is pushed, the blobs are not reachable from `origin/main`, `v0.1.0` or `origin/feat/ui-redesign-themes`, and the HEAD tree does not contain them. Pushing `main` as is would publish them permanently.
-- Backup branch `backup/pre-history-cleanup-v0.1.1` was created before any history edit.
-- Recommended (not done): rebuild the range on `b297f0d` without the images, verify the tree is identical to the backup, then move `main`. Commit SHAs from `1a0e1cb` on would change; SHAs quoted in this file must then be updated. The release binaries are unaffected (identical tree).
+## Unpublished history cleanup (2026-11-21, done)
+- Ten obsolete design reference images (7,106,066 B) had been added and then removed again in two unpublished commits. Before the first push, the range after `b297f0d` was rebuilt without them: one design-spec commit (`8fd6bd2`) and one state commit (`f22fd80`) carry the final spec and state contents of that cycle, and the eight later commits were cherry-picked with identical patches, authors and dates.
+- The rebuilt tree is identical to the pre-cleanup tree (`0998335`). None of the image blobs is reachable from `main`.
+- The pre-cleanup history stays on the backup branch `backup/pre-history-cleanup-v0.1.1` (old SHAs such as `1548956`); it is local only and must not be pushed.
 
 ## Git state
-- Branch: `main`. HEAD before the state commit: `38b4393` (`docs: update README for v0.1.1`).
+- Branch: `main`. HEAD before the state commit: `c5a21fd` (`docs(state): record v0.1.1 final packages and history findings`).
 - `main` is ahead of `origin/main` (`ddd862b`) and not pushed.
 - Other worktrees: Kilo Code pool `flaxen-marmoset` (`ef5b3a5`, clean) and the Codex size benchmark at `%TEMP%\AUM-size-bench-ddd862b9-20261121` (`ddd862b`). Leave both untouched.
 
@@ -57,7 +57,6 @@
 - Single-instance mutex `Local\AgentUsageMonitor.Singleton`: a dev build cannot start while the installed AUM runs. For visual QA, use the debug flags `--demo`, `--preview-theme=<graphite|bluish|light>`, `--preview-flyout` and `--preview-settings=<tab>` (in memory only) with an isolated `APPDATA`.
 
 ## Next actions
-1. Decide on the unpublished-history cleanup (above); if approved, do it before the first push.
-2. Optionally check the release binary visually (both themes; ideally 125/150/200 %).
-3. When approved: push `main`, create the annotated tag `v0.1.1` on the final commit, push the tag, and publish the release with the two artifacts from `rust/target/installer-0.1.1-final/`.
-4. Push `main` when approved; decide whether to delete `origin/feat/ui-redesign-themes` (and then remove `docs/state/feat-ui-redesign-themes.md`).
+1. Optionally check the release binary visually (both themes; ideally 125/150/200 %).
+2. When approved: push `main`, create the annotated tag `v0.1.1` on the final commit, push the tag, publish the release with the two artifacts from `rust/target/installer-0.1.1-final/`, and set the repo description.
+3. Later: decide whether to delete `origin/feat/ui-redesign-themes` (and then remove `docs/state/feat-ui-redesign-themes.md`), and whether to keep the local backup branch.
