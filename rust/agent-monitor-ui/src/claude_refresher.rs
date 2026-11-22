@@ -565,7 +565,10 @@ mod tests {
             Some(ClaudeRefreshEvent::Failed { .. })
         ));
         request_sender
-            .send(ManualRefreshRequest { id: 42 })
+            .send(ManualRefreshRequest {
+                id: 42,
+                origin: crate::RefreshOrigin::Manual,
+            })
             .await
             .unwrap();
         let completed = tokio::time::timeout(Duration::from_millis(500), receiver.recv())
