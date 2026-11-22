@@ -42,9 +42,17 @@ v0.1.1: https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.1.1
 Decision: B (`opt-level = "s"`, no Thin LTO); no further size experiments. The shipped v0.1.1 app EXE is 14,967,808 B (B plus the icon fixes).
 
 ## Git state
-- Only branch: `main`, pushed normally (never forced) and in sync with `origin/main`. The remote has `main` only.
+- Current branch: `main`, HEAD `555cd990` (merge commit for PR #1), in sync with `origin/main`. No release or tag was created for this merge.
 - The unpublished history was cleaned before the first push, so the obsolete design reference images were never published.
-- Worktrees: the main checkout and the Kilo Code pool worktree `flaxen-marmoset` (`ef5b3a5`, clean). The Kilo worktree is managed by Kilo; leave it.
+- Worktrees: `main` (`C:\project\agent-usage-monitor`), `fix/tray-resume-zorder` (`C:\project\agent-usage-monitor-tray`, clean after merge), `feat/store-msix` (`C:\project\agent-usage-monitor-msix`, uncommitted work in progress), and the Kilo Code pool worktree `flaxen-marmoset` (`ef5b3a5`, clean). The Kilo worktree is managed by Kilo; leave it.
+
+## PR #1 — tray resume and flyout reliability (merged 2026-11-22)
+- PR https://github.com/valenticus/agent-usage-monitor/pull/1 was merged into `main` with a merge commit (no squash or rebase), preserving all three feature commits: `2d66f12`, `5920747`, and `4c77301`.
+- Merge commit: `555cd990dd3df76c7c4110b148774c5c125cd49c`.
+- Tray recovery: the hidden top-level tray window handles `TaskbarCreated` and power-resume notifications; icon registration recovery and a delayed background refresh restore state after Explorer restarts and sleep/resume.
+- Flyout Z-order: the compact preview uses TOPMOST only while visible and remains non-activating; the full flyout is a normal activatable window and is not TOPMOST.
+- Resume refresh coalescing: Codex and Claude CLI skip a resume refresh after a recent successful periodic refresh; manual refreshes still run and failed refreshes do not suppress a retry. Regression tests cover both timer/request orders, manual refresh, and retry after failure.
+- Windows CI run `45021142186` passed formatting, Clippy, workspace tests (118 tests), and the Windows build. Runtime checks covered short sleep/resume, Explorer restart, hover focus/Z-order, and repeated flyout transitions. Long sleep, repeated sleep cycles, DPI/multiple monitors, Windows 10, and release-build runtime remain untested.
 
 ## Post-release cleanup (2026-11-21, done)
 - Removed local build outputs: `rust/target/{debug,release,x86_64-pc-windows-msvc,tmp,installer,installer-0.1.1}`. Kept `rust/target/installer-0.1.1-final/`, a byte-identical copy of the published v0.1.1 assets. The next build of any kind starts from a clean cache.
@@ -53,6 +61,36 @@ Decision: B (`opt-level = "s"`, no Thin LTO); no further size experiments. The s
 - Deleted the merged remote branch `feat/ui-redesign-themes` (`ddd862b`, an ancestor of `main` and the `v0.1.0` tag) and its state file.
 - About 20.3 GB of disk space was freed on C:.
 - Kept: tags and releases, `assets/`, the user's `%APPDATA%\Agent Usage Monitor`, the Kilo worktree, and the ignored local provider PNG overrides.
+
+## WinGet submission (2026-11-21)
+- PR https://github.com/microsoft/winget-pkgs/pull/486060 — "New package: ValentynFetisov.AgentUsageMonitor version 0.1.1", from the fork `valenticus/winget-pkgs`, branch `ValentynFetisov.AgentUsageMonitor-0.1.1` (commit `66e6ce3`), targeting `master`.
+- Manifests (schema 1.28.0, `winget validate` passed) are kept in `C:\project\winget-aum\manifests\v\ValentynFetisov\AgentUsageMonitor\0.1.1\`. The sparse clone is in `C:\project\winget-pkgs`.
+- Status checked 2026-11-22: PR remains open and is awaiting manual repository-admin review. The CLA requirement was cleared. Automated validation reported a false positive for Policy-Test-1.2 (the word “reset” matched “ESET”); a maintainer noted the false positive and requested a waiver. Do not describe the PR as merged or fully validated until its current checks and review are complete. Local `winget install --manifest` was not tested, to protect the existing installation.
+
+## Microsoft Store / MSIX feasibility audit (2026-11-21; implementation subsequently started)
+Store identity: Name `ValentynFetisov.AgentUsageMonitor`, Publisher `CN=090E947F-DD2D-4592-BD86-2187AAA0F9BA`, PublisherDisplayName `Valentyn Fetisov`, PFN `ValentynFetisov.AgentUsageMonitor_sfbqfhxtcjc58`, Store ID `9N20DHG8SSS1`. Planned package version: `0.1.1.0`, x64, full-trust Win32 (`runFullTrust` only).
+
+Verdict: packaging is feasible. MSIX is preferred over an EXE submission, because the Store requires EXE/MSI installers to be signed with a trusted code-signing certificate (the Inno setup is unsigned), while the Store signs MSIX packages itself. Tools present: SDK 10.0.26100 `makeappx`/`makepri`/`signtool` and the App Certification Kit.
+
+| Area | Behaviour inside MSIX | Needed |
+| --- | --- | --- |
+| Tray icon, menu, background running | works (full trust) | nothing |
+| Launch at sign-in (`autostart.rs`, HKCU `Run`) | **breaks**: HKCU writes go to the package's private registry | packaged-only branch using `Windows.ApplicationModel.StartupTask` plus a `windows.startupTask` manifest extension |
+| Toasts (`notifications.rs`) | **likely breaks**: custom AUMID `Valenticus.AgentUsageMonitor`, the `SetCurrentProcessExplicitAppUserModelID` call and the HKCU `AppUserModelId` registration conflict with package identity | packaged-only branch: skip registration, use `CreateToastNotifier()` (package AUMID), no `appLogoOverride` file |
+| Settings in `%APPDATA%\Agent Usage Monitor` | work, but writes are redirected to the package's private AppData; not shared with the Inno install; removed on uninstall | document |
+| Codex `app-server` child process | probably works (`~/.codex` is not virtualized) | **untested**; child writes under `%APPDATA%` would be virtualized |
+| Claude CLI `/usage` child process | probably works (`~/.claude` is not virtualized) | **untested** |
+| Claude status-line bridge | packaged app cannot receive `--enable-claude-bridge` on Windows 10 1809 (`uap10:Parameters` needs 2004+); Claude Code also cannot run an EXE inside `WindowsApps` directly | App Execution Alias and Store-only, off-by-default Settings toggle selected and implemented in the MSIX worktree; still requires compile and clean-VM testing |
+| Single instance (`Local\AgentUsageMonitor.Singleton`) | works, **shared with the Inno install**: only one of the two can run | document |
+| Updates | through the Store; applied when the app is closed | nothing |
+| Windows 10 1809+ / 11 x64 | supported (desktop bridge, startupTask, uap3 alias) | `MinVersion 10.0.17763.0` |
+
+Decisions since the audit:
+1. **Claude bridge: option (a) selected**: an off-by-default Settings toggle in the Store build only.
+2. **Store identity confirmed**: reserved name `AgentUsageMonitor`.
+3. **Still open: no isolated install testing on this PC.** It runs Windows 11 Home (no Sandbox, no VM). Installing the MSIX next to the Inno install would share the mutex and the settings view, and a full WACK run also installs the package. A clean Windows 10 1809+ and Windows 11 VM or a second PC is needed.
+
+MSIX implementation is in progress on branch `feat/store-msix` (worktree `C:\project\agent-usage-monitor-msix`). The worktree contains uncommitted changes and must be preserved. Formatting and manifest-only validation passed; Rust compilation, tests, Clippy, release/MSIX build, WACK, installation and runtime checks are still pending. Detailed scope and next steps are in that worktree's `docs/state/feat-store-msix.md`; architecture and build steps are in its `docs/msix.md`.
 
 ## Decisions (and why)
 - Provider marks: tracked approved SVGs (`rust/agent-monitor-ui/assets/providers/`) are embedded by `build.rs`; provenance and approval are in `docs/design/brand-assets.md`. Local overrides in `%APPDATA%\Agent Usage Monitor\provider-icons` win over bundled files; build-time overrides apply only with `AUM_PROVIDER_ICONS_DIR`. All sources are trimmed to visible artwork; the optical scale is per provider (Codex 0.90, Claude 1.00).
@@ -64,5 +102,6 @@ Decision: B (`opt-level = "s"`, no Thin LTO); no further size experiments. The s
 - Packaging always goes into a new empty output folder (`build-installer.ps1 -OutputDirectory …`); the script refuses to overwrite.
 
 ## Next actions
-1. Optional: visually check provider icons at 125/150/200 % on the installed v0.1.1.
-2. Plan the next version.
+1. WinGet: follow up on the Policy-Test-1.2 false-positive waiver and wait for repository-admin review/validation completion on PR #486060.
+2. MSIX: continue on mains power in `C:\project\agent-usage-monitor-msix`; run check, tests and Clippy, build the package, then test on a clean VM or second PC. Preserve that worktree's uncommitted changes and do not test next to the installed AUM.
+3. Optional: visually check provider icons at 125/150/200 % on the installed v0.1.1.
