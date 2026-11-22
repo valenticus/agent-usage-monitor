@@ -65,10 +65,11 @@ pub(crate) enum RefreshOrigin {
 /// worker wakes, which is about when the delayed resume request arrives.
 const RESUME_COALESCE_SECONDS: i64 = 30;
 
-/// Skips a resume-origin Codex refresh that would only repeat a successful
-/// refresh from the last `RESUME_COALESCE_SECONDS`. Manual refreshes always
-/// run; a failed refresh (no recent success) never suppresses the retry.
-fn skip_redundant_resume_refresh(
+/// Skips a resume-origin refresh (Codex or Claude CLI) that would only repeat
+/// a successful refresh from the last `RESUME_COALESCE_SECONDS`. Manual
+/// refreshes always run; a failed refresh (no recent success) never
+/// suppresses the retry.
+pub(crate) fn skip_redundant_resume_refresh(
     origin: RefreshOrigin,
     last_success: Option<i64>,
     now: i64,

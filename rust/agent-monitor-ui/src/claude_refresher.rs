@@ -236,6 +236,8 @@ async fn run_with_intervals<F>(
     F: FnMut(CancellationToken, Option<u64>, i64) -> RefreshFuture,
 {
     let mut pending_manual = None;
+    // Wall-clock time of the last successful CLI refresh (failures leave it).
+    let mut last_success_at: Option<i64> = None;
     loop {
         if cancellation.is_cancelled() {
             break;
@@ -256,6 +258,34 @@ async fn run_with_intervals<F>(
         let request = pending_manual
             .take()
             .or_else(|| refresh_requests.try_recv().ok());
+        // Timer first, resume request later: after sleep the periodic timer can
+        // fire on wake-up, before the delayed resume request arrives. Do not
+        // run the CLI twice; keep the periodic cadence from the last success.
+        // (Request first, timer later needs no rule: every refresh restarts
+        // the wait below, so an overdue timer is dropped.)
+        if let Some(skipped) = request
+            && crate::skip_redundant_resume_refresh(skipped.origin, last_success_at, now_unix())
+        {
+            eprintln!(
+                "CLAUDE_REFRESH: skipped request_id={} reason=already_refreshed_after_resume",
+                skipped.id
+            );
+            let age = now_unix().saturating_sub(last_success_at.unwrap_or_default());
+            let remaining = refresh_interval.saturating_sub(Duration::from_secs(age.max(0) as u64));
+            match wait_for_next(
+                &mut settings,
+                &cancellation,
+                &mut refresh_requests,
+                remaining,
+            )
+            .await
+            {
+                WaitResult::Manual(request) => pending_manual = Some(request),
+                WaitResult::Elapsed | WaitResult::Disabled => {}
+                WaitResult::Cancelled => break,
+            }
+            continue;
+        }
         let request_id = request.map(|request| request.id);
         let observed_at = now_unix();
         eprintln!(
@@ -314,6 +344,7 @@ async fn run_with_intervals<F>(
                         "background"
                     }
                 );
+                last_success_at = Some(now_unix());
                 refresh_interval
             }
             Err(error) => {
@@ -582,6 +613,198 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        cancellation.cancel();
+        task.await.unwrap();
+    }
+
+    fn request(id: u64, origin: crate::RefreshOrigin) -> ManualRefreshRequest {
+        ManualRefreshRequest { id, origin }
+    }
+
+    fn enabled_settings() -> crate::settings::AppSettings {
+        crate::settings::AppSettings {
+            claude_enabled: true,
+            claude_cli_refresh_enabled: true,
+            ..Default::default()
+        }
+    }
+
+    /// Order 1: the periodic timer refreshed successfully (e.g. on wake-up),
+    /// then the delayed resume request arrives. The resume request must not
+    /// run the CLI again, while a manual refresh still does.
+    #[tokio::test]
+    async fn resume_request_after_a_successful_timer_refresh_is_skipped() {
+        use super::ClaudeRefreshEvent;
+        let (_settings_tx, settings_rx) = watch::channel(enabled_settings());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (request_sender, request_receiver) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let task = tokio::spawn(run_with_intervals(
+            settings_rx,
+            sender,
+            request_receiver,
+            cancellation.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            move |_, _, _| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(parse_claude_cli_usage("Current session: 2% used", 100)) })
+                    as RefreshFuture
+            },
+        ));
+        // Timer (start-up/background) refresh succeeded.
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ClaudeRefreshEvent::Completed {
+                request_id: None,
+                ..
+            })
+        ));
+        request_sender
+            .send(request(7, crate::RefreshOrigin::Resume))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), receiver.recv())
+                .await
+                .is_err(),
+            "resume request repeated a fresh refresh"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // A manual refresh is never skipped.
+        request_sender
+            .send(request(8, crate::RefreshOrigin::Manual))
+            .await
+            .unwrap();
+        let manual = tokio::time::timeout(Duration::from_millis(500), receiver.recv())
+            .await
+            .expect("manual refresh did not run")
+            .unwrap();
+        assert!(matches!(
+            manual,
+            ClaudeRefreshEvent::Completed {
+                request_id: Some(8),
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        cancellation.cancel();
+        task.await.unwrap();
+    }
+
+    /// The timer refresh after wake-up failed (network not up yet): the
+    /// resume request must retry instead of being skipped.
+    #[tokio::test]
+    async fn resume_request_after_a_failed_timer_refresh_retries() {
+        use super::ClaudeRefreshEvent;
+        let (_settings_tx, settings_rx) = watch::channel(enabled_settings());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (request_sender, request_receiver) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let task = tokio::spawn(run_with_intervals(
+            settings_rx,
+            sender,
+            request_receiver,
+            cancellation.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            move |_, _, _| {
+                let call = observed.fetch_add(1, Ordering::SeqCst) + 1;
+                Box::pin(async move {
+                    if call == 1 {
+                        Err("network not ready".into())
+                    } else {
+                        Ok(parse_claude_cli_usage("Current session: 2% used", 100))
+                    }
+                }) as RefreshFuture
+            },
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ClaudeRefreshEvent::Failed { .. })
+        ));
+        request_sender
+            .send(request(9, crate::RefreshOrigin::Resume))
+            .await
+            .unwrap();
+        let retried = tokio::time::timeout(Duration::from_millis(500), receiver.recv())
+            .await
+            .expect("resume request was not retried after a failure")
+            .unwrap();
+        assert!(matches!(
+            retried,
+            ClaudeRefreshEvent::Completed {
+                request_id: Some(9),
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        cancellation.cancel();
+        task.await.unwrap();
+    }
+
+    /// Order 2: the resume request runs first, and the periodic timer that
+    /// was already due must not repeat the CLI call right after it.
+    #[tokio::test]
+    async fn timer_due_after_a_resume_refresh_does_not_run_it_again() {
+        use super::ClaudeRefreshEvent;
+        let (_settings_tx, settings_rx) = watch::channel(enabled_settings());
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (request_sender, request_receiver) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let task = tokio::spawn(run_with_intervals(
+            settings_rx,
+            sender,
+            request_receiver,
+            cancellation.clone(),
+            // Long success interval; the failure cooldown is the timer that
+            // would otherwise fire right after the resume refresh. It leaves
+            // ample margin for slow CI before the request is sent.
+            Duration::from_secs(30),
+            Duration::from_millis(400),
+            move |_, _, _| {
+                let call = observed.fetch_add(1, Ordering::SeqCst) + 1;
+                Box::pin(async move {
+                    if call == 1 {
+                        Err("before sleep".into())
+                    } else {
+                        Ok(parse_claude_cli_usage("Current session: 2% used", 100))
+                    }
+                }) as RefreshFuture
+            },
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ClaudeRefreshEvent::Failed { .. })
+        ));
+        // Resume request arrives before the 400 ms timer is due.
+        request_sender
+            .send(request(10, crate::RefreshOrigin::Resume))
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(500), receiver.recv())
+                .await
+                .unwrap(),
+            Some(ClaudeRefreshEvent::Completed {
+                request_id: Some(10),
+                ..
+            })
+        ));
+        // Well past the original 400 ms timer: no extra CLI run.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(700), receiver.recv())
+                .await
+                .is_err(),
+            "the earlier timer repeated the resume refresh"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         cancellation.cancel();
         task.await.unwrap();

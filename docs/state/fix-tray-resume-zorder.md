@@ -82,9 +82,19 @@
   - every request-driven refresh calls `interval.reset()`, so an overdue tick cannot repeat it immediately;
   - the 10 s `RESUME_REFRESH_DELAY` is kept; manual refreshes are never skipped.
 - Periodic behaviour: unchanged between requests. After a manual or resume refresh, the next periodic tick is 5 min later instead of on the old schedule.
-- Claude CLI is unchanged (`claude_refresher` takes either the request or its elapsed timer). Known limitation: if `select!` picks an elapsed Claude timer at the same moment as the resume request, that request runs right after, so one duplicate `claude -p /usage` is possible, though rare.
+**Duplicate Claude CLI refresh after resume (second P2 from the Codex review; fixed, unit-tested):**
+- Cause (`claude_refresher::run_with_intervals`): when the periodic timer refreshed first (for example on wake-up) and the delayed resume request arrived later, the CLI ran twice. In the opposite order there was no duplicate: every refresh restarts the wait, so an overdue timer is dropped. When both are ready together, the queued request rides along with the same run.
+- Fix:
+  - the scheduler records `last_success_at` (wall clock; failures leave it unchanged);
+  - a Resume request uses the same `skip_redundant_resume_refresh` rule as Codex: it is skipped after a successful CLI refresh within 30 s, and the scheduler then waits out the rest of the periodic interval;
+  - manual requests are never skipped, and a failed refresh never suppresses the retry;
+  - the Claude bridge IPC is unchanged.
+- Tests:
+  - `resume_request_after_a_successful_timer_refresh_is_skipped` (timer first; a manual request still runs);
+  - `resume_request_after_a_failed_timer_refresh_retries`;
+  - `timer_due_after_a_resume_refresh_does_not_run_it_again` (resume first, with an overdue timer).
 
-**`claude_bridge_process` isolation (implemented; the test was compiled but NOT run):**
+**`claude_bridge_process` isolation (implemented; later run locally next to a live AUM and in CI, both pass):**
 - Cause: the server and the bridge client both used the hard-coded production pipe, so the test reached a running AUM's listener and injected a synthetic Claude snapshot.
 - Core changes (`claude_pipe.rs`):
   - `run_claude_status_pipe_named(name, …)` (production still uses `run_claude_status_pipe` → `CLAUDE_PIPE_NAME`, and the AUM listener never reads the environment);
@@ -96,18 +106,19 @@
 - core `--lib` **33/33** (new: `bridge_uses_the_production_pipe_only_without_an_override`, `invalid_overrides_are_rejected_instead_of_falling_back`);
 - bridge unit 3/3;
 - UI **78/78** (new: `resume_refresh_is_skipped_only_after_a_recent_successful_refresh`).
-- `claude_bridge_process` was **not run** (forbidden).
+- `claude_bridge_process` with the isolated pipe: **1/1 pass** locally (while the installed AUM listened on the production pipe) and in CI run 45019228305.
+- After the Claude fix: `cargo test --locked --workspace` — core 33/33, bridge unit 3/3, `claude_bridge_process` 1/1, UI **81/81**; fmt and Clippy pass. Run on battery (89 %), incremental build.
+
+## PR
+- https://github.com/valenticus/agent-usage-monitor/pull/1 (open; no merge without approval).
 
 ## Not tested / known limitations
 - Long sleep (20–30 min, Stale state) and repeated sleep cycles: NOT TESTED.
-- The duplicate-refresh fix: unit-tested only; no runtime sleep test with the new build.
-- `claude_bridge_process` with the isolated pipe: compiled, NOT run.
+- The duplicate-refresh fixes (Codex and Claude): unit-tested only; no runtime sleep test with the new build.
 - DPI 125–200 %, multiple monitors, Windows 10: NOT TESTED. Release build: not runtime-tested (debug only).
 - A transient TOPMOST lag of about 120 ms right after a show or hide is corrected by the 50 ms `tick` safety net.
 - The reason for the Codex failure right after resume is not logged (pre-existing).
-- A possible rare duplicate Claude CLI call after resume (see above).
 
 ## Next actions
-1. User decision: commit on this branch (proposed files: `rust/agent-monitor-core/src/claude_pipe.rs`, `rust/agent-monitor-core/src/lib.rs`, `rust/agent-monitor-core/tests/claude_bridge_process.rs`, `rust/agent-monitor-ui/src/{claude_refresher,flyout,main,tray}.rs`, `docs/state/fix-tray-resume-zorder.md`).
-2. Optionally run the isolated `claude_bridge_process` once its isolation is reviewed.
-3. Then merge to `main` and port to `feat/store-msix` (shared code; no MSIX-specific changes needed).
+1. Independent review of PR #1, then merge only with explicit approval.
+2. After merge, port to `feat/store-msix` (shared code; no MSIX-specific changes needed).
