@@ -35,6 +35,10 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Delay after a Windows resume before the background refresh, so networking
+/// is usually back; repeated resume notifications restart (coalesce) it.
+#[cfg(windows)]
+const RESUME_REFRESH_DELAY: Duration = Duration::from_secs(10);
 type SharedSettings = Arc<Mutex<AppSettings>>;
 type SharedLocale = Arc<Mutex<Locale>>;
 type SharedSnapshot = Arc<Mutex<adapter::UiSnapshot>>;
@@ -44,6 +48,35 @@ static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ManualRefreshRequest {
     pub(crate) id: u64,
+    pub(crate) origin: RefreshOrigin,
+}
+
+/// Why a refresh was requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshOrigin {
+    /// Tray menu or flyout refresh button.
+    Manual,
+    /// The delayed background refresh after a Windows resume.
+    Resume,
+}
+
+/// A resume refresh is redundant when Codex already refreshed successfully
+/// this recently: after sleep, the overdue 5-minute tick fires as soon as the
+/// worker wakes, which is about when the delayed resume request arrives.
+const RESUME_COALESCE_SECONDS: i64 = 30;
+
+/// Skips a resume-origin refresh (Codex or Claude CLI) that would only repeat
+/// a successful refresh from the last `RESUME_COALESCE_SECONDS`. Manual
+/// refreshes always run; a failed refresh (no recent success) never
+/// suppresses the retry.
+pub(crate) fn skip_redundant_resume_refresh(
+    origin: RefreshOrigin,
+    last_success: Option<i64>,
+    now: i64,
+) -> bool {
+    origin == RefreshOrigin::Resume
+        && last_success
+            .is_some_and(|last| last <= now && now.saturating_sub(last) < RESUME_COALESCE_SECONDS)
 }
 
 struct AlertRuntime {
@@ -317,11 +350,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // Dispatch one bounded request to each opted-in provider independently.
     // Full channels mean an equivalent request is already pending, so clicks
     // coalesce instead of starting duplicate CLI processes.
-    let request_refresh: Arc<dyn Fn() -> bool + Send + Sync> = {
+    let request_refresh: Arc<dyn Fn(RefreshOrigin) -> bool + Send + Sync> = {
         let codex_sender = refresh_sender.clone();
         let claude_sender = claude_refresh_sender.clone();
         let config = config.clone();
-        Arc::new(move || {
+        Arc::new(move |origin| {
             if !use_live {
                 eprintln!("REFRESH: skipped reason=not_live");
                 return false;
@@ -331,8 +364,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let claude_enabled = settings.claude_enabled;
             let claude_cli_enabled = settings.claude_cli_refresh_enabled;
             let id = NEXT_REFRESH_ID.fetch_add(1, Ordering::Relaxed);
-            let request = ManualRefreshRequest { id };
-            eprintln!("REFRESH: requested id={id}");
+            let request = ManualRefreshRequest { id, origin };
+            eprintln!("REFRESH: requested id={id} origin={origin:?}");
             let codex = if codex_enabled {
                 queue_manual_refresh("codex", &codex_sender, request)
             } else {
@@ -354,7 +387,7 @@ fn main() -> Result<(), slint::PlatformError> {
     window.on_refresh_requested({
         let dispatcher = request_refresh.clone();
         move || {
-            let _ = dispatcher();
+            let _ = dispatcher(RefreshOrigin::Manual);
         }
     });
     settings_window.window().on_close_requested({
@@ -628,8 +661,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let tray_menu = TrayMenu::new()?;
     // Single dispatcher for tray events and context-menu commands, so the
     // menu runs exactly the same actions as the tray (and double-click).
+    // One timer for resume refreshes: Windows sends one or two resume
+    // notifications per wake-up; restarting the same timer coalesces them.
+    #[cfg(windows)]
+    let resume_timer = Rc::new(slint::Timer::default());
     #[cfg(windows)]
     let dispatch: Rc<dyn Fn(tray::TrayEvent)> = {
+        let resume_timer = resume_timer.clone();
         let settings = settings_window.as_weak();
         let live_window = window.as_weak();
         let live_snapshot = current.clone();
@@ -657,7 +695,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             tray::TrayEvent::Refresh => {
                 apply_latest_to_window(&live_window, &live_snapshot, &live_config, &live_locale);
-                flyout.menu_refresh(|| request_refresh());
+                flyout.menu_refresh(|| request_refresh(RefreshOrigin::Manual));
             }
             tray::TrayEvent::OpenSettings => {
                 if let Some(settings) = settings.upgrade() {
@@ -680,6 +718,20 @@ fn main() -> Result<(), slint::PlatformError> {
                 let theme = adapter::theme_kind(settings.theme_mode, system_light(&settings));
                 let locale = lock_locale(&live_locale);
                 tray_menu::open(&menu, (x, y), theme, locale);
+            }
+            tray::TrayEvent::Resumed => {
+                // Background refresh shortly after wake-up (network first),
+                // without showing the flyout. The worker queues are bounded,
+                // so this also coalesces with any pending manual refresh.
+                let request_refresh = request_refresh.clone();
+                resume_timer.start(
+                    slint::TimerMode::SingleShot,
+                    RESUME_REFRESH_DELAY,
+                    move || {
+                        eprintln!("RESUME: refreshing quotas after sleep/resume");
+                        let _ = request_refresh(RefreshOrigin::Resume);
+                    },
+                );
             }
         })
     };
@@ -1293,7 +1345,15 @@ async fn refresh_loop<P>(
                 if request.is_none() { break; }
                 if enabled {
                     let request = request.unwrap();
-                    refresh_codex(&provider, &mut state, &context, &cancellation, Some(request.id)).await;
+                    if skip_redundant_resume_refresh(request.origin, state.snapshot().last_success_unix_seconds, now_unix()) {
+                        eprintln!("REFRESH: skipped id={} provider=codex reason=already_refreshed_after_resume", request.id);
+                    } else {
+                        refresh_codex(&provider, &mut state, &context, &cancellation, Some(request.id)).await;
+                    }
+                    // After sleep the 5-minute tick can be overdue and ready at the
+                    // same moment; restarting it here keeps it from repeating the
+                    // request-driven refresh straight away.
+                    interval.reset();
                 } else if let Some(request) = request {
                     eprintln!("REFRESH: skipped id={} provider=codex reason=disabled_at_execution", request.id);
                 }
@@ -1940,16 +2000,68 @@ mod tests {
         assert!(queue_manual_refresh(
             "claude",
             &sender,
-            ManualRefreshRequest { id: 1 }
+            ManualRefreshRequest {
+                id: 1,
+                origin: RefreshOrigin::Manual
+            }
         ));
         assert!(queue_manual_refresh(
             "claude",
             &sender,
-            ManualRefreshRequest { id: 2 }
+            ManualRefreshRequest {
+                id: 2,
+                origin: RefreshOrigin::Resume
+            }
         ));
         assert_eq!(receiver.try_recv().unwrap().id, 1);
         assert!(receiver.try_recv().is_err());
     }
+
+    #[test]
+    fn resume_refresh_is_skipped_only_after_a_recent_successful_refresh() {
+        let now = 1_700_000_000;
+        // The overdue tick right after wake-up succeeded: the resume request
+        // 10 s later would only repeat it.
+        assert!(skip_redundant_resume_refresh(
+            RefreshOrigin::Resume,
+            Some(now - 10),
+            now
+        ));
+        assert!(skip_redundant_resume_refresh(
+            RefreshOrigin::Resume,
+            Some(now - (RESUME_COALESCE_SECONDS - 1)),
+            now
+        ));
+        // That tick failed, or data is older (e.g. from before the sleep): run.
+        assert!(!skip_redundant_resume_refresh(
+            RefreshOrigin::Resume,
+            None,
+            now
+        ));
+        assert!(!skip_redundant_resume_refresh(
+            RefreshOrigin::Resume,
+            Some(now - RESUME_COALESCE_SECONDS),
+            now
+        ));
+        assert!(!skip_redundant_resume_refresh(
+            RefreshOrigin::Resume,
+            Some(now - 1_200),
+            now
+        ));
+        // A clock step backwards never suppresses the refresh.
+        assert!(!skip_redundant_resume_refresh(
+            RefreshOrigin::Resume,
+            Some(now + 5),
+            now
+        ));
+        // Manual refreshes are never skipped.
+        assert!(!skip_redundant_resume_refresh(
+            RefreshOrigin::Manual,
+            Some(now - 1),
+            now
+        ));
+    }
+
     #[test]
     fn only_missing_cli_maps_to_unavailable() {
         assert_eq!(

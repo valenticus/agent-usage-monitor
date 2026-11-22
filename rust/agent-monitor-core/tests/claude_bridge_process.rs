@@ -3,22 +3,48 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use agent_usage_monitor_core::run_claude_status_pipe;
+use agent_usage_monitor_core::{
+    CLAUDE_PIPE_NAME, CLAUDE_PIPE_OVERRIDE_ENV, CLAUDE_TEST_PIPE_PREFIX, resolve_client_pipe_name,
+    run_claude_status_pipe_named,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+/// A pipe name owned by this test run only. The bridge child receives it via
+/// the test override, so neither the server nor the bridge ever touches the
+/// production pipe of a running AUM.
+fn isolated_pipe_name() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after Unix epoch")
+        .subsec_nanos();
+    let name = format!("{CLAUDE_TEST_PIPE_PREFIX}{}-{nanos}", std::process::id());
+    assert_ne!(name, CLAUDE_PIPE_NAME);
+    assert_eq!(
+        resolve_client_pipe_name(Some(&name)).as_deref(),
+        Ok(name.as_str()),
+        "the bridge must accept the isolated name, never fall back"
+    );
+    name
+}
+
 #[tokio::test]
 async fn status_line_executable_forwards_allowlisted_data_and_exits_cleanly() {
+    let pipe_name = isolated_pipe_name();
     let cancellation = CancellationToken::new();
     let (sender, mut receiver) = mpsc::channel(1);
     let server_token = cancellation.clone();
-    let server = tokio::spawn(run_claude_status_pipe(sender, server_token));
+    let server_pipe = pipe_name.clone();
+    let server = tokio::spawn(async move {
+        run_claude_status_pipe_named(&server_pipe, sender, server_token).await
+    });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent-usage-monitor-claude-bridge"))
+        .env(CLAUDE_PIPE_OVERRIDE_ENV, &pipe_name)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
