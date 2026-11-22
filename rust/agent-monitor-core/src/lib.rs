@@ -14,7 +14,10 @@ pub use alerts::{
     AlertStateStore, AlertStateStoreError, AlertWindow, AlertWindowState,
     minimum_five_hour_remaining,
 };
-pub use claude_pipe::{CLAUDE_PIPE_NAME, run_claude_status_pipe, send_claude_status_snapshot};
+pub use claude_pipe::{
+    CLAUDE_PIPE_NAME, CLAUDE_PIPE_OVERRIDE_ENV, CLAUDE_TEST_PIPE_PREFIX, resolve_client_pipe_name,
+    run_claude_status_pipe, run_claude_status_pipe_named, send_claude_status_snapshot,
+};
 pub use claude_status_line::ClaudeStatusLineSnapshot;
 pub use claude_usage::{
     ClaudeUsageSnapshot, ClaudeUsageSource, ClaudeUsageWindow, parse_claude_cli_usage,

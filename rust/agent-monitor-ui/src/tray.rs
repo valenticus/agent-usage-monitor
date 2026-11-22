@@ -17,6 +17,8 @@ pub enum TrayEvent {
         x: i32,
         y: i32,
     },
+    /// Windows resumed from sleep/hibernation: refresh quotas in the background.
+    Resumed,
 }
 
 /// Tray-icon rectangle in physical screen coordinates.
@@ -301,6 +303,124 @@ fn send_event(event: TrayEvent) {
 #[cfg(windows)]
 const TRAY_CALLBACK: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 0x42;
 
+/// Shell broadcast sent when the taskbar is (re)created, e.g. after an
+/// Explorer restart. Registered once; 0 until then.
+#[cfg(windows)]
+static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The static AUM icon used until the first quota icon exists (not owned when
+/// loaded from the EXE resource or the stock icon; never destroyed here).
+#[cfg(windows)]
+static TRAY_STATIC_ICON: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// True while the shell is known to hold AUM's notification-area icon.
+#[cfg(windows)]
+static TRAY_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Logs a registration failure once per outage instead of on every retry.
+#[cfg(windows)]
+static TRAY_FAILURE_LOG: OnceLog = OnceLog::new();
+
+/// A latch that lets the first failure of an outage be logged and reports
+/// when the outage ended. Lock-free; safe from any thread.
+pub(crate) struct OnceLog(std::sync::atomic::AtomicBool);
+
+impl OnceLog {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// True only for the first failure since the last `recovered`.
+    pub(crate) fn first_failure(&self) -> bool {
+        !self.0.swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// True when a failure had been logged and is now cleared.
+    pub(crate) fn recovered(&self) -> bool {
+        self.0.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+}
+
+/// `WM_POWERBROADCAST` codes that mean the system has resumed. Windows sends
+/// `PBT_APMRESUMEAUTOMATIC` on every resume and `PBT_APMRESUMESUSPEND` as well
+/// when the resume was user-initiated; callers coalesce the two.
+pub(crate) fn is_resume_notification(code: usize) -> bool {
+    const PBT_APMRESUMESUSPEND: usize = 0x0007;
+    const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
+    matches!(code, PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC)
+}
+
+/// Forces the next quota-icon update to render and send a fresh HICON even if
+/// the quota values did not change (after resume or a shell restart).
+#[cfg(windows)]
+fn invalidate_rendered_icon() {
+    if let Some(state) = TRAY_ICON_STATE.get()
+        && let Ok(mut state) = state.lock()
+    {
+        *state = None;
+    }
+}
+
+/// The icon the shell should currently show: the latest quota icon, else the
+/// static AUM icon.
+#[cfg(windows)]
+fn current_tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
+    let dynamic = TRAY_CURRENT_DYNAMIC_ICON.load(std::sync::atomic::Ordering::Acquire);
+    let icon = if dynamic != 0 {
+        dynamic
+    } else {
+        TRAY_STATIC_ICON.load(std::sync::atomic::Ordering::Acquire)
+    };
+    icon as _
+}
+
+/// Adds AUM's icon to the notification area (NIM_ADD), or refreshes it with
+/// NIM_MODIFY when the shell still has it (TaskbarCreated can also arrive for
+/// taskbar DPI/theme changes). The identity is always (window, uID 1), so this
+/// never creates a duplicate. Re-applies NOTIFYICON_VERSION_4 on success.
+#[cfg(windows)]
+fn register_tray_icon(
+    window: windows_sys::Win32::Foundation::HWND,
+    icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::UI::Shell::{
+        NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
+        NOTIFYICONDATAW_0, Shell_NotifyIconW,
+    };
+    let mut data = tray_data(window, icon);
+    let tip = "Agent Usage Monitor".encode_utf16().collect::<Vec<_>>();
+    data.szTip[..tip.len()].copy_from_slice(&tip);
+    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    data.uCallbackMessage = TRAY_CALLBACK;
+    let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0;
+    let error = if added { 0 } else { unsafe { GetLastError() } };
+    let present = added || unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0;
+    if !present {
+        TRAY_REGISTERED.store(false, Ordering::Release);
+        if TRAY_FAILURE_LOG.first_failure() {
+            eprintln!(
+                "TRAY_ICON: notification-area icon could not be registered (Windows error {error}); will retry when the taskbar is available"
+            );
+        }
+        return false;
+    }
+    // Version 4 suppresses the plain tooltip (no NIF_SHOWTIP) so it does not
+    // overlap the compact preview, and reports hover as NIN_POPUPOPEN.
+    let mut version = tray_data(window, icon);
+    version.Anonymous = NOTIFYICONDATAW_0 {
+        uVersion: NOTIFYICON_VERSION_4,
+    };
+    let accepted = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) } != 0;
+    TRAY_VERSION_4.store(accepted, Ordering::Relaxed);
+    TRAY_REGISTERED.store(true, Ordering::Release);
+    if TRAY_FAILURE_LOG.recovered() {
+        eprintln!("TRAY_ICON: notification-area icon registered again");
+    }
+    true
+}
+
 #[cfg(windows)]
 fn create_tray_window() -> Result<
     (
@@ -313,12 +433,10 @@ fn create_tray_window() -> Result<
 > {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::Shell::{
-        NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, Shell_NotifyIconW,
-    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, HWND_MESSAGE, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE,
-        LR_LOADFROMFILE, LoadIconW, LoadImageW, RegisterClassW, WNDCLASSW,
+        CreateWindowExW, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, LoadIconW,
+        LoadImageW, RegisterClassW, RegisterWindowMessageW, WNDCLASSW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_POPUP,
     };
 
     let class_name: Vec<u16> = "AgentUsageMonitor.TrayWindow\0".encode_utf16().collect();
@@ -338,17 +456,20 @@ fn create_tray_window() -> Result<
             unsafe { GetLastError() }
         ));
     }
+    // A hidden top-level window (never shown; tool window, so it is never on
+    // the taskbar or in Alt+Tab). Unlike a message-only window it receives the
+    // shell's TaskbarCreated broadcast and WM_POWERBROADCAST.
     let window = unsafe {
         CreateWindowExW(
-            0,
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name.as_ptr(),
             std::ptr::null(),
+            WS_POPUP,
             0,
             0,
             0,
             0,
-            0,
-            HWND_MESSAGE,
+            std::ptr::null_mut(),
             std::ptr::null_mut(),
             instance,
             std::ptr::null(),
@@ -390,30 +511,19 @@ fn create_tray_window() -> Result<
             unsafe { GetLastError() }
         ));
     }
-    let mut data = tray_data(window, icon);
-    let tip = "Agent Usage Monitor".encode_utf16().collect::<Vec<_>>();
-    data.szTip[..tip.len()].copy_from_slice(&tip);
-    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    data.uCallbackMessage = TRAY_CALLBACK;
-    if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
-        return Err(format!(
-            "Shell_NotifyIconW(NIM_ADD) failed with Windows error {}",
+    TRAY_STATIC_ICON.store(icon as usize, std::sync::atomic::Ordering::Release);
+    let taskbar_created: Vec<u16> = "TaskbarCreated\0".encode_utf16().collect();
+    let message = unsafe { RegisterWindowMessageW(taskbar_created.as_ptr()) };
+    if message == 0 {
+        eprintln!(
+            "TRAY_ICON: TaskbarCreated could not be registered (Windows error {}); Explorer restarts will not restore the icon",
             unsafe { GetLastError() }
-        ));
+        );
     }
-    // Version 4 suppresses the plain tooltip (no NIF_SHOWTIP) so it does not
-    // overlap the compact preview, and reports hover as NIN_POPUPOPEN.
-    {
-        use windows_sys::Win32::UI::Shell::{
-            NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW_0,
-        };
-        let mut version = tray_data(window, icon);
-        version.Anonymous = NOTIFYICONDATAW_0 {
-            uVersion: NOTIFYICON_VERSION_4,
-        };
-        let accepted = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) } != 0;
-        TRAY_VERSION_4.store(accepted, std::sync::atomic::Ordering::Relaxed);
-    }
+    TASKBAR_CREATED.store(message, std::sync::atomic::Ordering::Release);
+    // If the shell is not ready yet (early sign-in), registration is retried
+    // on TaskbarCreated and on the next quota-icon update.
+    let _ = register_tray_icon(window, icon);
     Ok((window, icon, class_name, instance))
 }
 
@@ -481,11 +591,29 @@ unsafe extern "system" fn tray_window_proc(
     use windows_sys::Win32::UI::Shell::NIN_POPUPOPEN;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, DestroyWindow, PostQuitMessage, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-        WM_LBUTTONDBLCLK, WM_MOUSEMOVE, WM_RBUTTONUP,
+        WM_LBUTTONDBLCLK, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP,
     };
     if message == TRAY_ICON_UPDATE {
         update_native_icon(window);
         return 0;
+    }
+    let taskbar_created = TASKBAR_CREATED.load(std::sync::atomic::Ordering::Acquire);
+    if taskbar_created != 0 && message == taskbar_created {
+        // Explorer (re)created the taskbar: our icon is gone. Re-add the
+        // current icon now and redraw the quota icon on the next update.
+        eprintln!("TRAY_ICON: taskbar recreated; restoring the notification-area icon");
+        TRAY_REGISTERED.store(false, std::sync::atomic::Ordering::Release);
+        let _ = register_tray_icon(window, current_tray_icon());
+        invalidate_rendered_icon();
+        return 0;
+    }
+    if message == WM_POWERBROADCAST {
+        if is_resume_notification(wparam) {
+            invalidate_rendered_icon();
+            send_event(TrayEvent::Resumed);
+        }
+        // TRUE: AUM never vetoes power transitions.
+        return 1;
     }
     if message == TRAY_CALLBACK {
         let version_4 = TRAY_VERSION_4.load(std::sync::atomic::Ordering::Relaxed);
@@ -663,16 +791,18 @@ fn update_native_icon(window: windows_sys::Win32::Foundation::HWND) {
             return;
         }
     };
-    let mut data = tray_data(window, icon);
-    data.uFlags = NIF_ICON;
-    if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } == 0 {
-        eprintln!("TRAY_ICON: Shell_NotifyIconW(NIM_MODIFY) failed");
+    // Normal path: NIM_MODIFY. If the shell lost the icon (Explorer restart,
+    // shell busy after resume), fall back once to a full re-registration.
+    let modified = TRAY_REGISTERED.load(std::sync::atomic::Ordering::Acquire) && {
+        let mut data = tray_data(window, icon);
+        data.uFlags = NIF_ICON;
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) != 0 }
+    };
+    if !modified && !register_tray_icon(window, icon) {
+        // The shell keeps no reference on failure: AUM still owns this icon.
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(icon) };
-        if let Some(state) = TRAY_ICON_STATE.get()
-            && let Ok(mut state) = state.lock()
-        {
-            *state = None;
-        }
+        // Re-send on the next 1 s icon tick; the failure is logged only once.
+        invalidate_rendered_icon();
         return;
     }
     eprintln!("TRAY_ICON: Windows accepted refreshed 16x16 quota icon");
@@ -758,6 +888,31 @@ fn create_icon_from_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_resume_power_notifications_trigger_recovery() {
+        // PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC
+        assert!(is_resume_notification(0x0007));
+        assert!(is_resume_notification(0x0012));
+        // PBT_APMSUSPEND, PBT_APMPOWERSTATUSCHANGE, PBT_POWERSETTINGCHANGE
+        for code in [0x0004, 0x000A, 0x8013] {
+            assert!(!is_resume_notification(code), "{code:#x}");
+        }
+    }
+
+    #[test]
+    fn registration_failures_are_logged_once_per_outage() {
+        let log = OnceLog::new();
+        assert!(!log.recovered(), "nothing to report before a failure");
+        assert!(log.first_failure());
+        // Repeated retries during the same outage stay silent.
+        assert!(!log.first_failure());
+        assert!(!log.first_failure());
+        assert!(log.recovered());
+        assert!(!log.recovered());
+        // A new outage is reported again.
+        assert!(log.first_failure());
+    }
 
     #[test]
     fn context_menu_has_exactly_four_localized_commands_in_order() {

@@ -72,6 +72,71 @@ pub struct Flyout {
     hiding: Cell<bool>,
     generation: Cell<u64>,
     animation: slint::Timer,
+    /// Native TOPMOST band currently applied (see `sync_native_style`).
+    topmost: Cell<bool>,
+    /// Last known `WS_EX_NOACTIVATE` state; the live style is re-read on every
+    /// sync because winit rewrites it (see `sync_native_style`).
+    no_activate: Cell<bool>,
+    /// `WS_EX_NOACTIVATE` writes in the current presentation (reset by
+    /// `present`); bounds re-application if something keeps resetting it.
+    no_activate_writes: Cell<u32>,
+    /// A failed native style change was already logged (once per failure run).
+    style_error_logged: Cell<bool>,
+}
+
+/// Most `WS_EX_NOACTIVATE` writes per presentation: one before the show, one
+/// after winit's post-show style rewrite, with headroom for a hide/show pair.
+const MAX_NO_ACTIVATE_WRITES: u32 = 4;
+
+/// What to do with the activation style on one sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StyleAction {
+    /// The live style already matches.
+    Keep,
+    /// Write the wanted style.
+    Apply,
+    /// Something keeps resetting it: stop writing for this presentation.
+    GiveUp,
+}
+
+/// Decides from the *live* style, never only from what AUM last wrote: winit
+/// 0.30.13 rewrites `GWL_EXSTYLE` from its own flags right after
+/// `ShowWindow` (`window_state.rs:399–407`), silently dropping
+/// `WS_EX_NOACTIVATE`. Writes are bounded per presentation so a style that
+/// keeps being reset cannot cause a write on every 50 ms tick.
+fn no_activate_action(live: bool, wanted: bool, writes: u32) -> StyleAction {
+    if live == wanted {
+        StyleAction::Keep
+    } else if writes < MAX_NO_ACTIVATE_WRITES {
+        StyleAction::Apply
+    } else {
+        StyleAction::GiveUp
+    }
+}
+
+/// Native window state wanted for a presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeStyle {
+    /// In the TOPMOST band (above the foreground app).
+    topmost: bool,
+    /// `WS_EX_NOACTIVATE`: showing or clicking never activates the window.
+    no_activate: bool,
+}
+
+/// Window rules per presentation:
+/// - the compact (hover / temporary) preview never takes activation, so the
+///   foreground app keeps the keyboard focus. winit shows every window after
+///   its first show with `SW_SHOW`, which activates whenever Windows allows
+///   it, so the style must be in place *before* the window is shown;
+/// - the visible compact preview is TOPMOST; a fading-out one keeps the band
+///   until it is actually hidden;
+/// - the pinned full flyout is a normal, activatable window, never TOPMOST.
+fn native_style(mode: Mode, visible: bool, compact: bool) -> NativeStyle {
+    let preview = compact && mode != Mode::FullPinned;
+    NativeStyle {
+        topmost: visible && preview,
+        no_activate: preview,
+    }
 }
 
 impl Flyout {
@@ -93,7 +158,61 @@ impl Flyout {
             hiding: Cell::new(false),
             generation: Cell::new(0),
             animation: slint::Timer::default(),
+            topmost: Cell::new(false),
+            no_activate: Cell::new(false),
+            no_activate_writes: Cell::new(0),
+            style_error_logged: Cell::new(false),
         })
+    }
+
+    /// The single place that changes the native window style. Called right
+    /// after the presentation is chosen (before any show or activation), after
+    /// every show/hide, and from `tick` as a safety net, so no path can leave
+    /// the window TOPMOST or non-activatable in the wrong mode. A no-op unless
+    /// the wanted state differs; never activates or moves the window.
+    fn sync_native_style(&self, window: &MainWindow) {
+        let wanted = native_style(
+            self.mode.get(),
+            window.window().is_visible(),
+            window.get_compact(),
+        );
+        // Activation style first: it must be set before a compact show and
+        // cleared before the full flyout is activated. Compare with the live
+        // style: winit drops WS_EX_NOACTIVATE right after every ShowWindow,
+        // and the next sync (at the latest the 50 ms tick) restores it.
+        let live = read_no_activate(window).unwrap_or(self.no_activate.get());
+        self.no_activate.set(live);
+        match no_activate_action(live, wanted.no_activate, self.no_activate_writes.get()) {
+            StyleAction::Keep => {}
+            StyleAction::Apply => {
+                self.no_activate_writes
+                    .set(self.no_activate_writes.get() + 1);
+                match set_no_activate(window, wanted.no_activate) {
+                    Ok(()) => self.no_activate.set(wanted.no_activate),
+                    Err(error) => self.log_style_error("no_activate", wanted.no_activate, &error),
+                }
+            }
+            StyleAction::GiveUp => self.log_style_error(
+                "no_activate",
+                wanted.no_activate,
+                "the style keeps being reset; not retrying until the next presentation",
+            ),
+        }
+        if wanted.topmost != self.topmost.get() {
+            match set_topmost(window, wanted.topmost) {
+                Ok(()) => self.topmost.set(wanted.topmost),
+                Err(error) => self.log_style_error("topmost", wanted.topmost, &error),
+            }
+        }
+        if self.no_activate.get() == wanted.no_activate && self.topmost.get() == wanted.topmost {
+            self.style_error_logged.set(false);
+        }
+    }
+
+    fn log_style_error(&self, what: &str, value: bool, error: &str) {
+        if !self.style_error_logged.replace(true) {
+            eprintln!("FLYOUT: could not change the window style ({what}={value}): {error}");
+        }
     }
 
     /// Creates the native window once, off-screen and fully transparent, so
@@ -163,6 +282,9 @@ impl Flyout {
         self.generation.set(self.generation.get() + 1);
         self.animation.stop();
         self.hiding.set(false);
+        if let Some(window) = self.window.upgrade() {
+            self.sync_native_style(&window);
+        }
     }
 
     /// Menu "Refresh". `request` triggers the real refresh and returns whether
@@ -222,6 +344,8 @@ impl Flyout {
             install_caption_guard(&window);
             self.apply_native_corners(&window);
         }
+        // Safety net for any show/hide path (including system-initiated ones).
+        self.sync_native_style(&window);
         let now = Instant::now();
         if let Some(since) = self.hover_since.get() {
             if self.mode.get() != Mode::Hidden || !self.cursor_over_icon() {
@@ -311,6 +435,11 @@ impl Flyout {
         };
         let visible = window.window().is_visible() && !self.hiding.get();
         window.set_compact(compact);
+        // Before any show or activation: compact → non-activatable, full →
+        // activatable and out of the TOPMOST band. Each presentation gets a
+        // fresh write budget for the activation style.
+        self.no_activate_writes.set(0);
+        self.sync_native_style(&window);
         let (width, height) = Self::physical_size(&window);
         let scale = window.window().scale_factor();
         let position = if !compact && !visible {
@@ -337,6 +466,8 @@ impl Flyout {
             self.animation.stop();
             set_alpha(&window, 255);
             window.window().set_position(position);
+            // Compact → TOPMOST; switching to full drops TOPMOST before activation.
+            self.sync_native_style(&window);
             if !compact {
                 activate_window(&window);
             }
@@ -370,12 +501,14 @@ impl Flyout {
             if showing {
                 window.window().set_position(target);
                 let _ = window.show();
+                self.sync_native_style(&window);
                 if self.mode.get() == Mode::FullPinned {
                     activate_window(&window);
                 }
                 set_alpha(&window, 255);
             } else {
                 let _ = window.hide();
+                self.sync_native_style(&window);
             }
             return;
         }
@@ -392,6 +525,7 @@ impl Flyout {
                 .window()
                 .set_position(slint::PhysicalPosition::new(target.x, target.y + offset));
             let _ = window.show();
+            self.sync_native_style(&window);
             if self.mode.get() == Mode::FullPinned {
                 activate_window(&window);
             }
@@ -429,6 +563,7 @@ impl Flyout {
                         this.hiding.set(false);
                         let _ = window.hide();
                         window.window().set_position(target);
+                        this.sync_native_style(&window);
                     }
                 }
             });
@@ -546,6 +681,116 @@ impl Flyout {
         #[cfg(not(windows))]
         let _ = window;
     }
+}
+
+/// Moves the flyout into (or out of) the TOPMOST band without activating,
+/// moving or resizing it, and without touching the keyboard focus.
+#[cfg(windows)]
+fn set_topmost(window: &MainWindow, topmost: bool) -> Result<(), String> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+        SetWindowPos,
+    };
+    let slint_handle = window.window().window_handle();
+    let handle = slint_handle
+        .window_handle()
+        .map_err(|error| format!("no native window handle: {error}"))?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return Err("not a Win32 window".into());
+    };
+    let insert_after = if topmost {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    };
+    let ok = unsafe {
+        SetWindowPos(
+            handle.hwnd.get() as _,
+            insert_after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        )
+    } != 0;
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "SetWindowPos failed with Windows error {}",
+            unsafe { GetLastError() }
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn set_topmost(_window: &MainWindow, _topmost: bool) -> Result<(), String> {
+    Ok(())
+}
+
+/// Sets or clears `WS_EX_NOACTIVATE` (read-modify-write of the extended
+/// style, so `WS_EX_LAYERED` set by `set_alpha` is preserved) and verifies it.
+#[cfg(windows)]
+fn set_no_activate(window: &MainWindow, no_activate: bool) -> Result<(), String> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+    };
+    let slint_handle = window.window().window_handle();
+    let handle = slint_handle
+        .window_handle()
+        .map_err(|error| format!("no native window handle: {error}"))?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return Err("not a Win32 window".into());
+    };
+    let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let wanted = if no_activate {
+            style | WS_EX_NOACTIVATE
+        } else {
+            style & !WS_EX_NOACTIVATE
+        };
+        if wanted != style {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted as isize);
+        }
+        let applied = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE != 0;
+        if applied == no_activate {
+            Ok(())
+        } else {
+            Err("extended style did not change".into())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_no_activate(_window: &MainWindow, _no_activate: bool) -> Result<(), String> {
+    Ok(())
+}
+
+/// Live `WS_EX_NOACTIVATE` state of the native window, if it exists.
+#[cfg(windows)]
+fn read_no_activate(window: &MainWindow) -> Option<bool> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, WS_EX_NOACTIVATE,
+    };
+    let slint_handle = window.window().window_handle();
+    let handle = slint_handle.window_handle().ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    let hwnd = handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    Some(style & WS_EX_NOACTIVATE != 0)
+}
+
+#[cfg(not(windows))]
+fn read_no_activate(_window: &MainWindow) -> Option<bool> {
+    None
 }
 
 /// Explicit tray activation brings the flyout forward using ordinary Windows
@@ -796,4 +1041,153 @@ fn set_alpha(window: &MainWindow, alpha: u8) {
     }
     #[cfg(not(windows))]
     let _ = (window, alpha);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_NO_ACTIVATE_WRITES, Mode, NativeStyle, StyleAction, native_style, no_activate_action,
+    };
+
+    #[test]
+    fn no_activate_is_decided_from_the_live_style() {
+        // Matching live style: nothing to write, whatever the budget.
+        for writes in [0, MAX_NO_ACTIVATE_WRITES, MAX_NO_ACTIVATE_WRITES + 1] {
+            assert_eq!(no_activate_action(true, true, writes), StyleAction::Keep);
+            assert_eq!(no_activate_action(false, false, writes), StyleAction::Keep);
+        }
+        // Live style differs (e.g. winit dropped it after ShowWindow): write,
+        // even though AUM's own last write was the wanted value.
+        assert_eq!(no_activate_action(false, true, 0), StyleAction::Apply);
+        assert_eq!(no_activate_action(true, false, 1), StyleAction::Apply);
+        // Budget exhausted: stop instead of writing on every tick.
+        assert_eq!(
+            no_activate_action(false, true, MAX_NO_ACTIVATE_WRITES),
+            StyleAction::GiveUp
+        );
+    }
+
+    /// Simulates one compact show with winit's post-show and post-hide style
+    /// rewrites: the style is restored each time and stays within budget.
+    #[test]
+    fn winit_style_rewrites_are_repaired_within_the_write_budget() {
+        let mut live = false;
+        let mut writes = 0;
+        let sync =
+            |live: &mut bool, writes: &mut u32| match no_activate_action(*live, true, *writes) {
+                StyleAction::Apply => {
+                    *writes += 1;
+                    *live = true;
+                }
+                StyleAction::Keep => {}
+                StyleAction::GiveUp => panic!("budget exhausted in a normal show/hide"),
+            };
+        sync(&mut live, &mut writes); // present(): before the show
+        assert!(live);
+        live = false; // winit: ShowWindow + GWL_EXSTYLE rewrite
+        sync(&mut live, &mut writes); // post-show sync / tick
+        assert!(live);
+        sync(&mut live, &mut writes); // later ticks: no further writes
+        sync(&mut live, &mut writes);
+        live = false; // winit: hide + rewrite
+        sync(&mut live, &mut writes);
+        assert!(live);
+        assert_eq!(writes, 3);
+    }
+
+    #[test]
+    fn a_style_that_keeps_being_reset_stops_after_the_budget() {
+        let mut writes = 0;
+        let mut applied = 0;
+        for _tick in 0..100 {
+            // Something resets the style before every sync.
+            match no_activate_action(false, true, writes) {
+                StyleAction::Apply => {
+                    writes += 1;
+                    applied += 1;
+                }
+                StyleAction::GiveUp => {}
+                StyleAction::Keep => unreachable!(),
+            }
+        }
+        assert_eq!(applied, MAX_NO_ACTIVATE_WRITES);
+    }
+
+    fn style(topmost: bool, no_activate: bool) -> NativeStyle {
+        NativeStyle {
+            topmost,
+            no_activate,
+        }
+    }
+
+    #[test]
+    fn only_the_visible_compact_preview_is_topmost() {
+        // The hover / temporary preview stays above the foreground app.
+        assert!(native_style(Mode::CompactTemporary, true, true).topmost);
+        // A compact preview that is fading out (mode already Hidden) keeps the
+        // band until the window is actually hidden.
+        assert!(native_style(Mode::Hidden, true, true).topmost);
+        // Hidden windows never keep TOPMOST, whatever the presentation.
+        for mode in [Mode::Hidden, Mode::CompactTemporary, Mode::FullPinned] {
+            for compact in [false, true] {
+                assert!(
+                    !native_style(mode, false, compact).topmost,
+                    "{mode:?} {compact}"
+                );
+            }
+        }
+        // The pinned full flyout is a normal window (activated on click).
+        assert!(!native_style(Mode::FullPinned, true, false).topmost);
+        assert!(!native_style(Mode::FullPinned, true, true).topmost);
+        // A visible full presentation is never topmost.
+        assert!(!native_style(Mode::CompactTemporary, true, false).topmost);
+    }
+
+    #[test]
+    fn compact_preview_never_activates_and_full_flyout_always_can() {
+        // Compact: non-activatable before it is shown (style must precede
+        // winit's SW_SHOW), while shown, and while fading out.
+        assert!(native_style(Mode::CompactTemporary, false, true).no_activate);
+        assert!(native_style(Mode::CompactTemporary, true, true).no_activate);
+        assert!(native_style(Mode::Hidden, true, true).no_activate);
+        // Full: always activatable, visible or not, whatever `compact` says
+        // during the switch.
+        for visible in [false, true] {
+            for compact in [false, true] {
+                assert!(!native_style(Mode::FullPinned, visible, compact).no_activate);
+            }
+        }
+    }
+
+    #[test]
+    fn mode_transitions_set_the_expected_native_style() {
+        // (mode, visible, compact) along a realistic sequence, with the style
+        // each step must have.
+        let steps = [
+            // App start: hidden full presentation.
+            ((Mode::Hidden, false, false), style(false, false)),
+            // Hover: compact chosen before the show (not activatable, not yet TOPMOST).
+            ((Mode::CompactTemporary, false, true), style(false, true)),
+            // Compact shown.
+            ((Mode::CompactTemporary, true, true), style(true, true)),
+            // Leave: fading out, then hidden.
+            ((Mode::Hidden, true, true), style(true, true)),
+            ((Mode::Hidden, false, true), style(false, true)),
+            // Double-click while hidden: full chosen before the show.
+            ((Mode::FullPinned, false, false), style(false, false)),
+            ((Mode::FullPinned, true, false), style(false, false)),
+            // Closed with ×, then hover again.
+            ((Mode::Hidden, false, false), style(false, false)),
+            ((Mode::CompactTemporary, true, true), style(true, true)),
+            // Double-click while the compact preview is visible: switch in place.
+            ((Mode::FullPinned, true, false), style(false, false)),
+        ];
+        for ((mode, visible, compact), expected) in steps {
+            assert_eq!(
+                native_style(mode, visible, compact),
+                expected,
+                "{mode:?} visible={visible} compact={compact}"
+            );
+        }
+    }
 }

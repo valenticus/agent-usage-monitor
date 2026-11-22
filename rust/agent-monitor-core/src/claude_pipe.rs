@@ -8,7 +8,35 @@ use tokio_util::sync::CancellationToken;
 use crate::claude_status_line::ClaudeStatusLineSnapshot;
 
 pub const CLAUDE_PIPE_NAME: &str = r"\\.\pipe\AgentMonitor.ClaudeStatusLine.v1";
+/// Test-only override read by the bridge client (never by the AUM listener):
+/// lets an integration test use its own pipe instead of a running AUM's.
+pub const CLAUDE_PIPE_OVERRIDE_ENV: &str = "AUM_CLAUDE_PIPE_NAME";
+/// Every accepted override must start with this prefix, so the override can
+/// never point the bridge at the production pipe or an unrelated pipe.
+pub const CLAUDE_TEST_PIPE_PREFIX: &str = r"\\.\pipe\AgentMonitor.ClaudeStatusLine.test-";
 pub const MAX_PIPE_MESSAGE_BYTES: usize = 2_048;
+
+/// Pipe the bridge client connects to. No override → the production pipe.
+/// An override must be a test pipe name (prefix plus 1–64 of `[A-Za-z0-9-]`);
+/// anything else is rejected rather than silently falling back, so a broken
+/// test setup can never deliver to a running AUM.
+pub fn resolve_client_pipe_name(override_name: Option<&str>) -> Result<String, &'static str> {
+    let Some(name) = override_name else {
+        return Ok(CLAUDE_PIPE_NAME.to_string());
+    };
+    let suffix = name
+        .strip_prefix(CLAUDE_TEST_PIPE_PREFIX)
+        .ok_or("pipe override is not a test pipe name")?;
+    if suffix.is_empty()
+        || suffix.len() > 64
+        || !suffix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Err("pipe override has an invalid test suffix");
+    }
+    Ok(name.to_string())
+}
 const MAX_CLIENT_IO_TIME: Duration = Duration::from_secs(2);
 const CLIENT_CONNECT_TIME: Duration = Duration::from_millis(750);
 
@@ -27,8 +55,19 @@ pub fn parse_pipe_message(
     Ok(snapshot)
 }
 
+/// The AUM listener on the production pipe.
 #[cfg(windows)]
 pub async fn run_claude_status_pipe(
+    updates: mpsc::Sender<ClaudeStatusLineSnapshot>,
+    cancellation: CancellationToken,
+) -> io::Result<()> {
+    run_claude_status_pipe_named(CLAUDE_PIPE_NAME, updates, cancellation).await
+}
+
+/// The listener on an explicit pipe name (production or test).
+#[cfg(windows)]
+pub async fn run_claude_status_pipe_named(
+    pipe_name: &str,
     updates: mpsc::Sender<ClaudeStatusLineSnapshot>,
     cancellation: CancellationToken,
 ) -> io::Result<()> {
@@ -40,7 +79,7 @@ pub async fn run_claude_status_pipe(
             return Ok(());
         }
         let mut server = loop {
-            match create_pipe_server(first_instance) {
+            match create_pipe_server(pipe_name, first_instance) {
                 Ok(server) => break server,
                 Err(error) if !first_instance && error.raw_os_error() == Some(231) => {
                     tokio::select! {
@@ -97,6 +136,7 @@ pub async fn run_claude_status_pipe(
 
 #[cfg(windows)]
 fn create_pipe_server(
+    pipe_name: &str,
     first_instance: bool,
 ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -115,7 +155,7 @@ fn create_pipe_server(
     // through CreateNamedPipeW; Windows copies the descriptor at creation.
     let server = unsafe {
         options.create_with_security_attributes_raw(
-            CLAUDE_PIPE_NAME,
+            pipe_name,
             (&mut attributes as *mut windows_sys::Win32::Security::SECURITY_ATTRIBUTES).cast(),
         )
     }?;
@@ -125,6 +165,18 @@ fn create_pipe_server(
 
 #[cfg(not(windows))]
 pub async fn run_claude_status_pipe(
+    _updates: mpsc::Sender<ClaudeStatusLineSnapshot>,
+    _cancellation: CancellationToken,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Claude named pipes require Windows",
+    ))
+}
+
+#[cfg(not(windows))]
+pub async fn run_claude_status_pipe_named(
+    _pipe_name: &str,
     _updates: mpsc::Sender<ClaudeStatusLineSnapshot>,
     _cancellation: CancellationToken,
 ) -> io::Result<()> {
@@ -150,8 +202,11 @@ pub async fn send_claude_status_snapshot(snapshot: &ClaudeStatusLineSnapshot) ->
             "message too large",
         ));
     }
+    let pipe_name =
+        resolve_client_pipe_name(std::env::var(CLAUDE_PIPE_OVERRIDE_ENV).ok().as_deref())
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
     let mut pipe = timeout(CLIENT_CONNECT_TIME, async {
-        ClientOptions::new().open(CLAUDE_PIPE_NAME)
+        ClientOptions::new().open(&pipe_name)
     })
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "monitor unavailable"))?
@@ -299,7 +354,40 @@ fn now_unix_seconds() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PIPE_MESSAGE_BYTES, parse_pipe_message};
+    use super::{
+        CLAUDE_PIPE_NAME, CLAUDE_TEST_PIPE_PREFIX, MAX_PIPE_MESSAGE_BYTES, parse_pipe_message,
+        resolve_client_pipe_name,
+    };
+
+    #[test]
+    fn bridge_uses_the_production_pipe_only_without_an_override() {
+        assert_eq!(resolve_client_pipe_name(None).unwrap(), CLAUDE_PIPE_NAME);
+        let test_pipe = format!("{CLAUDE_TEST_PIPE_PREFIX}1234-abcDEF");
+        assert_eq!(
+            resolve_client_pipe_name(Some(&test_pipe)).unwrap(),
+            test_pipe
+        );
+        assert_ne!(test_pipe, CLAUDE_PIPE_NAME);
+    }
+
+    #[test]
+    fn invalid_overrides_are_rejected_instead_of_falling_back() {
+        let too_long = format!("{CLAUDE_TEST_PIPE_PREFIX}{}", "a".repeat(65));
+        for invalid in [
+            CLAUDE_PIPE_NAME,
+            r"\\.\pipe\SomethingElse",
+            "",
+            CLAUDE_TEST_PIPE_PREFIX,
+            r"\\.\pipe\AgentMonitor.ClaudeStatusLine.test-a\b",
+            r"\\.\pipe\AgentMonitor.ClaudeStatusLine.test-a b",
+            too_long.as_str(),
+        ] {
+            assert!(
+                resolve_client_pipe_name(Some(invalid)).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
 
     #[test]
     fn accepts_only_bounded_recent_normalized_snapshots() {
