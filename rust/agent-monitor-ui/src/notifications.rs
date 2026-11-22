@@ -11,6 +11,11 @@
 //! `autostart.rs` and is disabled by default.
 //! Delivery goes through `ToastNotificationManager`, so the Notification
 //! Center, Do Not Disturb / Focus and the per-app notification switch apply.
+//!
+//! Packaged (MSIX / Microsoft Store): the package already gives the process an
+//! AUMID (`<PackageFamilyName>!AgentUsageMonitor`) with the manifest's display
+//! name and logo. Nothing is registered, no explicit AUMID is set (it would
+//! override the package identity) and the default notifier is used.
 
 pub const APP_USER_MODEL_ID: &str = "Valenticus.AgentUsageMonitor";
 pub const DISPLAY_NAME: &str = "AgentUsageMonitor";
@@ -23,6 +28,15 @@ const ICON_SIZE: u32 = 256;
 pub fn register_identity() -> Result<(), String> {
     use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
+    match crate::packaged::state() {
+        crate::packaged::PackageState::Unpackaged => {}
+        // The package provides the identity; nothing is registered.
+        crate::packaged::PackageState::Packaged => return Ok(()),
+        // Never write the unpackaged registration without confirmed identity.
+        crate::packaged::PackageState::Unknown => {
+            return Err("package identity unknown; AUMID registration skipped".into());
+        }
+    }
     let aumid = wide(APP_USER_MODEL_ID);
     let result = unsafe { SetCurrentProcessExplicitAppUserModelID(aumid.as_ptr()) };
     if result < 0 {
@@ -53,8 +67,10 @@ pub fn show(title: &str, message: &str, duration_seconds: u16, tag: &str) -> Res
     } else {
         "short"
     };
-    let logo = crate::settings::settings_directory().join(ICON_FILE);
-    let logo_element = if logo.is_file() {
+    let packaged = crate::packaged::is_packaged();
+    // Packaged toasts take their logo from the package manifest.
+    let logo = crate::settings::settings_directory().map(|directory| directory.join(ICON_FILE));
+    let logo_element = if let Some(logo) = logo.filter(|logo| !packaged && logo.is_file()) {
         format!(
             r#"<image placement="appLogoOverride" src="{}"/>"#,
             escape_xml(&file_uri(&logo))
@@ -82,9 +98,13 @@ pub fn show(title: &str, message: &str, duration_seconds: u16, tag: &str) -> Res
     toast
         .SetGroup(&HSTRING::from("aum"))
         .map_err(|error| format!("SetGroup: {error}"))?;
-    let notifier =
+    let notifier = if packaged {
+        ToastNotificationManager::CreateToastNotifier()
+            .map_err(|error| format!("CreateToastNotifier: {error}"))?
+    } else {
         ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))
-            .map_err(|error| format!("CreateToastNotifierWithId: {error}"))?;
+            .map_err(|error| format!("CreateToastNotifierWithId: {error}"))?
+    };
     // Windows silently drops toasts the user or policy has turned off; report
     // that state instead of treating it as a delivery failure.
     if let Ok(setting) = notifier.Setting() {
@@ -140,7 +160,9 @@ fn file_uri(path: &std::path::Path) -> String {
 
 #[cfg(windows)]
 fn write_icon_png() -> Result<std::path::PathBuf, String> {
-    let directory = crate::settings::settings_directory();
+    // Only reached for confirmed unpackaged processes (see register_identity).
+    let directory = crate::settings::settings_directory()
+        .ok_or_else(|| "no persistent data folder".to_string())?;
     std::fs::create_dir_all(&directory).map_err(|error| format!("data folder: {error}"))?;
     let path = directory.join(ICON_FILE);
     let rgba = crate::aum_icon::render_rgba(ICON_SIZE);

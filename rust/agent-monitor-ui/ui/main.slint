@@ -1334,8 +1334,16 @@ export component SettingsWindow inherits Window {
     in property <bool> codex-enabled: true;
     in property <bool> claude-enabled: true;
     in property <bool> claude-cli-refresh-enabled: false;
+    // MSIX / Store build only: the Claude status-line listener opt-in row.
+    in property <bool> store-build: false;
+    in property <bool> claude-bridge-listener-enabled: false;
+    in property <bool> store-import-available: false;
+    // Non-empty when settings cannot be saved (no persistent storage).
+    in property <string> storage-warning: "";
     in property <bool> startup-enabled: false;
     in property <bool> startup-state-known: true;
+    // MSIX: a startup task request or read is in flight; the toggle waits.
+    in property <bool> startup-busy: false;
     in property <bool> alerts-enabled: true;
     in property <bool> exhausted-alerts-enabled: true;
     in property <bool> include-weekly: true;
@@ -1372,8 +1380,13 @@ export component SettingsWindow inherits Window {
     in property <string> alerts-description: "";
     in property <string> claude-refresh-label: "";
     in property <string> claude-refresh-description: "";
+    in property <string> claude-bridge-label: "";
+    in property <string> claude-bridge-description: "";
     in property <string> startup-label: "";
     in property <string> startup-description: "";
+    in property <string> import-label: "";
+    in property <string> import-description: "";
+    in property <string> import-button-label: "";
     in property <string> warning-name-label: "";
     in property <string> warning-description: "";
     in property <string> critical-name-label: "";
@@ -1417,6 +1430,8 @@ export component SettingsWindow inherits Window {
     callback toggle-codex();
     callback toggle-claude();
     callback toggle-claude-cli-refresh();
+    callback toggle-claude-bridge-listener();
+    callback import-exe-settings();
     callback toggle-startup();
     callback show-test-notification();
     callback open-repository();
@@ -1559,6 +1574,14 @@ export component SettingsWindow inherits Window {
             // ── General ──
             if root.selected-tab == 0: VerticalLayout {
                 spacing: 0px;
+                // Settings cannot be saved (no persistent storage).
+                if root.storage-warning != "": Rectangle { height: 20px; }
+                if root.storage-warning != "": Card {
+                    SettingsRow {
+                        title: root.storage-warning;
+                        error: true;
+                    }
+                }
                 Rectangle { height: 20px; }
                 SectionLabel { text: root.appearance-label; }
                 Rectangle { height: 4px; }
@@ -1592,11 +1615,25 @@ export component SettingsWindow inherits Window {
                     SettingsRow {
                         title: root.startup-label;
                         description: root.startup-description;
-                        error: !root.startup-state-known;
+                        error: !root.startup-state-known && !root.startup-busy;
                         ToggleSwitch {
                             checked: root.startup-enabled;
-                            enabled: root.startup-state-known;
+                            enabled: root.startup-state-known && !root.startup-busy;
                             toggled => { root.toggle-startup(); }
+                        }
+                    }
+                }
+                // Store (MSIX) build only: explicit one-time import from the
+                // EXE build, offered while the Store build has no settings yet.
+                if root.store-build && root.store-import-available: Rectangle { height: 8px; }
+                if root.store-build && root.store-import-available: Card {
+                    SettingsRow {
+                        title: root.import-label;
+                        description: root.import-description;
+                        SettingsButton {
+                            small: true;
+                            text: root.import-button-label;
+                            clicked => { root.import-exe-settings(); }
                         }
                     }
                 }
@@ -1636,6 +1673,19 @@ export component SettingsWindow inherits Window {
                                 checked: root.claude-cli-refresh-enabled;
                                 enabled: root.claude-enabled;
                                 toggled => { root.toggle-claude-cli-refresh(); }
+                            }
+                        }
+                        // Store (MSIX) build only: packaged apps cannot receive
+                        // --enable-claude-bridge, so the listener is opted into here.
+                        if root.store-build: Divider { }
+                        if root.store-build: SettingsRow {
+                            title: root.claude-bridge-label;
+                            description: root.claude-bridge-description;
+                            // Always operable, so the opt-in can be revoked at any
+                            // time. The listener itself runs only while Claude is on.
+                            ToggleSwitch {
+                                checked: root.claude-bridge-listener-enabled;
+                                toggled => { root.toggle-claude-bridge-listener(); }
                             }
                         }
                         // Claude data-source note, inside the Claude card and on

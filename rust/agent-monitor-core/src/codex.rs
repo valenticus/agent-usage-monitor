@@ -127,7 +127,10 @@ impl CodexAppServerClient {
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
         {
-            let mut command = Command::new("powershell.exe");
+            let mut command = Command::new(
+                crate::process_tools::system_tool_path(r"WindowsPowerShell\v1.0\powershell.exe")
+                    .map_err(|_| ClientError::Spawn)?,
+            );
             command.args([
                 "-NoLogo",
                 "-NoProfile",
@@ -142,7 +145,10 @@ impl CodexAppServerClient {
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
         {
-            let mut command = Command::new("cmd.exe");
+            let mut command = Command::new(
+                crate::process_tools::system_tool_path("cmd.exe")
+                    .map_err(|_| ClientError::Spawn)?,
+            );
             command.args(["/d", "/s", "/c"]);
             command.arg(format!(
                 "\"\"{}\" app-server --listen stdio://\"",
@@ -311,14 +317,20 @@ async fn terminate_child(child: &mut Child) -> Result<(), ClientError> {
             #[cfg(windows)]
             if let Some(pid) = child.id() {
                 let pid = pid.to_string();
-                let result = Command::new("taskkill.exe")
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .args(["/PID", &pid, "/T", "/F"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .await;
-                if !result.is_ok_and(|status| status.success()) {
+                // Without a verified taskkill path, only the direct child is
+                // killed below; a bare "taskkill.exe" is never started.
+                let succeeded = match crate::process_tools::system_tool_path("taskkill.exe") {
+                    Ok(taskkill) => Command::new(taskkill)
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .args(["/PID", &pid, "/T", "/F"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .await
+                        .is_ok_and(|status| status.success()),
+                    Err(_) => false,
+                };
+                if !succeeded {
                     child.kill().await.map_err(|_| ClientError::Process)?;
                 }
                 child.wait().await.map_err(|_| ClientError::Process)?;

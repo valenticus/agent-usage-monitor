@@ -344,6 +344,14 @@ impl UiSnapshot {
         }
     }
 
+    /// Same data with the Claude status-line listener marked on or off (the
+    /// Store build can toggle it at run time); provider values are kept.
+    pub fn with_claude_bridge(&self, enabled: bool) -> Self {
+        let mut next = self.clone();
+        next.claude_bridge_enabled = enabled;
+        next
+    }
+
     pub fn replace_codex(&self, codex: ProviderSnapshot) -> Self {
         let mut next = self.clone();
         replace_provider(&mut next.providers, codex);

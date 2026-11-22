@@ -31,21 +31,81 @@ pub async fn refresh_once(
     request_id: Option<u64>,
     observed_at: i64,
 ) -> Result<ClaudeUsageSnapshot, String> {
-    let command = if cfg!(windows) {
-        let mut command = Command::new("cmd.exe");
-        command.args([
-            "/D",
-            "/S",
-            "/C",
-            "claude -p --no-session-persistence /usage",
-        ]);
-        command
-    } else {
-        let mut command = Command::new("claude");
-        command.args(["-p", "--no-session-persistence", "/usage"]);
-        command
-    };
+    // Fails closed: without a resolved CLI nothing is started.
+    let command = claude_command(agent_usage_monitor_core::resolve_cli_executable("claude"))?;
     run_command(command, TIMEOUT, cancel, request_id, observed_at).await
+}
+
+/// Arguments of the only Claude CLI command AUM runs. Constant, and free of
+/// characters that `cmd.exe` would interpret.
+const CLAUDE_ARGUMENTS: [&str; 3] = ["-p", "--no-session-persistence", "/usage"];
+
+/// Builds the Claude CLI command from the exact path found on `PATH` (absolute
+/// entries only, never the current directory):
+///
+/// * `claude.exe` (native installer) is started directly.
+/// * `claude.cmd` (npm shim) is started through `cmd.exe` from the system
+///   directory with its full quoted path, so nothing is searched again.
+/// * Nothing found, another file type, or no verified `cmd.exe`: an error, and
+///   no process is started.
+fn claude_command(resolved: Option<std::path::PathBuf>) -> Result<Command, String> {
+    if !cfg!(windows) {
+        let mut command = Command::new("claude");
+        command.args(CLAUDE_ARGUMENTS);
+        return Ok(command);
+    }
+    let executable = resolved.ok_or("Claude CLI not found on PATH")?;
+    if !executable.is_absolute() {
+        return Err("Claude CLI path is not absolute".into());
+    }
+    let extension = executable
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("exe") => {
+            let mut command = Command::new(executable);
+            command.args(CLAUDE_ARGUMENTS);
+            Ok(command)
+        }
+        #[cfg(windows)]
+        Some("cmd") => {
+            use std::os::windows::process::CommandExt;
+            let line = cmd_shim_command_line(&executable)?;
+            let mut command = Command::new(agent_usage_monitor_core::system_tool_path("cmd.exe")?);
+            // Passed verbatim: Rust's argument quoting is not cmd.exe's.
+            command.as_std_mut().raw_arg(line);
+            Ok(command)
+        }
+        _ => Err(format!(
+            "unsupported Claude CLI file type: {}",
+            executable.display()
+        )),
+    }
+}
+
+/// `cmd.exe` arguments that run one batch file by its full path:
+/// `/D` (no AutoRun), `/V:OFF` (no `!` expansion), `/S /C ""<path>" <args>"`.
+/// With `/S` cmd strips only the outer quotes, so the path stays quoted and
+/// `& | < > ^ ( )` in it are literal. `%` is still expanded inside quotes and
+/// `"` cannot be quoted, so paths containing them (or control characters) are
+/// refused.
+fn cmd_shim_command_line(path: &std::path::Path) -> Result<String, String> {
+    let text = path
+        .to_str()
+        .ok_or("Claude CLI path is not valid Unicode")?;
+    if text
+        .chars()
+        .any(|character| matches!(character, '%' | '"') || character.is_control())
+    {
+        return Err(format!(
+            "Claude CLI path contains characters cmd.exe cannot pass safely: {text}"
+        ));
+    }
+    Ok(format!(
+        "/D /V:OFF /S /C \"\"{text}\" {}\"",
+        CLAUDE_ARGUMENTS.join(" ")
+    ))
 }
 
 async fn run_command(
@@ -170,8 +230,13 @@ async fn run_command(
 
 #[cfg(windows)]
 async fn terminate_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
-    if let Some(pid) = pid {
-        let mut taskkill = Command::new("taskkill.exe");
+    // Without a verified taskkill path only the direct child is killed below;
+    // a bare "taskkill.exe" is never started.
+    if let (Some(pid), Ok(taskkill_path)) = (
+        pid,
+        agent_usage_monitor_core::system_tool_path("taskkill.exe"),
+    ) {
+        let mut taskkill = Command::new(taskkill_path);
         taskkill
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
@@ -392,6 +457,122 @@ mod tests {
     use tokio::process::Command;
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_claude_exe_runs_directly_and_shims_keep_cmd() {
+        let program = |command: &Command| {
+            command
+                .as_std()
+                .get_program()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+        };
+        let arguments = |command: &Command| -> Vec<String> {
+            command
+                .as_std()
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect()
+        };
+        use std::path::{Path, PathBuf};
+        // Absolute claude.exe (spaces and Unicode included): started directly,
+        // exact path, arguments unchanged.
+        for exe in [
+            r"C:\Users\u\.local\bin\claude.exe",
+            r"C:\Users\Éva Kovács\Program Files (x86)\Claude & Co\claude.exe",
+        ] {
+            let native = super::claude_command(Some(PathBuf::from(exe))).unwrap();
+            assert_eq!(program(&native), exe.to_ascii_lowercase());
+            assert_eq!(
+                arguments(&native),
+                ["-p", "--no-session-persistence", "/usage"]
+            );
+        }
+        // Resolved claude.cmd: cmd.exe from the system directory, with the
+        // shim's exact quoted path (no bare "claude" re-search).
+        let shim_path =
+            Path::new(r"C:\Users\Éva Kovács\AppData\Roaming\npm (x86)\a&b^c\claude.cmd");
+        let shim = super::claude_command(Some(shim_path.to_path_buf())).unwrap();
+        assert!(program(&shim).ends_with(r"\system32\cmd.exe"), "{shim:?}");
+        assert_eq!(
+            super::cmd_shim_command_line(shim_path).unwrap(),
+            format!(
+                "/D /V:OFF /S /C \"\"{}\" -p --no-session-persistence /usage\"",
+                shim_path.display()
+            )
+        );
+        // Fail closed: nothing resolved, relative paths, other file types.
+        assert!(super::claude_command(None).is_err());
+        assert!(super::claude_command(Some(PathBuf::from("claude.exe"))).is_err());
+        assert!(super::claude_command(Some(PathBuf::from(r".\claude.cmd"))).is_err());
+        assert!(super::claude_command(Some(PathBuf::from(r"C:\npm\claude.ps1"))).is_err());
+        assert!(super::claude_command(Some(PathBuf::from(r"C:\npm\claude.bat"))).is_err());
+        // Shell-sensitive characters cmd.exe cannot pass safely are refused.
+        for unsafe_path in [
+            r"C:\Users\%USERNAME%\npm\claude.cmd",
+            "C:\\npm\\cla\"ude.cmd",
+            "C:\\npm\nx\\claude.cmd",
+        ] {
+            assert!(
+                super::claude_command(Some(PathBuf::from(unsafe_path))).is_err(),
+                "{unsafe_path:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn resolved_cmd_shim_in_an_unusual_folder_runs_with_exact_arguments() {
+        // A stand-in shim (not the real CLI) in a folder whose name has spaces,
+        // Unicode and cmd metacharacters. It records its arguments and prints
+        // a usage report, proving the quoted path and arguments reach it intact.
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Ünï dir (x86) & a^b");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("report.txt"),
+            "Current session: 8% used\r\nCurrent week (all models): 67% used\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("claude.cmd"),
+            "@echo off\r\n>\"%~dp0args.txt\" echo %*\r\ntype \"%~dp0report.txt\"\r\n",
+        )
+        .unwrap();
+        let resolved =
+            agent_usage_monitor_core::resolve_cli_in(folder.as_os_str(), "claude").unwrap();
+        assert_eq!(resolved, folder.join("claude.cmd"));
+        let command = super::claude_command(Some(resolved)).unwrap();
+        let snapshot = run_command(
+            command,
+            Duration::from_secs(20),
+            &CancellationToken::new(),
+            None,
+            1_783_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.five_hour.unwrap().used_percent, Some(8.0));
+        assert_eq!(snapshot.weekly.unwrap().used_percent, Some(67.0));
+        assert_eq!(
+            std::fs::read_to_string(folder.join("args.txt"))
+                .unwrap()
+                .trim_end(),
+            "-p --no-session-persistence /usage"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn missing_claude_cli_fails_without_starting_a_process() {
+        // An absolute PATH without Claude resolves to nothing, so refresh
+        // fails before any process (shell or CLI) is spawned.
+        let empty = tempfile::tempdir().unwrap();
+        let resolved = agent_usage_monitor_core::resolve_cli_in(empty.path().as_os_str(), "claude");
+        assert!(resolved.is_none());
+        assert!(super::claude_command(resolved).is_err());
+    }
 
     #[test]
     fn parses_sanitized_report_and_leaves_missing_windows_unavailable() {

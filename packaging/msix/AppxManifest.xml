@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Microsoft Store (MSIX) manifest for AgentUsageMonitor.
+  Built by packaging/msix/build-msix.ps1, which replaces __VERSION__ with the
+  four-part version from rust/agent-monitor-ui/Cargo.toml (x.y.z.0).
+  Identity values are the ones reserved in Partner Center; do not change them.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 desktop rescap">
+
+  <Identity
+    Name="ValentynFetisov.AgentUsageMonitor"
+    Publisher="CN=090E947F-DD2D-4592-BD86-2187AAA0F9BA"
+    Version="__VERSION__"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>AgentUsageMonitor</DisplayName>
+    <PublisherDisplayName>Valentyn Fetisov</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Windows tray app that keeps Codex and Claude Code usage limits, reset countdowns and alerts in view.</Description>
+  </Properties>
+
+  <Dependencies>
+    <!-- Windows 10 1809 or later (same minimum as the Inno Setup build). -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+    <!-- Both EXEs import VCRUNTIME140.dll (Rust MSVC target, dynamic CRT), which
+         is not part of Windows. The Store installs this framework package
+         automatically; a sideload test needs it installed first. The UCRT
+         (api-ms-win-crt-*) is part of Windows 10 and needs nothing. -->
+    <PackageDependency
+      Name="Microsoft.VCLibs.140.00.UWPDesktop"
+      MinVersion="14.0.33728.0"
+      Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="AgentUsageMonitor" Executable="agent-usage-monitor.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="AgentUsageMonitor"
+        Description="Codex and Claude Code usage limits in the Windows tray."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- Sign-in launch. Off until the user turns it on in AUM Settings;
+             the user can also manage it in Windows Settings / Task Manager. -->
+        <desktop:Extension Category="windows.startupTask" Executable="agent-usage-monitor.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="AgentUsageMonitorStartup" Enabled="false" DisplayName="AgentUsageMonitor" />
+        </desktop:Extension>
+        <!-- Lets Claude Code run the status-line bridge by name: files inside
+             WindowsApps cannot be started by path from outside the package. -->
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="agent-usage-monitor-claude-bridge.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="agent-usage-monitor-claude-bridge.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Required for every full-trust Win32 desktop app. No other capability. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

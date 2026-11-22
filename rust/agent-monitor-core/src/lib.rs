@@ -6,6 +6,7 @@ mod claude_status_line;
 mod claude_usage;
 mod codex;
 mod models;
+mod process_tools;
 mod provider;
 
 pub use alerts::{
@@ -22,6 +23,7 @@ pub use codex::{CodexAppServerClient, CodexClientConfig, CodexRateLimitProvider}
 pub use models::{
     ProviderError, ProviderSnapshot, ProviderStatus, RateLimitSnapshot, RateLimitWindow,
 };
+pub use process_tools::{resolve_cli_executable, resolve_cli_in, system_tool_path};
 pub use provider::{ProviderState, RateLimitProvider};
 
 /// Format a non-negative countdown as `2d 3h`, `4h 5m`, `6m 7s`, or `0s`.
