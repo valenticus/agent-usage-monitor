@@ -14,7 +14,7 @@ Confirmed in Partner Center → Product identity. Do not change these values.
 | PublisherDisplayName | `Valentyn Fetisov` |
 | Package Family Name | `ValentynFetisov.AgentUsageMonitor_sfbqfhxtgjc58` |
 | Store ID | `9N20DHG8SSS1` |
-| Version | `x.y.z.0`, taken from `rust/agent-monitor-ui/Cargo.toml` (0.1.1 → `0.1.1.0`) |
+| Version | `x.y.z.0`, taken from `rust/agent-monitor-ui/Cargo.toml` (0.2.0 → `0.2.0.0`) |
 | Architecture / minimum OS | x64, Windows 10 1809 (`10.0.17763.0`) |
 | Capabilities | `runFullTrust` only |
 | Framework dependency | `Microsoft.VCLibs.140.00.UWPDesktop` ≥ `14.0.33728.0` |
@@ -40,7 +40,7 @@ Only a confirmed unpackaged process may write the EXE builds' registry state or 
 | Data folder (settings, alert state, custom provider icons) | `%APPDATA%\Agent Usage Monitor` | the package's own `LocalState` (`ApplicationData.Current.LocalFolder`, `%LOCALAPPDATA%\Packages\ValentynFetisov.AgentUsageMonitor_sfbqfhxtgjc58\LocalState`); see "Settings isolation" |
 | Sign-in launch | HKCU `Run` value `AgentUsageMonitor`, rewritten at each launch so it follows the current EXE path | `windows.startupTask` `AgentUsageMonitorStartup` (declared off), see "Startup task" |
 | Notifications | own AUMID `Valenticus.AgentUsageMonitor`, registered under HKCU with an icon PNG | package AUMID `<PFN>!AgentUsageMonitor`; no registry writes, no explicit AUMID, default notifier; name and logo come from the manifest |
-| Claude status-line listener | `--enable-claude-bridge` launch argument | Settings → General → Claude → **Status-line bridge** toggle (`claude_bridge_listener_enabled`, off by default, Store build only), applied at run time. Packaged apps cannot pass launch arguments on Windows 10 1809. |
+| Claude status-line listener | `--enable-claude-bridge` launch argument | Settings → General → Claude → **Live updates from Claude Code** toggle (`claude_bridge_listener_enabled`, off by default, Store build only), applied at run time. Packaged apps cannot pass launch arguments on Windows 10 1809. |
 | Bridge command for Claude Code | full path to `agent-usage-monitor-claude-bridge.exe` | App Execution Alias `agent-usage-monitor-claude-bridge.exe` (files in `WindowsApps` cannot be started by path from outside the package) |
 | Legacy `Agent Monitor` folder migration | automatic, unchanged | never; explicit import from the EXE build instead |
 | Updates | Inno upgrade over the same AppId | Store updates to a **higher** version; applied when AUM is not running (a sideloaded update while AUM runs is refused with `0x80073D02`). The startup task state, `LocalState`, the notification settings and the alias survive updates (tested 0.1.1.0 → 0.1.1.1). A lower version is not an update: going back needs `Add-AppxPackage -ForceUpdateFromAnyVersion` (sideload testing only) or, in the Store, publishing a new higher version. |

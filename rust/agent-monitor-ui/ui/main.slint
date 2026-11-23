@@ -50,25 +50,26 @@ export global Theme {
     out property <color> toggle-off-border: light ? #ababab : #5c5c5c;
     out property <color> toggle-knob: #ffffff;
 
-    // Semantic quota colours. Warning is the approved natural yellow #FACC15
-    // in every theme (bars, legend dots, tray); small warning *text* on Light
-    // uses the darker #A16207 for contrast.
-    out property <color> warning-yellow: #facc15;
+    // Semantic quota colours (v0.2.0, F-10): one family per state, used by
+    // bars, percentage text, chips, legend dots and the tray icon.
+    //   normal = green, warning = amber, critical = red.
+    // Text may use a darker (Light) or brighter (dark themes) shade of the
+    // same hue than the bar, for contrast; never a different hue.
     public pure function level-bar(level: int) -> color {
         if (level == 0) { return light ? #1e9e64 : #5fbf8f; }
-        if (level == 1) { return warning-yellow; }
+        if (level == 1) { return light ? #d97706 : #f59e0b; }
         if (level == 2) { return light ? #d13b4a : #e4707a; }
         return light ? #aab3bc : #6b7380;
     }
     public pure function level-text(level: int) -> color {
         if (level == 0) { return light ? #167c52 : #5fbf8f; }
-        if (level == 1) { return light ? #a16207 : warning-yellow; }
+        if (level == 1) { return light ? #b45309 : #fbbf24; }
         if (level == 2) { return light ? #c0283a : #e4707a; }
         return text-muted;
     }
     public pure function level-chip(level: int) -> color {
         if (level == 0) { return light ? #1e9e641f : #5fbf8f24; }
-        if (level == 1) { return light ? #facc1533 : #facc1526; }
+        if (level == 1) { return light ? #d977061f : #f59e0b26; }
         if (level == 2) { return light ? #d13b4a1f : #e4707a24; }
         return light ? #0000000f : #ffffff14;
     }
@@ -1382,6 +1383,12 @@ export component SettingsWindow inherits Window {
     in property <string> claude-refresh-description: "";
     in property <string> claude-bridge-label: "";
     in property <string> claude-bridge-description: "";
+    // Claude Code status line (read-only detection; AUM never writes it).
+    in property <string> statusline-label: "";
+    in property <string> statusline-text: "";
+    in property <bool> statusline-error: false;
+    in property <bool> statusline-can-copy: false;
+    in property <string> statusline-copy-label: "";
     in property <string> startup-label: "";
     in property <string> startup-description: "";
     in property <string> import-label: "";
@@ -1431,6 +1438,7 @@ export component SettingsWindow inherits Window {
     callback toggle-claude();
     callback toggle-claude-cli-refresh();
     callback toggle-claude-bridge-listener();
+    callback copy-statusline-setting();
     callback import-exe-settings();
     callback toggle-startup();
     callback show-test-notification();
@@ -1686,6 +1694,20 @@ export component SettingsWindow inherits Window {
                             ToggleSwitch {
                                 checked: root.claude-bridge-listener-enabled;
                                 toggled => { root.toggle-claude-bridge-listener(); }
+                            }
+                        }
+                        // Claude Code statusLine state (read when Settings opens).
+                        // "Copy" is offered only when the status line is free;
+                        // a status line owned by another tool is never replaced.
+                        Divider { }
+                        SettingsRow {
+                            title: root.statusline-label;
+                            description: root.statusline-text;
+                            error: root.statusline-error;
+                            if root.statusline-can-copy: SettingsButton {
+                                small: true;
+                                text: root.statusline-copy-label;
+                                clicked => { root.copy-statusline-setting(); }
                             }
                         }
                         // Claude data-source note, inside the Claude card and on

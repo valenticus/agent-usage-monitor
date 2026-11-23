@@ -3,7 +3,7 @@
 ; Build with packaging\windows\build-installer.ps1, which compiles the release
 ; binaries, stages the static AUM icon and passes the version from Cargo.toml.
 ; Manual build (from this folder):
-;   ISCC.exe /DAppVersion=0.1.1 /DStageDir=..\..\rust\target\installer\stage AgentUsageMonitor.iss
+;   ISCC.exe /DAppVersion=0.2.0 /DStageDir=..\..\rust\target\installer\stage AgentUsageMonitor.iss
 ;
 ; Policy for this release:
 ; - Per-user install under %LOCALAPPDATA%\Programs; no administrator rights.
@@ -20,7 +20,7 @@
 ; - The Claude Code status-line bridge stays opt-in (unchecked task).
 
 #ifndef AppVersion
-  #define AppVersion "0.1.1"
+  #define AppVersion "0.2.0"
 #endif
 #ifndef StageDir
   #define StageDir "..\..\rust\target\installer\stage"

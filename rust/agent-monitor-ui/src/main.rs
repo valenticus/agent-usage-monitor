@@ -6,6 +6,7 @@ mod adapter;
 mod aum_icon;
 mod autostart;
 mod claude_refresher;
+mod claude_statusline;
 mod flyout;
 mod localization;
 mod notifications;
@@ -518,6 +519,14 @@ fn main() -> Result<(), slint::PlatformError> {
             &current,
         );
         move || toggle_claude_bridge_listener(&values, claude_bridge_enabled)
+    });
+    settings_window.on_copy_statusline_setting({
+        let panel = settings_window.as_weak();
+        move || {
+            if let Some(panel) = panel.upgrade() {
+                copy_statusline_setting(&panel);
+            }
+        }
     });
     settings_window.on_import_exe_settings({
         let values = callback_context(
@@ -1639,9 +1648,13 @@ async fn run_live_workers<P>(
                             eprintln!("CLAUDE_REFRESH: cache_updated request_id={} cache_ms={}", request_id.map_or_else(|| "background".into(), |id| id.to_string()), cache_started.elapsed().as_millis());
                             (request_id, updated)
                         }
-                        claude_refresher::ClaudeRefreshEvent::Failed { request_id, timed_out } => {
+                        claude_refresher::ClaudeRefreshEvent::Failed { request_id, timed_out, cli_missing } => {
                             let updated = if let Ok(mut current) = claude_snapshot.lock() {
-                                *current = current.replace_claude_error();
+                                *current = if cli_missing {
+                                    current.replace_claude_cli_missing()
+                                } else {
+                                    current.replace_claude_error()
+                                };
                                 Some(current.clone())
                             } else { None };
                             let kind = if timed_out { "timed_out" } else { "failed" };
@@ -2093,6 +2106,13 @@ fn update_settings_window(
     window.set_claude_refresh_description(labels.claude_refresh_description.into());
     window.set_claude_bridge_label(labels.claude_bridge.into());
     window.set_claude_bridge_description(labels.claude_bridge_description.into());
+    if let Ok(mut context) = STATUSLINE_CONTEXT.lock() {
+        *context = Some((
+            locale,
+            claude_bridge_wanted(claude_bridge_argument(), settings),
+        ));
+    }
+    apply_statusline_row(window);
     window.set_startup_label(labels.startup.into());
     window.set_startup_description(startup_text(&labels, startup_row.text).into());
     window.set_import_label(labels.import_title.into());
@@ -2118,7 +2138,143 @@ fn update_settings_window(
     window.set_copyright_line(format!("© 2026 Valentyn Fetisov · {}", labels.license).into());
 }
 
+/// Last read Claude Code statusLine state; read when Settings opens, never
+/// on every UI refresh. `None` until the first read.
+static STATUSLINE_STATE: std::sync::Mutex<Option<claude_statusline::StatusLineState>> =
+    std::sync::Mutex::new(None);
+/// Locale and bridge opt-in used to render the statusLine row (kept from the
+/// last full Settings update, so `show_settings_centered` can re-render it).
+static STATUSLINE_CONTEXT: std::sync::Mutex<Option<(Locale, bool)>> = std::sync::Mutex::new(None);
+
+/// Re-reads the Claude Code statusLine setting (read-only, bounded).
+fn refresh_statusline_state() {
+    let state = claude_statusline::user_settings_path()
+        .map(|path| claude_statusline::inspect(&path))
+        .unwrap_or(claude_statusline::StatusLineState::SettingsNotFound);
+    if let Ok(mut current) = STATUSLINE_STATE.lock() {
+        *current = Some(state);
+    }
+}
+
+/// The command this AUM copy would suggest (None when its path is refused).
+fn bridge_command() -> Result<String, claude_statusline::CommandError> {
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    claude_statusline::suggested_command(packaged::is_packaged(), directory.as_deref())
+}
+
+/// (text, error, copy offered) for the statusLine row. `command_supported`
+/// is false when AUM's own path cannot be put into a shell command safely;
+/// then nothing is offered for copying. `store_build` picks how live updates
+/// are turned on: the Settings toggle (MSIX) or `--enable-claude-bridge`
+/// (EXE builds, which have no toggle). Another tool's status line is
+/// described generically; its program is never named in the UI.
+fn statusline_row(
+    state: &claude_statusline::StatusLineState,
+    labels: &localization::SettingsStrings,
+    bridge_wanted: bool,
+    command_supported: bool,
+    store_build: bool,
+) -> (String, bool, bool) {
+    use claude_statusline::StatusLineState as State;
+    match state {
+        State::ConfiguredForAum if bridge_wanted => (labels.statusline_aum.into(), false, false),
+        State::ConfiguredForAum if store_build => {
+            (labels.statusline_aum_inactive.into(), true, false)
+        }
+        State::ConfiguredForAum => (labels.statusline_aum_inactive_exe.into(), true, false),
+        State::NotConfigured | State::SettingsNotFound if !command_supported => {
+            (labels.statusline_path_unsupported.into(), true, false)
+        }
+        State::NotConfigured => (labels.statusline_free.into(), false, true),
+        State::SettingsNotFound => (labels.statusline_no_settings.into(), false, true),
+        State::OtherCommand { .. } => (labels.statusline_other.into(), true, false),
+        State::Unreadable => (labels.statusline_unreadable.into(), true, false),
+    }
+}
+
+fn apply_statusline_row(window: &SettingsWindow) {
+    let Some((locale, bridge_wanted)) = STATUSLINE_CONTEXT.lock().ok().and_then(|c| *c) else {
+        return;
+    };
+    let labels = locale.settings();
+    window.set_statusline_label(labels.statusline_title.into());
+    window.set_statusline_copy_label(labels.statusline_copy.into());
+    let state = STATUSLINE_STATE.lock().ok().and_then(|state| state.clone());
+    let Some(state) = state else {
+        window.set_statusline_text("".into());
+        window.set_statusline_can_copy(false);
+        return;
+    };
+    let (text, error, can_copy) = statusline_row(
+        &state,
+        &labels,
+        bridge_wanted,
+        bridge_command().is_ok(),
+        packaged::is_packaged(),
+    );
+    window.set_statusline_text(text.into());
+    window.set_statusline_error(error);
+    window.set_statusline_can_copy(can_copy);
+}
+
+/// Native window handle of a Slint window (0 when unavailable).
+fn native_window_handle(window: &slint::Window) -> isize {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let handle = window.window_handle();
+        if let Ok(handle) = handle.window_handle()
+            && let RawWindowHandle::Win32(handle) = handle.as_raw()
+        {
+            return handle.hwnd.get();
+        }
+        0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        0
+    }
+}
+
+/// Copies the AUM `statusLine` setting for the user to paste themselves. The
+/// button shows the actual result ("Copied" or "Copy failed") for 2 s.
+fn copy_statusline_setting(window: &SettingsWindow) {
+    let result = bridge_command()
+        .map_err(|error| format!("{error:?}"))
+        .and_then(|command| {
+            claude_statusline::copy_to_clipboard(
+                native_window_handle(window.window()),
+                &claude_statusline::setting_snippet(&command),
+            )
+            .map_err(|error| format!("{error:?}"))
+        });
+    match &result {
+        Ok(()) => eprintln!("STATUSLINE: setting copied to the clipboard"),
+        Err(error) => eprintln!("STATUSLINE: copy failed: {error}"),
+    }
+    if let Some((locale, _)) = STATUSLINE_CONTEXT.lock().ok().and_then(|c| *c) {
+        let labels = locale.settings();
+        let label = if result.is_ok() {
+            labels.statusline_copied
+        } else {
+            labels.statusline_copy_failed
+        };
+        window.set_statusline_copy_label(label.into());
+    }
+    let weak = window.as_weak();
+    slint::Timer::single_shot(Duration::from_secs(2), move || {
+        if let Some(window) = weak.upgrade() {
+            apply_statusline_row(&window);
+        }
+    });
+}
+
 fn show_settings_centered(window: &SettingsWindow) {
+    refresh_statusline_state();
+    apply_statusline_row(window);
     // MSIX: the user may have changed the startup task in Windows meanwhile;
     // re-read it off the UI thread (the toggle waits until the result is in).
     if packaged::is_packaged()
@@ -2822,6 +2978,100 @@ mod tests {
             .unwrap();
         assert_eq!(probe.running(), 0);
         assert_eq!(probe.starts(), 1);
+    }
+
+    /// F-8 guided: every statusLine state maps to one honest message; "copy"
+    /// is offered only when the status line is free, never over another
+    /// tool's command; another tool is named by program only.
+    #[test]
+    fn statusline_row_states_and_copy_offer() {
+        use claude_statusline::StatusLineState as State;
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let labels = locale.settings();
+            for store in [true, false] {
+                let row =
+                    |state: State, bridge| statusline_row(&state, &labels, bridge, true, store);
+                // Configured and receiving: confirmation, nothing to copy.
+                assert_eq!(
+                    row(State::ConfiguredForAum, true),
+                    (labels.statusline_aum.into(), false, false)
+                );
+                // Configured but live updates off: says how to turn them on
+                // in this build (toggle in the Store build, flag in EXE builds).
+                let (text, error, copy) = row(State::ConfiguredForAum, false);
+                assert!(error && !copy);
+                assert_eq!(
+                    text.contains("--enable-claude-bridge"),
+                    !store,
+                    "{locale:?}"
+                );
+                if store {
+                    assert!(
+                        text.contains(labels.claude_bridge),
+                        "{locale:?}: names the toggle"
+                    );
+                }
+                // Free or missing settings: manual setup with the copy offer,
+                // whether or not the live updates are on.
+                for bridge in [true, false] {
+                    for state in [State::NotConfigured, State::SettingsNotFound] {
+                        let (text, error, copy) = row(state, bridge);
+                        assert!(!error && copy && text.contains("~/.claude/settings.json"));
+                    }
+                }
+                assert_eq!(
+                    row(State::Unreadable, true),
+                    (labels.statusline_unreadable.into(), true, false)
+                );
+                // Another command: one generic text, no program name, never
+                // offered for replacement.
+                for program in ["nook-hook-standalone.exe", "", "ccline"] {
+                    let (text, error, copy) = row(
+                        State::OtherCommand {
+                            program: program.into(),
+                        },
+                        true,
+                    );
+                    assert_eq!(text, labels.statusline_other, "{locale:?}");
+                    assert!(
+                        error && !copy,
+                        "{locale:?}: a foreign status line is never offered for replacement"
+                    );
+                }
+                // AUM's own path refused for a shell command: nothing to copy.
+                for state in [State::NotConfigured, State::SettingsNotFound] {
+                    assert_eq!(
+                        statusline_row(&state, &labels, true, false, store),
+                        (labels.statusline_path_unsupported.into(), true, false)
+                    );
+                }
+            }
+            // No UI string names a third-party tool or leaves a placeholder.
+            for text in [
+                labels.claude_note,
+                labels.claude_refresh_description,
+                labels.claude_bridge,
+                labels.claude_bridge_description,
+                labels.statusline_title,
+                labels.statusline_aum,
+                labels.statusline_aum_inactive,
+                labels.statusline_aum_inactive_exe,
+                labels.statusline_free,
+                labels.statusline_other,
+                labels.statusline_no_settings,
+                labels.statusline_unreadable,
+            ] {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("nook") && !text.contains('{'),
+                    "{locale:?}: {text}"
+                );
+            }
+            // The toggle never claims to configure Claude Code: its
+            // description and the free-state text both say setup is manual.
+            assert!(labels.claude_bridge_description.contains("Claude Code"));
+            assert!(labels.statusline_free.contains("~/.claude/settings.json"));
+        }
     }
 
     #[test]
