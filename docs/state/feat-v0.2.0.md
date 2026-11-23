@@ -140,11 +140,9 @@ Expected F-8 result on this machine: the user's `statusLine` is Nook's `nook-hoo
 5. With Nook in `statusLine`: the row shows the conflict text and there is **no** Copy button. `~/.claude/settings.json` is byte-identical before and after (compare the SHA-256).
 
 ## Next actions
-1. Review the diff, then Codex review.
-2. With approval: commit and push `feat/v0.2.0`.
-3. Runtime check of the new UI on a test install (needs approval to replace the installed MSIX or to install a separate EXE build):
-   - tray stale and amber colours on dark and light taskbars;
-   - the statusLine row with Nook present.
+Former items (review, commit/push, runtime check of the new UI) are done: see "v0.2.0-rc1 runtime QA", "RC2" and "Released" below. The branch is merged into `main` (PR #3); remaining work is tracked in `docs/state/main.md`.
+1. Microsoft Store submission of 0.2.0.0 — only after explicit user approval (package and steps: `AUM-recovery\store-handoff\v0.2.0\STORE-HANDOFF.md`).
+2. Still untested: Inno installer on a clean machine, tray on a light taskbar, Explorer restart, launch at real sign-in, Windows S mode.
 
 ## v0.2.0-rc1 runtime QA (2026-11-23 14:20–15:20, user-authorized MSIX update)
 - Installed MSIX updated 0.1.1.0 (review-fixes, GUI `0BAEF71D…`) → **0.2.0.0** (RC, GUI `C7777383…`) with `Add-AppxPackage`, no uninstall. Settings byte-identical, StartupTask State 2, notification key and bridge alias kept. Left installed.
@@ -168,3 +166,11 @@ Expected F-8 result on this machine: the user's `statusLine` is Nook's `nook-hoo
 - Installed MSIX could not be replaced by rc2: same identity and version, different content → `0x80073CFB` (nothing changed). User chose: run the rc2 GUI inside the installed package context (`Invoke-CommandInDesktopPackage`) instead of uninstalling. Installed package stays rc1 0.2.0.0 (GUI `C7777383…`).
 - Visual QA rc2 (Store mode, 4 languages): new toggle label, background refresh description, generic conflict text, note — PASS, no clipping, no third-party name. Manual-setup text: rc2 binary in EXE mode with isolated fixtures, 4 languages — PASS. `CLAUDE_CONFIG_DIR` does not reach the package context, so the Store-only "set up for AUM, live updates off" text was not shown live (unit-tested).
 - New checkpoint before the check: `AUM-recovery\2026-11-23-v020-rc2-pre-checkpoint` (language ukrainian, set by the user at 15:30). Settings restored to it; StartupTask State 2.
+
+## Released (2026-11-23, user-authorized)
+- PR #3 merged into main with a merge commit: `7a23928ab4591f9942af6847dd9fca74a4aad06e`. After `e278a90` only docs changed (`7226cc1`: README v0.2.0 links + SmartScreen note, state file).
+- Annotated tag `v0.2.0` (`11f76e0…`) → `e278a90fc705ca5dfe57e3b9efdb869e14fb9ec5` (verified binary source; versions 0.2.0).
+- GitHub Release v0.2.0 published, latest: setup `DE852635…`, portable `7AE03F1A…` (re-downloaded and verified). No MSIX on GitHub.
+- Store handoff prepared, NOT submitted: `AUM-recovery\store-handoff\v0.2.0\` (unsigned MSIX `C347C544…` + `STORE-HANDOFF.md` with identity check, certification notes, Partner Center steps). Open risk: S mode.
+- Installed AUM stays rc1 0.2.0.0 (same EXEs except the Claude wording).
+- Post-release docs cleanup (this branch, then PR to `main`): state files and design spec synced with the shipped behaviour (F-11 tray mapping, unavailable rendering, fixed refresh interval marked deferred, provider icons done).

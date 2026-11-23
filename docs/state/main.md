@@ -1,8 +1,9 @@
 # State: main
 
 ## Goal and constraints
-- v0.1.1 is published and is the latest release. v0.1.0 stays published unchanged.
-- Do not modify the published v0.1.0 or v0.1.1 releases or tags.
+- v0.2.0 is published and is the latest release. v0.1.0 and v0.1.1 stay published unchanged.
+- Do not modify the published v0.1.0, v0.1.1 or v0.2.0 releases or tags.
+- Microsoft Store submission of 0.2.0.0 is pending and needs explicit user approval.
 - Never run authenticated Claude requests, read credentials or transcripts, use private OAuth APIs, or change global Claude settings (see `AGENTS.md`).
 - Commit and push only on explicit request; never force-push.
 
@@ -10,7 +11,8 @@
 | Release | Tag → commit | Published (UTC) | Assets |
 | --- | --- | --- | --- |
 | v0.1.0 | `v0.1.0` → `ddd862b` | 2026-11-21 19:08:31 | setup 7,652,335 B; portable ZIP 7,821,645 B |
-| v0.1.1 (Latest) | `v0.1.1` (annotated, `c82e1bc`) → `b24d207` | 2026-11-21 20:43:30 | see below |
+| v0.1.1 | `v0.1.1` (annotated, `c82e1bc`) → `b24d207` | 2026-11-21 20:43:30 | see below |
+| v0.2.0 (Latest) | `v0.2.0` (annotated, `11f76e0`) → `e278a90` | 2026-11-23 16:00:35 | see "v0.2.0" below |
 
 v0.1.1: https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.1.1
 
@@ -41,10 +43,23 @@ v0.1.1: https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.1.1
 
 Decision: B (`opt-level = "s"`, no Thin LTO); no further size experiments. The shipped v0.1.1 app EXE is 14,967,808 B (B plus the icon fixes).
 
+## v0.2.0 (released 2026-11-23)
+- PR #2 (`feat/store-msix`, MSIX packaging) merged 2026-11-23 03:20 UTC: merge commit `89def68`. MSIX implementation is complete: one binary, Store behaviour chosen at run time from package identity (`docs/msix.md`).
+- PR #3 (`feat/v0.2.0`) merged 2026-11-23 15:59 UTC: merge commit `7a23928`. Contents: F-7 solid stale tray bars, F-8 read-only Claude status-line guidance with Copy setting, F-10 amber warning colour, F-11 fixed tray column mapping, missing-CLI texts, clearer Claude wording, 4 languages. Details in `docs/state/feat-v0.2.0.md`.
+- Release https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.2.0 (binaries from CI-verified `e278a90`, run 45200211957):
+
+| Asset | Size | SHA-256 |
+| --- | --- | --- |
+| `AgentUsageMonitor-0.2.0-win-x64-setup.exe` | 7,104,903 B | `DE852635CFF40E45D945C31552302150CB38D9762569CF3154315F0C282625D0` |
+| `AgentUsageMonitor-0.2.0-win-x64-portable.zip` | 6,827,876 B | `7AE03F1AA7293CA6547B13EB4EA60B32A47AA85746CFA91363A97905D76F73C7` |
+
+- No MSIX on GitHub. Store package (unsigned, `C347C544…`) and handoff notes: `AUM-recovery\store-handoff\v0.2.0\` (outside the repo). **Store submission pending user approval.** Open risk: Windows S mode untested.
+- The installed test-signed MSIX on this PC is 0.2.0.0 rc1 (differs from release only in Claude wording).
+
 ## Git state
-- Current branch: `main`, HEAD `555cd990` (merge commit for PR #1), in sync with `origin/main`. No release or tag was created for this merge.
+- `main` = merge commit for PR #3 plus the post-release docs PR; in sync with `origin/main`.
 - The unpublished history was cleaned before the first push, so the obsolete design reference images were never published.
-- Worktrees: `main` (`C:\project\agent-usage-monitor`), `fix/tray-resume-zorder` (`C:\project\agent-usage-monitor-tray`, clean after merge), `feat/store-msix` (`C:\project\agent-usage-monitor-msix`, uncommitted work in progress), and the Kilo Code pool worktree `flaxen-marmoset` (`ef5b3a5`, clean). The Kilo worktree is managed by Kilo; leave it.
+- Worktrees: `C:\project\agent-usage-monitor` and the Kilo Code pool worktree `flaxen-marmoset` (managed by Kilo; leave it). The merged worktrees `agent-usage-monitor-msix` and `agent-usage-monitor-tray` were removed in the post-v0.2.0 cleanup; remote branches were kept.
 
 ## PR #1 — tray resume and flyout reliability (merged 2026-11-22)
 - PR https://github.com/valenticus/agent-usage-monitor/pull/1 was merged into `main` with a merge commit (no squash or rebase), preserving all three feature commits: `2d66f12`, `5920747`, and `4c77301`.
@@ -67,8 +82,8 @@ Decision: B (`opt-level = "s"`, no Thin LTO); no further size experiments. The s
 - Manifests (schema 1.28.0, `winget validate` passed) are kept in `C:\project\winget-aum\manifests\v\ValentynFetisov\AgentUsageMonitor\0.1.1\`. The sparse clone is in `C:\project\winget-pkgs`.
 - Status checked 2026-11-22: PR remains open and is awaiting manual repository-admin review. The CLA requirement was cleared. Automated validation reported a false positive for Policy-Test-1.2 (the word “reset” matched “ESET”); a maintainer noted the false positive and requested a waiver. Do not describe the PR as merged or fully validated until its current checks and review are complete. Local `winget install --manifest` was not tested, to protect the existing installation.
 
-## Microsoft Store / MSIX feasibility audit (2026-11-21; implementation subsequently started)
-Store identity: Name `ValentynFetisov.AgentUsageMonitor`, Publisher `CN=090E947F-DD2D-4592-BD86-2187AAA0F9BA`, PublisherDisplayName `Valentyn Fetisov`, PFN `ValentynFetisov.AgentUsageMonitor_sfbqfhxtcjc58`, Store ID `9N20DHG8SSS1`. Planned package version: `0.1.1.0`, x64, full-trust Win32 (`runFullTrust` only).
+## Microsoft Store / MSIX feasibility audit (2026-11-21; implemented and merged in PR #2, see "v0.2.0")
+Store identity: Name `ValentynFetisov.AgentUsageMonitor`, Publisher `CN=090E947F-DD2D-4592-BD86-2187AAA0F9BA`, PublisherDisplayName `Valentyn Fetisov`, PFN `ValentynFetisov.AgentUsageMonitor_sfbqfhxtgjc58`, Store ID `9N20DHG8SSS1`. Planned package version: `0.1.1.0`, x64, full-trust Win32 (`runFullTrust` only).
 
 Verdict: packaging is feasible. MSIX is preferred over an EXE submission, because the Store requires EXE/MSI installers to be signed with a trusted code-signing certificate (the Inno setup is unsigned), while the Store signs MSIX packages itself. Tools present: SDK 10.0.26100 `makeappx`/`makepri`/`signtool` and the App Certification Kit.
 
@@ -90,7 +105,7 @@ Decisions since the audit:
 2. **Store identity confirmed**: reserved name `AgentUsageMonitor`.
 3. **Still open: no isolated install testing on this PC.** It runs Windows 11 Home (no Sandbox, no VM). Installing the MSIX next to the Inno install would share the mutex and the settings view, and a full WACK run also installs the package. A clean Windows 10 1809+ and Windows 11 VM or a second PC is needed.
 
-MSIX implementation is in progress on branch `feat/store-msix` (worktree `C:\project\agent-usage-monitor-msix`). The worktree contains uncommitted changes and must be preserved. Formatting and manifest-only validation passed; Rust compilation, tests, Clippy, release/MSIX build, WACK, installation and runtime checks are still pending. Detailed scope and next steps are in that worktree's `docs/state/feat-store-msix.md`; architecture and build steps are in its `docs/msix.md`.
+MSIX implementation is **complete** and merged (PR #2, `89def68`). Tests, Clippy, MSIX build, WACK (22 PASS / 1 optional FAIL "Blocked executables" / 1 DPI WARNING) and runtime checks on this PC were done; a clean VM / second PC was not available. Details: `docs/state/feat-store-msix.md`, architecture and build steps: `docs/msix.md`. The table above is the pre-implementation audit.
 
 ## Decisions (and why)
 - Provider marks: tracked approved SVGs (`rust/agent-monitor-ui/assets/providers/`) are embedded by `build.rs`; provenance and approval are in `docs/design/brand-assets.md`. Local overrides in `%APPDATA%\Agent Usage Monitor\provider-icons` win over bundled files; build-time overrides apply only with `AUM_PROVIDER_ICONS_DIR`. All sources are trimmed to visible artwork; the optical scale is per provider (Codex 0.90, Claude 1.00).
@@ -102,6 +117,7 @@ MSIX implementation is in progress on branch `feat/store-msix` (worktree `C:\pro
 - Packaging always goes into a new empty output folder (`build-installer.ps1 -OutputDirectory …`); the script refuses to overwrite.
 
 ## Next actions
-1. WinGet: follow up on the Policy-Test-1.2 false-positive waiver and wait for repository-admin review/validation completion on PR #486060.
-2. MSIX: continue on mains power in `C:\project\agent-usage-monitor-msix`; run check, tests and Clippy, build the package, then test on a clean VM or second PC. Preserve that worktree's uncommitted changes and do not test next to the installed AUM.
-3. Optional: visually check provider icons at 125/150/200 % on the installed v0.1.1.
+1. Microsoft Store: submit 0.2.0.0 in Partner Center — only after explicit user approval (steps in `AUM-recovery\store-handoff\v0.2.0\STORE-HANDOFF.md`).
+2. WinGet: PR #486060 is for 0.1.1; check its status (Policy-Test-1.2 false-positive waiver, admin review). A 0.2.0 manifest is a separate, not yet approved step.
+3. Untested in v0.2.0: Inno installer on a clean machine, tray on a light taskbar, Explorer restart, launch at real sign-in, Windows S mode, provider icons at 125/150/200 %.
+4. Deferred feature: configurable refresh interval (fixed 5 min now; see design spec).
