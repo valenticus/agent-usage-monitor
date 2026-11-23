@@ -31,7 +31,7 @@ Settings → General → Claude shows a **Claude Code status line** row in every
   - Verified on Windows 11 with Git Bash, Windows PowerShell 5.1 and PowerShell 7: the bridge copy ran and received stdin, including folders with spaces, `( )`, Cyrillic letters and `+ , @`. The unit test `generated_command_runs_in_every_available_shell` repeats this with a harmless `sort.exe` copy in every shell it finds.
   - The Store alias `agent-usage-monitor-claude-bridge.exe` is a bare word and runs in Git Bash, Windows PowerShell and PowerShell 7.
   - cmd.exe is not used for status lines; the generated form is not meant for cmd.
-  - The path must be on a drive letter (no UNC shares). It may contain only Unicode letters and digits, spaces and `/ : . _ - ( ) + , @`, all of which are literal inside single quotes for bash and for PowerShell.
+  - The path must be on a drive letter (no UNC shares). It may contain only Unicode letters and digits, spaces and `/ : . _ - ( ) + , @ ~`, all of which are literal inside single quotes for bash and for PowerShell. `~` is allowed because 8.3 short names (for example `C:\Users\RUNNER~1\…`) contain it.
   - A path with any other character (for example `& ; $ % ! ^`, quotes or backticks) is **refused, not escaped**: the row explains it and nothing is offered for copying.
 - The clipboard is owned by the Settings window.
   - The text is prepared before the clipboard is opened, so a failure to open it (another program holding it) leaves the previous content in place.

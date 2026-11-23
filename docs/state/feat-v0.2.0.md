@@ -118,6 +118,20 @@ Expected F-8 result on this machine: the user's `statusLine` is Nook's `nook-hoo
   - `stale_last_known_good_values_keep_their_window`: stale in every mode, and last-known-good after an error.
 - **Validation:** fmt and clippy (`-D warnings`) pass; **176/176** (core 43, bridge 3, integration 1, UI 129) with `--test-threads=1`; release build passes.
 
+## RC attempt 1: CI failure on `93fbbd4` (packaging stopped)
+- Commit `93fbbd4` (all v0.2.0 changes) was pushed to `origin/feat/v0.2.0`. CI run 45175396544 **failed** in "Run tests". Formatting, the static MSIX check and Clippy passed; the Windows build step did not run.
+- The failing test was `claude_statusline::tests::generated_command_runs_in_every_available_shell`:
+  - the runner's temp folder is an 8.3 short path, `C:\Users\RUNNER~1\…`;
+  - `~` was not in the path allow-list, so `suggested_command` refused it and the test's `unwrap()` panicked;
+  - locally the temp path has no `~`, so the test passed.
+- This was a real limitation too: a portable copy unpacked under a short path would have been refused for no reason.
+- Fix (Codex review: PASS; committed as the CI hotfix commit after `93fbbd4`):
+  - `~` added to `ALLOWED_PATH_PUNCTUATION`. Inside single quotes it is literal for bash and PowerShell, and the path always starts with the drive letter;
+  - test cases: `C:\Users\RUNNER~1\…` accepted, and a `SHORTN~1` folder executed in all shells;
+  - docs updated.
+  - Local results: fmt and clippy pass; 176/176 with `--test-threads=1`; the shell test ran in Windows PowerShell 5.1, Git Bash and PowerShell 7.
+- No release candidates were built.
+
 ### Manual clipboard smoke test (not automated: it replaces the user's clipboard)
 1. Run the v0.2.0 build on a machine where `statusLine` is free (or in a test profile with `CLAUDE_CONFIG_DIR` pointing to an empty folder).
 2. Settings → General → Claude: the row says "Not set up" or "settings not found" and shows **Copy setting**.

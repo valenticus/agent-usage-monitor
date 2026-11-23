@@ -174,8 +174,12 @@ pub enum CommandError {
 /// Inside single quotes all of them are literal for bash and for PowerShell
 /// (5.1 and 7), which treat nothing but `'` itself as special there.
 /// Everything else is refused, in particular `'` (it would end the quoted
-/// part) and `& ; $ % ! ^ " \` | < > * ? [ ] { } ~ #` and control characters.
-const ALLOWED_PATH_PUNCTUATION: &str = " /:._-()+,@";
+/// part) and `& ; $ % ! ^ " \` | < > * ? [ ] { } #` and control characters.
+/// `~` is allowed: 8.3 short names (`C:\Users\RUNNER~1\…`) contain it, and
+/// inside single quotes it is literal for bash (tilde expansion only applies
+/// to an unquoted word start, and the path always starts with the drive
+/// letter) and for PowerShell.
+const ALLOWED_PATH_PUNCTUATION: &str = " /:._-()+,@~";
 
 /// The command for `statusLine.command`, in one fixed shape that runs the same
 /// way in every shell Claude Code uses on Windows. Per the Claude Code docs,
@@ -513,6 +517,7 @@ mod tests {
             r"C:\Program Files (x86)\Agent Usage Monitor",
             r"C:\Users\Іван Петренко\AppData\Local\Programs\AgentUsageMonitor",
             r"D:\Tools\AUM v2+beta,new@home",
+            r"C:\Users\RUNNER~1\AppData\Local\Temp\AUM",
         ] {
             let command = suggested_command(false, Some(Path::new(accepted)))
                 .unwrap_or_else(|error| panic!("{accepted}: {error:?}"));
@@ -539,7 +544,6 @@ mod tests {
             (r"C:\A|B", '|'),
             (r"C:\A>B", '>'),
             (r"C:\A*B", '*'),
-            (r"C:\A~B", '~'),
             (r"C:\A#B", '#'),
             ("C:\\A\u{0007}B", '\u{0007}'),
         ] {
@@ -634,7 +638,8 @@ mod tests {
             "shells under test: {:?}",
             shells.iter().map(|(name, ..)| *name).collect::<Vec<_>>()
         );
-        for folder in ["plain", "AUM dir (x86) Іван+v2,@x"] {
+        // The temp root itself may be an 8.3 short path (CI: RUNNER~1).
+        for folder in ["plain", "AUM dir (x86) Іван+v2,@x", "SHORTN~1"] {
             let directory = root.path().join(folder);
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::copy(&sort, directory.join(BRIDGE_EXE)).unwrap();
