@@ -80,6 +80,42 @@ fn read_system_directory(mut query: impl FnMut(&mut [u16]) -> u32) -> Result<Pat
     Err("system directory length kept changing".into())
 }
 
+/// `cmd.exe` arguments that run one batch file (an npm `.cmd` shim) by its
+/// absolute path: `/D` (no AutoRun), `/V:OFF` (no `!` expansion),
+/// `/S /C ""<path>" <args>"`. Pass the result with `raw_arg`: Rust's argument
+/// quoting is not cmd.exe's. With `/S` cmd strips only the outer quotes, so the
+/// path stays quoted and `& | < > ^ ( )` in it are literal. `%` is still
+/// expanded inside quotes and `"` cannot be quoted, so paths containing them
+/// (or control characters) are refused. Arguments must be plain tokens
+/// (letters, digits, `-`, `/`, `:`, `.`, `_`).
+pub fn cmd_shim_command_line(path: &Path, arguments: &[&str]) -> Result<String, String> {
+    if !path.is_absolute() {
+        return Err(format!("shim path is not absolute: {}", path.display()));
+    }
+    let text = path.to_str().ok_or("shim path is not valid Unicode")?;
+    if text
+        .chars()
+        .any(|character| matches!(character, '%' | '"') || character.is_control())
+    {
+        return Err(format!(
+            "shim path contains characters cmd.exe cannot pass safely: {text}"
+        ));
+    }
+    if let Some(argument) = arguments.iter().find(|argument| {
+        argument.is_empty()
+            || !argument.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '-' | '/' | ':' | '.' | '_')
+            })
+    }) {
+        return Err(format!("unsafe shim argument: {argument:?}"));
+    }
+    Ok(format!(
+        "/D /V:OFF /S /C \"\"{text}\" {}\"",
+        arguments.join(" ")
+    ))
+}
+
 /// Finds a CLI on the process `PATH`; see [`resolve_cli_in`].
 pub fn resolve_cli_executable(name: &str) -> Option<PathBuf> {
     resolve_cli_in(&std::env::var_os("PATH")?, name)
@@ -179,6 +215,36 @@ mod tests {
         }
         let powershell = system_tool_path(r"WindowsPowerShell\v1.0\powershell.exe").unwrap();
         assert!(powershell.is_absolute());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_shim_command_line_quotes_paths_and_refuses_unsafe_input() {
+        let args = ["app-server", "--listen", "stdio://"];
+        assert_eq!(
+            cmd_shim_command_line(Path::new(r"C:\npm (x86) & co ^ !\codex.cmd"), &args).unwrap(),
+            r#"/D /V:OFF /S /C ""C:\npm (x86) & co ^ !\codex.cmd" app-server --listen stdio://""#
+        );
+        // Not absolute, `%` (expanded even inside quotes), `"`, control characters.
+        for path in [
+            r"npm\codex.cmd",
+            r"C:\100%\codex.cmd",
+            r"C:\%PATH%\codex.cmd",
+            "C:\\a\"b\\codex.cmd",
+            "C:\\a\nb\\codex.cmd",
+        ] {
+            assert!(
+                cmd_shim_command_line(Path::new(path), &args).is_err(),
+                "{path}"
+            );
+        }
+        // Arguments must be plain tokens.
+        for argument in ["", "a b", "a&b", "%x%", "a\"b", "a|b", "!x!", "a^b"] {
+            assert!(
+                cmd_shim_command_line(Path::new(r"C:\npm\codex.cmd"), &[argument]).is_err(),
+                "{argument:?}"
+            );
+        }
     }
 
     #[test]

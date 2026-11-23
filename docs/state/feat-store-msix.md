@@ -2,7 +2,7 @@
 
 ## Goal and constraints
 - Prepare a Microsoft Store (MSIX) distribution of AgentUsageMonitor 0.1.1 next to the existing EXE builds, from the same binary.
-- Worktree `C:\project\agent-usage-monitor-msix`, branch `feat/store-msix` from `main` at `daba890`. Committed and merged with `main` locally; **not pushed**, no PR yet.
+- Worktree `C:\project\agent-usage-monitor-msix`, branch `feat/store-msix` from `main` at `daba890`. Pushed; HEAD `565dac4` = `origin/feat/store-msix`. **PR #2** (https://github.com/valenticus/agent-usage-monitor/pull/2) open, CI `windows` green, **not merged**.
 - Do not touch the published v0.1.1 release, the Inno installer, WinGet PR #486060, the user's installed AUM or its settings. Do not submit to the Store.
 - Build and test only on mains power. Never install the MSIX on the user's working machine, never run a generated package or AUM binary, and never start a second AUM instance there.
 
@@ -75,10 +75,52 @@ NOT TESTED (needs a clean VM or second PC): see `docs/msix.md` → "Testing limi
 - S mode: third-party CLIs cannot run; certification acceptance uncertain.
 - EXE + Store installed together: whichever starts first at sign-in wins.
 
+## Runtime QA on the user's machine (2026-11-22/23, outside the repo)
+- With the user's approval, the user's Inno v0.1.1 was replaced by a test-signed MSIX 0.1.1.0 (cert `C63094CB…`, valid until 2026-12-06). Recovery backups live in `%USERPROFILE%\AUM-recovery\`. The full report is `%USERPROFILE%\AUM-recovery\qa\QA-REPORT.md`.
+- PASS (automated): install/identity, registrations, tray, flyouts, settings UI, LocalState persistence, localization, StartupTask toggle, packaged toasts, Codex, Claude CLI, bridge alias and lifecycle, single instance, cancellation on exit.
+- USER-OBSERVED PASS: start at sign-in (Q09b), DisabledByUser lock (Q10), 3–5 min sleep (Q17).
+- Phase 2 (2026-11-23):
+  - 12 static package checks (file-level WACK equivalents) pass;
+  - event logs are clean, activation and startup consistency check out;
+  - the full test suite passes 152/152 on `565dac4`.
+- Final QA (2026-11-23, user-authorized, each test restored and verified before the next):
+  - Q08 packaged import: PASS. Preferences imported; startup, the bridge and Claude refresh stay off; source unchanged; restored byte-identical.
+  - Q27 Inno coexistence: PASS. One instance either way, the losing copy writes nothing, settings and toast identities are isolated, clean teardown. The sign-in race is MANUAL.
+  - Q22 update 0.1.1.0→0.1.1.1 and in-place downgrade back: PASS.
+  - Q25 WACK: **overall WARNING**. 21 PASS; optional "Blocked executables" FAIL (F-6: `cmd.exe`/PowerShell for CLI shims, S-mode risk); "DPIAwarenessValidation" WARNING (F-5: no embedded DPI manifest, awareness is set at run time). The package was not removed. Live limits afterwards: Codex 100/95 %, Claude 48/57 %.
+  - Q18 Explorer restart: PASS. Icon back within 1 s, same PID, flyouts work.
+- No MSIX functional defect. F-4 confirmed: Inno setup and uninstall are blocked while the Store AUM runs (shared `AppMutex`).
+
+## Final Codex review (2026-11-23): PASS WITH CONDITIONS. Response committed and pushed in the review-fix commit
+- **DPI (F-5):** `rust/agent-monitor-ui/windows/agent-usage-monitor.manifest` (asInvoker; PerMonitorV2 with the PerMonitor / `true/pm` fallbacks) is embedded by `build.rs` into the GUI binary only (`/MANIFEST:EMBED /MANIFESTINPUT /MANIFESTUAC:NO`).
+  - Reason: one identical GUI binary for Inno, portable and MSIX; the bridge needs no manifest.
+  - Winit's later `SetProcessDpiAwarenessContext` call fails with ACCESS_DENIED and is ignored by winit, so there is no conflict.
+- **Codex `.cmd` (genuine defect):** the shim fallback passed a pre-quoted line through Rust's argument quoting and appended the arguments twice, so a `codex.cmd`-only install could not start. A regression test reproduced it (`codex_process_error`). Fix:
+  - `process_tools::cmd_shim_command_line` (shared; refuses `%`, `"`, control characters and non-token arguments) + `raw_arg`;
+  - Codex PATH search uses absolute entries only, the same as Claude; explicit paths must be absolute;
+  - native `codex.exe` and `.ps1` behaviour unchanged (tested).
+- **Tests:** 158/158 (2 consecutive runs). Codex mock test timeouts were widened because PowerShell start-up under load made one pre-existing cancellation test flaky.
+- **QA corrections:** WACK 22/1/1; WACK history; static check M9 renamed; Q27 assertion fixed (repeat run pending); the Explorer script restores Explorer in a `finally` block. Recorded in `QA-REPORT.md` → "Corrections after the independent Codex review".
+- **Docs:** `docs/msix.md`: test results, actual WACK result, mutex and installer behaviour, update vs forced downgrade, S mode, CLI dependency, certification notes, untested scenarios. The PR #2 description was updated.
+- **Decisions:**
+  - Claude's own `cmd_shim_command_line` stays unchanged, because it is already tested and in use. Moving it onto the shared helper is optional follow-up.
+  - The user turned **Claude background refresh on** in the installed MSIX (2026-11-23 01:51) on purpose. That is the new baseline: do not restore the checkpoint value.
+
 ## PR readiness
-Ready to push and open a PR to `main` once the user approves: branch is committed, merged with current `main`, and all local checks above pass. CI on GitHub has not run yet. Merge into `main` should wait for at least the VM install smoke test (or be accepted explicitly with the runtime QA still open).
+PR #2 is open; **do not merge yet**. Still needed:
+1. the final runtime QA of the fixed binary: replace the installed MSIX, re-run WACK and the live checks, check DPI (needs separate user approval for the replacement);
+2. the Q27 repeat (needs mains power or more than 35 % battery);
+3. the final Codex review.
 
 ## Next actions
-1. User: approve `git push -u origin feat/store-msix` and opening the PR; check CI (the MSIX static step runs on GitHub for the first time).
-2. On a clean Windows 10 1809+ / Windows 11 VM: install the VCLibs framework, sideload with a test certificate, run WACK, then the items in `docs/msix.md` → "Testing limits and risks" (import, StartupTask states, bridge toggles, CLIs, coexistence, S mode).
-3. Partner Center: listing (dependency disclosure at the start of the description), screenshots, privacy policy URL, age rating; upload the unsigned `.msix` from a clean build of the merged branch.
+1. With user approval, replace the installed MSIX with `AUM-recovery\test-signing\2026-11-23-review-fixes\…REVIEW-FIXES.TEST-SIGNED.msix`.
+   - Same version 0.1.1.0, so use `-ForceUpdateFromAnyVersion`; data is kept.
+   - Back up `LocalState` first; the user's current settings are the baseline.
+   - Then re-run WACK and the live checks, and check DPI at 100/150/200 %.
+2. Q27 repeat with the corrected assertion.
+3. Final Codex review. Store submission stays blocked on the S-mode decision.
+4. Remove the test certificate after QA (expires 2026-12-06).
+5. Partner Center (only after the S-mode decision):
+   - listing, with the dependency disclosure at the start of the description;
+   - screenshots, privacy policy URL, age rating;
+   - upload the unsigned `.msix` from a clean build of the merged branch.

@@ -43,7 +43,7 @@ Only a confirmed unpackaged process may write the EXE builds' registry state or 
 | Claude status-line listener | `--enable-claude-bridge` launch argument | Settings → General → Claude → **Status-line bridge** toggle (`claude_bridge_listener_enabled`, off by default, Store build only), applied at run time. Packaged apps cannot pass launch arguments on Windows 10 1809. |
 | Bridge command for Claude Code | full path to `agent-usage-monitor-claude-bridge.exe` | App Execution Alias `agent-usage-monitor-claude-bridge.exe` (files in `WindowsApps` cannot be started by path from outside the package) |
 | Legacy `Agent Monitor` folder migration | automatic, unchanged | never; explicit import from the EXE build instead |
-| Updates | Inno upgrade over the same AppId | Store updates; applied when AUM is not running. The startup task state and `LocalState` survive updates. |
+| Updates | Inno upgrade over the same AppId | Store updates to a **higher** version; applied when AUM is not running (a sideloaded update while AUM runs is refused with `0x80073D02`). The startup task state, `LocalState`, the notification settings and the alias survive updates (tested 0.1.1.0 → 0.1.1.1). A lower version is not an update: going back needs `Add-AppxPackage -ForceUpdateFromAnyVersion` (sideload testing only) or, in the Store, publishing a new higher version. |
 
 Unchanged in both builds: tray icon and menu, sleep/resume and Explorer-restart recovery, flyout Z-order, background running when windows are closed, single-instance mutex `Local\AgentUsageMonitor.Singleton`, Codex `app-server` and Claude CLI child processes (timeouts, cancellation, process-tree cleanup), and the pipe security (current user only, remote clients rejected, one instance).
 
@@ -120,6 +120,9 @@ Process launch:
   - nothing found, another file type (`.ps1`, `.bat`), a relative path or no verified `cmd.exe`: the refresh fails and **no process is started**.
   - Timeout, cancellation and `taskkill /T` cleanup are unchanged.
 - Codex: unchanged order: native `codex.exe`, the npm package's bundled native binary, then `codex.cmd` through `cmd.exe` or `codex.ps1` through Windows PowerShell.
+  - The search uses **absolute** `PATH` entries only. Relative and empty entries, including `.`, are skipped, so the current directory is never searched. An explicitly configured path must be absolute.
+  - `codex.cmd` is started like `claude.cmd`: `<System32>\cmd.exe /D /V:OFF /S /C ""<full path>" app-server --listen stdio://"`, passed verbatim (`process_tools::cmd_shim_command_line` + `raw_arg`). Paths containing `%`, `"` or control characters are refused and nothing is started.
+  - Before 2026-11-23 this fallback passed the line through Rust's argument quoting, which cmd.exe does not understand, and appended the arguments twice, so a `codex.cmd`-only installation could not start. It now has regression tests: shims in folders with spaces and `& ^ ( ) !`, exact arguments, timeout and cancellation with process-tree cleanup, refused `%` paths.
 - `cmd.exe` remains essential for npm `.cmd` shims (Windows can only run batch files through it); `taskkill /T` remains the process-tree cleanup on timeout and cancellation.
 
 ### Supported Windows editions
@@ -133,9 +136,18 @@ Process launch:
 - Both builds use the mutex `Local\AgentUsageMonitor.Singleton` and the same pipe name, so at most one AUM runs per session. This is unchanged on purpose: two copies would fight over the pipe and show duplicate alerts.
 - If both are installed and both launch at sign-in (Inno HKCU `Run` value and the Store startup task), whichever process creates the mutex first runs and the other exits silently. Which one wins is not predictable.
 - Settings no longer interfere: each build has its own data folder.
-- Recommendation for users: install only one build; when moving to the Store build, use the import, turn off "Launch at Windows sign-in" in the EXE build (or uninstall it).
+- The mutex is taken first in `main()`, before AUMID registration, settings migration or the `Run` reconcile. A copy that loses therefore exits without writing anything: no settings folder, no `Run` value, no AUMID.
+- The Inno installer declares `AppMutex=Local\AgentUsageMonitor.Singleton`. A running **Store** AUM holds the same mutex, so Inno setup and uninstall treat it as "AgentUsageMonitor is running". Silent setup and uninstall exit with code 1 and change nothing; interactive setup asks to close it. **To install, update or uninstall the EXE build, first exit AUM from the tray (Exit), then retry.**
+- A fresh EXE install starts with "Launch at Windows sign-in" off (v0.1.1 default) and writes no `Run` value until the user enables it.
+- Recommendation for users: install only one build. When moving to the Store build, use the import, turn off "Launch at Windows sign-in" in the EXE build (or uninstall it).
 - Not changed: making one build defer to the other (for example the Store build exiting when the EXE build's `Run` value exists) would change installed EXE behaviour and needs a product decision.
-- Runtime coexistence was **not tested**; it needs a VM or second PC.
+- Tested on one machine (2026-11-23, Inno v0.1.1 + sideloaded MSIX 0.1.1.0):
+  - whichever build runs first stays, and the other exits without writes, in both directions;
+  - settings folders are isolated;
+  - toast identities stay separate;
+  - Inno setup and uninstall are blocked by a running Store AUM;
+  - clean Inno uninstall.
+- **Not tested:** the sign-in race when both builds are registered for sign-in.
 
 ## Build
 
@@ -161,24 +173,72 @@ The script stages the two EXEs, `LICENSE`, the manifest (`packaging/msix/AppxMan
 
 The `.msix` is **unsigned**: Partner Center signs Store submissions. Do not submit a self-signed package.
 
+The GUI executable embeds a Win32 application manifest, `rust/agent-monitor-ui/windows/agent-usage-monitor.manifest`. It sets `asInvoker` and DPI awareness `PerMonitorV2` (fallbacks `PerMonitor` / `true/pm`).
+- `build.rs` adds it with the MSVC linker options `/MANIFEST:EMBED /MANIFESTINPUT:… /MANIFESTUAC:NO`, for the `agent-usage-monitor` binary only. The console bridge gets no manifest.
+- The Inno, portable and MSIX builds therefore keep one identical GUI binary.
+- Winit, through Slint, still calls `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` at start. Once the manifest has set the mode, that call fails with `ERROR_ACCESS_DENIED`; winit ignores the result, so the manifest's mode applies from process start.
+
 CI (`.github/workflows/rust.yml`) runs `-ValidateManifestOnly`. That is a static check of the manifest, identity, assets and layout with zero-byte placeholder EXEs. It does not build, sign, install or run the package and is **not** evidence that the packaged app works.
 
-## Testing limits and risks
+## Test results and remaining risks
 
-Not tested anywhere yet (needs a clean Windows 10 1809+ and Windows 11 x64 VM or second PC; never on the working machine with the installed EXE build):
+Runtime QA ran on one Windows 11 Home 26300 x64 machine (2026-11-22/23). It used the build of `565dac4`, sideloaded with a temporary test certificate. The Inno v0.1.1 installation was backed up and removed first. Full evidence lives outside the repo in `AUM-recovery\qa\QA-REPORT.md`. This is **not** Microsoft Store certification.
 
-- installation, WACK, uninstall, Store update;
-- `ApplicationData.LocalFolder` resolution on the MTA helper thread, settings persistence in `LocalState`, the "storage unavailable" warning path, and the import from a real EXE installation (including the `%APPDATA%` read fall-through on 1809 and 1903+);
-- the StartupTask worker thread with explicit `RoInitialize` and real WinRT calls, all five states, the "Checking…" state, and changes made in Windows Settings / Task Manager while AUM runs;
-- Claude CLI through a real npm `claude.cmd` and a native `claude.exe` inside the package context;
-- tray, toasts with the package AUMID, sleep/resume in the package;
-- Codex and Claude CLIs inside the package context (direct `claude.exe`, npm shims through `cmd.exe`, `taskkill` cleanup);
-- the bridge alias from Git Bash, PowerShell and cmd; the Store toggle and Claude toggle on/off while Claude Code sends status lines;
-- coexistence with an Inno installation (mutex race at sign-in);
-- S mode behaviour.
+Tested and passed on that machine:
+- **Package**
+  - install, identity and registrations: Start entry, alias, startup task;
+  - VCLibs framework resolution;
+  - repeat activation keeps one process;
+  - update 0.1.1.0 → 0.1.1.1 (same identity, a test-only repack). A sideloaded update while AUM runs is refused (`0x80073D02`); after exit, `LocalState`, the startup task state, notification settings and the alias are preserved. The way back is a **forced downgrade** (`-ForceUpdateFromAnyVersion`), not a normal update.
+- **Settings**
+  - `LocalState` persistence; the EXE folder is never recreated;
+  - the explicit import from a real EXE settings file: preferences copied; sign-in, the bridge and Claude refresh stay off; the source is unchanged; no second import.
+- **Startup task**
+  - toggle states 0/2;
+  - DisabledByUser lock and start at sign-in (both observed by the user).
+- **Tray and UI**
+  - tray, flyouts, Z-order, settings UI, four languages;
+  - Explorer restart: the icon is back within about 1 s and the process stays the same;
+  - about 3–5 min of sleep (observed by the user).
+- **Notifications:** packaged toasts with the package AUMID.
+- **CLIs and bridge**
+  - Codex (npm-installed native binary) and Claude (`claude.cmd` through `cmd.exe`) with real limits, and cleanup on exit;
+  - bridge alias from pwsh, cmd and Git Bash; bridge lifecycle and toggles.
+- **Coexistence with Inno v0.1.1:** see "Coexistence with the EXE build".
 
-Notes for the test machine:
+Windows App Certification Kit 10.0.26100.7705, run on the installed package (`appcert test -packagefullname`). **Overall result: WARNING** (24 tests: 22 PASS, 1 FAIL, 1 WARNING):
+- **FAIL, optional test "Blocked executables".** The GUI binary references `CreateProcessW`/`ShellExecuteW` and the strings `cmd.exe`, `WindowsPowerShell\v1.0\powershell.exe`, `CMD` and `Reg`:
+  - `cmd.exe` and PowerShell run npm `.cmd`/`.ps1` CLI shims; `taskkill` cleans up process trees;
+  - `ShellExecuteW` opens the repository/issue URLs;
+  - `Reg` matches the registry APIs used by the EXE builds; AUM never starts `reg.exe`.
 
-- **Sideloading** a test build needs the package signed with a test certificate trusted on the test machine (never submit that one), and the `Microsoft.VCLibs.140.00.UWPDesktop` x64 framework installed first. The Store installs the framework automatically.
-- The Windows App Certification Kit installs the package to test it, so it must also run on the test machine.
-- Bridge alias: Claude Code runs the `statusLine` command through its shell (Git Bash on Windows). Verify that stdin/stdout pass through, and that turning the alias off in Settings → Apps → Advanced app settings → App execution aliases makes the bridge fail cleanly.
+  These are required for the CLI integrations and were not removed.
+- **WARNING, "DPIAwarenessValidation".** The executable had no embedded manifest. Addressed by the embedded manifest described under "Build"; WACK has **not** been re-run on a package containing it yet.
+
+Not tested (needs the user, other hardware or a clean VM):
+- **Windows 10/11 S mode:** see "Supported Windows editions". Open Store risk, needs a WDAC audit/enforcement test in a VM.
+- **Multiple monitors with different DPI**, moving windows between them, and the new embedded manifest at 100/150/200 %.
+- **Sign-in race** when both the EXE `Run` value and the Store startup task are enabled.
+- **Policy-managed startup states** (`DisabledByPolicy` / `EnabledByPolicy`).
+- **Uninstall/reinstall and first install on a clean** Windows 10 1809 / Windows 11 machine, including a missing VCLibs framework.
+- **Store certification:** Partner Center runs its own checks; a Store-signed package was never installed.
+
+## Store certification notes (for Partner Center)
+- **CLI dependency.** The app needs separately installed Codex CLI and/or Claude Code CLI for provider data. Disclose this at the start of the description (policy 10.2.4, non-integrated software).
+- **Launched programs.** AUM starts only:
+  - the user's CLIs, found on absolute `PATH` entries;
+  - `cmd.exe` (for npm `.cmd` shims), Windows PowerShell (for `.ps1` shims) and `taskkill.exe` (process-tree cleanup), all from `System32` by absolute path.
+
+  It never elevates (`asInvoker`) and never reads CLI credentials. This explains WACK "Blocked executables".
+- **S mode.** The CLIs and shell components cannot run there. AUM should start and show the providers as unavailable, but this is unverified. Microsoft requires Store apps to be compatible with Windows 10 S; acceptance is an **open risk**.
+- **Signing.** Submit the unsigned `.msix` built from the merged branch. Test-certificate builds are for sideloading only.
+
+Notes for a test machine:
+- **Sideloading** a test build needs:
+  - the package signed with a test certificate trusted on that machine (never submit that package);
+  - the `Microsoft.VCLibs.140.00.UWPDesktop` x64 framework installed first. The Store installs the framework automatically.
+- **WACK:**
+  - needs elevation;
+  - `-packagefullname` tests an installed package; with `-appxpackagepath` WACK deploys the package itself and may remove it afterwards;
+  - back up `LocalState` first.
+- **Bridge alias.** Claude Code runs the `statusLine` command through its shell (Git Bash on Windows). Verify that stdin/stdout pass through, and that turning the alias off in Settings → Apps → Advanced app settings → App execution aliases makes the bridge fail cleanly.
