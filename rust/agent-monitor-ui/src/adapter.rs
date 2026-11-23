@@ -43,52 +43,81 @@ pub struct UiSnapshot {
     claude_usage: ClaudeUsageSnapshot,
 }
 
+/// Which quota window a tray column shows: the provider's primary (5-hour)
+/// or secondary (weekly) window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayWindow {
+    FiveHour,
+    Weekly,
+}
+
+const TRAY_UNAVAILABLE: crate::tray::QuotaValue = crate::tray::QuotaValue {
+    remaining_percent: None,
+    freshness: crate::tray::DataFreshness::Unavailable,
+};
+
 impl UiSnapshot {
-    /// Returns one independently constrained quota value for each provider.
-    /// A missing or disabled provider affects only its own tray bar.
+    /// The two tray columns (left, right), each one fixed quota window
+    /// (F-11; "remaining" = 100 − used):
+    ///
+    /// | Enabled providers | Left              | Right               |
+    /// |-------------------|-------------------|---------------------|
+    /// | Codex and Claude  | Codex 5-hour      | Claude 5-hour       |
+    /// | Codex only        | Codex 5-hour      | Codex weekly        |
+    /// | Claude only       | Claude 5-hour     | Claude weekly       |
+    /// | neither           | unavailable       | unavailable         |
+    ///
+    /// A missing window makes only its own column unavailable; stale
+    /// last-known-good values stay visible as stale.
     pub fn tray_values(
         &self,
         codex_enabled: bool,
         claude_enabled: bool,
         now: i64,
     ) -> [crate::tray::QuotaValue; 2] {
-        [
-            self.tray_value("codex", codex_enabled, now),
-            self.tray_value("claude", claude_enabled, now),
-        ]
+        use TrayWindow::{FiveHour, Weekly};
+        match (codex_enabled, claude_enabled) {
+            (true, true) => [
+                self.tray_value("codex", FiveHour, now),
+                self.tray_value("claude", FiveHour, now),
+            ],
+            (true, false) => [
+                self.tray_value("codex", FiveHour, now),
+                self.tray_value("codex", Weekly, now),
+            ],
+            (false, true) => [
+                self.tray_value("claude", FiveHour, now),
+                self.tray_value("claude", Weekly, now),
+            ],
+            (false, false) => [TRAY_UNAVAILABLE; 2],
+        }
     }
 
-    fn tray_value(&self, id: &str, enabled: bool, now: i64) -> crate::tray::QuotaValue {
+    fn tray_value(&self, id: &str, window: TrayWindow, now: i64) -> crate::tray::QuotaValue {
         use crate::tray::{DataFreshness, QuotaValue};
 
-        let unavailable = QuotaValue {
-            remaining_percent: None,
-            freshness: DataFreshness::Unavailable,
-        };
-        if !enabled {
-            return unavailable;
-        }
         let Some(provider) = self
             .providers
             .iter()
             .find(|provider| provider.provider_id == id)
         else {
-            return unavailable;
+            return TRAY_UNAVAILABLE;
         };
         let remaining = provider
             .limits
             .first()
-            .into_iter()
-            .flat_map(|limit| [limit.primary.as_ref(), limit.secondary.as_ref()])
-            .flatten()
+            .and_then(|limit| match window {
+                TrayWindow::FiveHour => limit.primary.as_ref(),
+                TrayWindow::Weekly => limit.secondary.as_ref(),
+            })
             .filter(|window| {
                 window.used_percent.is_finite() && (0.0..=100.0).contains(&window.used_percent)
             })
-            .map(RateLimitWindow::remaining_percent)
-            .reduce(f64::min);
+            .map(RateLimitWindow::remaining_percent);
         let Some(remaining) = remaining else {
-            return unavailable;
+            return TRAY_UNAVAILABLE;
         };
+        let unavailable = TRAY_UNAVAILABLE;
         let freshness = match (&provider.status, provider.last_success_unix_seconds) {
             (ProviderStatus::Available, Some(updated))
                 if updated <= now && now.saturating_sub(updated) <= STALE_AFTER_SECONDS =>
@@ -170,7 +199,7 @@ impl UiSnapshot {
             .iter()
             .find(|provider| provider.provider_id == provider_id);
         let Some(provider) = provider else {
-            return unavailable_status(provider_id, self.claude_bridge_enabled, locale);
+            return unavailable_status(provider_id, None, self.claude_bridge_enabled, locale);
         };
         match provider.status {
             ProviderStatus::Available => {
@@ -236,9 +265,12 @@ impl UiSnapshot {
                     "Не удалось прочитать данные провайдера".into(),
                 ),
             },
-            ProviderStatus::Unavailable => {
-                unavailable_status(provider_id, self.claude_bridge_enabled, locale)
-            }
+            ProviderStatus::Unavailable => unavailable_status(
+                provider_id,
+                provider.error.as_ref().map(|error| error.code.as_str()),
+                self.claude_bridge_enabled,
+                locale,
+            ),
         }
     }
 
@@ -382,6 +414,29 @@ impl UiSnapshot {
         next
     }
 
+    /// Claude CLI refresh is on but no Claude CLI is installed (nothing was
+    /// started). Without any Claude data this is "not installed", not an
+    /// error; data from the status line, if any, is kept as it is.
+    pub fn replace_claude_cli_missing(&self) -> Self {
+        let mut next = self.clone();
+        let mut claude = next
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "claude")
+            .cloned()
+            .unwrap_or_else(|| empty_provider("claude"));
+        if !claude.limits.is_empty() {
+            return next;
+        }
+        claude.status = ProviderStatus::Unavailable;
+        claude.error = Some(ProviderError {
+            code: CLAUDE_CLI_UNAVAILABLE.into(),
+            message: "Claude CLI not found on PATH".into(),
+        });
+        replace_provider(&mut next.providers, claude);
+        next
+    }
+
     pub fn replace_claude_error(&self) -> Self {
         let mut next = self.clone();
         let mut claude = next
@@ -400,7 +455,65 @@ impl UiSnapshot {
     }
 }
 
-fn unavailable_status(provider_id: &str, bridge_enabled: bool, locale: Locale) -> (String, String) {
+/// Error code of a Claude CLI refresh that found no installed CLI.
+pub const CLAUDE_CLI_UNAVAILABLE: &str = "claude_cli_unavailable";
+/// Error code of a Codex refresh that found no installed CLI (core crate).
+const CODEX_CLI_UNAVAILABLE: &str = "codex_unavailable";
+
+fn unavailable_status(
+    provider_id: &str,
+    error_code: Option<&str>,
+    bridge_enabled: bool,
+    locale: Locale,
+) -> (String, String) {
+    // A missing CLI: say so, and how to connect it (AUM never installs it).
+    match error_code {
+        Some(CODEX_CLI_UNAVAILABLE) => {
+            return match locale {
+                Locale::Uk => (
+                    "CLI не знайдено".into(),
+                    "Встановіть Codex CLI і виконайте codex login, потім оновіть ліміти".into(),
+                ),
+                Locale::En => (
+                    "CLI not found".into(),
+                    "Install the Codex CLI and run codex login, then refresh limits".into(),
+                ),
+                Locale::Pl => (
+                    "Nie znaleziono CLI".into(),
+                    "Zainstaluj Codex CLI i uruchom codex login, a potem odśwież limity".into(),
+                ),
+                Locale::Ru => (
+                    "CLI не найден".into(),
+                    "Установите Codex CLI и выполните codex login, затем обновите лимиты".into(),
+                ),
+            };
+        }
+        Some(CLAUDE_CLI_UNAVAILABLE) => {
+            return match locale {
+                Locale::Uk => (
+                    "CLI не знайдено".into(),
+                    "Встановіть Claude Code і увійдіть (claude) або вимкніть фонове оновлення"
+                        .into(),
+                ),
+                Locale::En => (
+                    "CLI not found".into(),
+                    "Install Claude Code and sign in (claude), or turn off Background refresh"
+                        .into(),
+                ),
+                Locale::Pl => (
+                    "Nie znaleziono CLI".into(),
+                    "Zainstaluj Claude Code i zaloguj się (claude) albo wyłącz odświeżanie w tle"
+                        .into(),
+                ),
+                Locale::Ru => (
+                    "CLI не найден".into(),
+                    "Установите Claude Code и войдите (claude) или выключите фоновое обновление"
+                        .into(),
+                ),
+            };
+        }
+        _ => {}
+    }
     if provider_id == "claude" {
         if bridge_enabled {
             return match locale {
@@ -425,26 +538,26 @@ fn unavailable_status(provider_id: &str, bridge_enabled: bool, locale: Locale) -
         return match locale {
             Locale::Uk => (
                 "Потрібне налаштування".into(),
-                "Потрібна opt-in команда status line; AUM не змінює налаштування Claude".into(),
+                "Увімкніть фонове оновлення або налаштуйте status line".into(),
             ),
             Locale::En => (
                 "Setup required".into(),
-                "Opt-in status-line command required; AUM does not change Claude settings".into(),
+                "Turn on Background refresh or set up the status line".into(),
             ),
             Locale::Pl => (
                 "Wymagana konfiguracja".into(),
-                "Wymagana komenda status line; AUM nie zmienia ustawień Claude".into(),
+                "Włącz odświeżanie w tle lub skonfiguruj status line".into(),
             ),
             Locale::Ru => (
                 "Требуется настройка".into(),
-                "Нужна команда status line; AUM не меняет настройки Claude".into(),
+                "Включите фоновое обновление или настройте status line".into(),
             ),
         };
     }
     match locale {
         Locale::Uk => (
             "Недоступно".into(),
-            "Codex app-server не повернув дані".into(),
+            "Codex app-server ще не повернув дані".into(),
         ),
         Locale::En => (
             "Unavailable".into(),
@@ -855,6 +968,56 @@ mod tests {
         assert_eq!(stale.five.remaining, "—");
     }
 
+    /// Clean install: a missing CLI is "not installed" with a short how-to,
+    /// never an error and never zero usage. AUM does not install anything.
+    #[test]
+    fn missing_clis_show_not_installed_with_instructions_and_no_values() {
+        let mut codex_missing = UiSnapshot::unavailable();
+        codex_missing.providers[0].error = Some(ProviderError {
+            code: "codex_unavailable".into(),
+            message: String::new(),
+        });
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let (status, description) = codex_missing.settings_status("codex", true, 100, locale);
+            assert!(status.contains("CLI"), "{locale:?}: {status}");
+            assert!(
+                description.contains("codex login"),
+                "{locale:?}: {description}"
+            );
+        }
+        assert_eq!(codex_missing.settings_status_level("codex", true, 100), 3);
+        let view = provider_ui(&codex_missing, "codex", 100);
+        assert_eq!(
+            (view.five.remaining.as_str(), view.five.available),
+            ("—", false)
+        );
+
+        let claude_missing = UiSnapshot::unavailable().replace_claude_cli_missing();
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let (status, description) = claude_missing.settings_status("claude", true, 100, locale);
+            assert!(status.contains("CLI"), "{locale:?}: {status}");
+            assert!(description.contains("claude"), "{locale:?}: {description}");
+        }
+        assert_eq!(claude_missing.settings_status_level("claude", true, 100), 3);
+        assert_eq!(
+            provider_ui(&claude_missing, "claude", 100).five.remaining,
+            "—"
+        );
+
+        // Data from the status line is never replaced by "not installed".
+        let status_line = ClaudeStatusLineSnapshot {
+            five_hour_remaining_percent: Some(40.0),
+            five_hour_reset_at: Some(500),
+            weekly_remaining_percent: Some(70.0),
+            weekly_reset_at: Some(900),
+            snapshot_at: 100,
+        };
+        let with_data = UiSnapshot::loading(true)
+            .replace_claude(status_line.to_provider_snapshot(), status_line)
+            .replace_claude_cli_missing();
+        assert_eq!(provider_ui(&with_data, "claude", 101).five.remaining, "40%");
+    }
+
     #[test]
     fn fresh_values_and_reset_countdowns_are_localized() {
         let data = snapshot(
@@ -976,17 +1139,20 @@ mod tests {
         assert!(snapshot.alert_providers(false, false).is_empty());
     }
 
-    #[test]
-    fn tray_state_uses_each_providers_tightest_window_and_keeps_other_bar_live() {
-        let now = 1_700_000_000;
-        let window = |used_percent| {
-            Some(RateLimitWindow {
+    /// F-11 fixtures: (used) percentages per provider; `None` = window missing.
+    fn tray_snapshot(
+        codex: (Option<f64>, Option<f64>),
+        claude: (Option<f64>, Option<f64>),
+        updated: i64,
+    ) -> UiSnapshot {
+        let window = |used: Option<f64>| {
+            used.map(|used_percent| RateLimitWindow {
                 used_percent,
                 window_duration_mins: None,
                 resets_at: None,
             })
         };
-        let make_provider = |id: &str, five, weekly| ProviderSnapshot {
+        let provider = |id: &str, (five, weekly): (Option<f64>, Option<f64>)| ProviderSnapshot {
             provider_id: id.into(),
             status: ProviderStatus::Available,
             version: None,
@@ -998,30 +1164,151 @@ mod tests {
                 plan_type: None,
                 rate_limit_reached_type: None,
             }],
-            last_success_unix_seconds: Some(now),
+            last_success_unix_seconds: Some(updated),
             error: None,
         };
-        let snapshot = UiSnapshot {
-            providers: vec![
-                make_provider("codex", 4.0, 1.0),
-                make_provider("claude", 51.0, 14.0),
-            ],
+        UiSnapshot {
+            providers: vec![provider("codex", codex), provider("claude", claude)],
             demo: false,
             loading: false,
             claude_bridge_enabled: true,
             claude_usage: ClaudeUsageSnapshot::default(),
-        };
-        let values = snapshot.tray_values(true, true, now);
-        assert_eq!(values[0].remaining_percent, Some(96));
-        assert_eq!(values[1].remaining_percent, Some(49));
+        }
+    }
 
+    fn remaining(values: [crate::tray::QuotaValue; 2]) -> [Option<u8>; 2] {
+        [values[0].remaining_percent, values[1].remaining_percent]
+    }
+
+    /// F-11 contract with the agreed example: Codex 100 % / 94 %, Claude
+    /// 96 % / 44 % remaining. Each column is one fixed window; the tightest
+    /// window is never picked.
+    #[test]
+    fn tray_columns_follow_the_fixed_window_contract() {
+        let now = 1_700_000_000;
+        // used = 100 − remaining
+        let snapshot = tray_snapshot((Some(0.0), Some(6.0)), (Some(4.0), Some(56.0)), now);
+        // Both: left Codex 5 h, right Claude 5 h (not 94 / 44).
+        assert_eq!(
+            remaining(snapshot.tray_values(true, true, now)),
+            [Some(100), Some(96)]
+        );
+        // Codex only: Codex 5 h, Codex weekly.
+        assert_eq!(
+            remaining(snapshot.tray_values(true, false, now)),
+            [Some(100), Some(94)]
+        );
+        // Claude only: Claude 5 h, Claude weekly.
+        assert_eq!(
+            remaining(snapshot.tray_values(false, true, now)),
+            [Some(96), Some(44)]
+        );
+        // Neither: both unavailable.
+        let off = snapshot.tray_values(false, false, now);
+        assert_eq!(remaining(off), [None, None]);
+        assert!(
+            off.iter()
+                .all(|value| value.freshness == crate::tray::DataFreshness::Unavailable)
+        );
+        for mode in [(true, true), (true, false), (false, true)] {
+            let values = snapshot.tray_values(mode.0, mode.1, now);
+            assert!(
+                values
+                    .iter()
+                    .all(|value| value.freshness == crate::tray::DataFreshness::Fresh),
+                "{mode:?}"
+            );
+        }
+        // Different weekly values never move the 5-hour columns.
+        let other_weekly = tray_snapshot((Some(0.0), Some(99.0)), (Some(4.0), Some(1.0)), now);
+        assert_eq!(
+            remaining(other_weekly.tray_values(true, true, now)),
+            [Some(100), Some(96)]
+        );
+    }
+
+    /// A missing primary or secondary window makes only its own column
+    /// unavailable; the other column and the other provider stay live.
+    #[test]
+    fn missing_windows_affect_only_their_own_column() {
+        use crate::tray::DataFreshness::{Fresh, Unavailable};
+        let now = 1_700_000_000;
+        let no_codex_five = tray_snapshot((None, Some(6.0)), (Some(4.0), Some(56.0)), now);
+        let values = no_codex_five.tray_values(true, true, now);
+        assert_eq!(remaining(values), [None, Some(96)]);
+        assert_eq!(
+            (values[0].freshness, values[1].freshness),
+            (Unavailable, Fresh)
+        );
+        let values = no_codex_five.tray_values(true, false, now);
+        assert_eq!(remaining(values), [None, Some(94)]);
+        assert_eq!(
+            (values[0].freshness, values[1].freshness),
+            (Unavailable, Fresh)
+        );
+
+        let no_claude_weekly = tray_snapshot((Some(0.0), Some(6.0)), (Some(4.0), None), now);
+        let values = no_claude_weekly.tray_values(false, true, now);
+        assert_eq!(remaining(values), [Some(96), None]);
+        assert_eq!(
+            (values[0].freshness, values[1].freshness),
+            (Fresh, Unavailable)
+        );
+        // The weekly gap does not matter when both providers show 5-hour.
+        assert_eq!(
+            remaining(no_claude_weekly.tray_values(true, true, now)),
+            [Some(100), Some(96)]
+        );
+
+        // A provider without any data leaves the other provider's column live.
         let degraded = UiSnapshot {
-            providers: vec![empty_provider("codex"), make_provider("claude", 35.0, 12.0)],
-            ..snapshot
+            providers: vec![
+                empty_provider("codex"),
+                tray_snapshot((None, None), (Some(35.0), Some(12.0)), now).providers[1].clone(),
+            ],
+            ..no_claude_weekly
         };
         let values = degraded.tray_values(true, true, now);
-        assert_eq!(values[0].freshness, crate::tray::DataFreshness::Unavailable);
-        assert_eq!(values[1].remaining_percent, Some(65));
+        assert_eq!(remaining(values), [None, Some(65)]);
+        assert_eq!(
+            (values[0].freshness, values[1].freshness),
+            (Unavailable, Fresh)
+        );
+        // Invalid percentages are treated as missing, never as zero.
+        let invalid = tray_snapshot((Some(f64::NAN), Some(150.0)), (Some(4.0), Some(56.0)), now);
+        assert_eq!(
+            remaining(invalid.tray_values(true, false, now)),
+            [None, None]
+        );
+    }
+
+    /// Stale last-known-good values keep their own window and are marked
+    /// stale (rendered solid and muted by the tray, F-7).
+    #[test]
+    fn stale_last_known_good_values_keep_their_window() {
+        let now = 1_700_000_000;
+        let old = now - STALE_AFTER_SECONDS - 1;
+        let snapshot = tray_snapshot((Some(0.0), Some(6.0)), (Some(4.0), Some(56.0)), old);
+        for (mode, expected) in [
+            ((true, true), [Some(100), Some(96)]),
+            ((true, false), [Some(100), Some(94)]),
+            ((false, true), [Some(96), Some(44)]),
+        ] {
+            let values = snapshot.tray_values(mode.0, mode.1, now);
+            assert_eq!(remaining(values), expected, "{mode:?}");
+            assert!(
+                values
+                    .iter()
+                    .all(|value| value.freshness == crate::tray::DataFreshness::Stale),
+                "{mode:?}"
+            );
+        }
+        // Last-known-good data after a failure stays visible as stale.
+        let mut failed = tray_snapshot((Some(0.0), Some(6.0)), (Some(4.0), Some(56.0)), now - 10);
+        failed.providers[0].status = ProviderStatus::Error;
+        let values = failed.tray_values(true, true, now);
+        assert_eq!(remaining(values), [Some(100), Some(96)]);
+        assert_eq!(values[0].freshness, crate::tray::DataFreshness::Stale);
         assert_eq!(values[1].freshness, crate::tray::DataFreshness::Fresh);
     }
 

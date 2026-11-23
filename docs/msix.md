@@ -14,7 +14,7 @@ Confirmed in Partner Center → Product identity. Do not change these values.
 | PublisherDisplayName | `Valentyn Fetisov` |
 | Package Family Name | `ValentynFetisov.AgentUsageMonitor_sfbqfhxtgjc58` |
 | Store ID | `9N20DHG8SSS1` |
-| Version | `x.y.z.0`, taken from `rust/agent-monitor-ui/Cargo.toml` (0.1.1 → `0.1.1.0`) |
+| Version | `x.y.z.0`, taken from `rust/agent-monitor-ui/Cargo.toml` (0.2.0 → `0.2.0.0`) |
 | Architecture / minimum OS | x64, Windows 10 1809 (`10.0.17763.0`) |
 | Capabilities | `runFullTrust` only |
 | Framework dependency | `Microsoft.VCLibs.140.00.UWPDesktop` ≥ `14.0.33728.0` |

@@ -76,7 +76,7 @@ pub struct TrayNotifier {
 }
 
 impl TrayNotifier {
-    /// Renders each provider's constrained quota locally and asks the tray
+    /// Renders the two tray columns (see `UiSnapshot::tray_values`) and asks the tray
     /// window thread to replace its Windows notification-area icon.
     pub fn update_icon(
         &self,
@@ -675,11 +675,15 @@ pub struct QuotaValue {
     pub freshness: DataFreshness,
 }
 
-/// Tray bar colours (RGBA). Warning is the shared semantic yellow #FACC15,
-/// which stays visible on both dark and light taskbars at 16 px.
+/// Tray bar colours (RGBA): mid-tone shades of the same green / amber / red
+/// families as the flyout (`Theme.level-bar`), one palette that stays visible
+/// on both dark and light taskbars at 16 px. Warning is amber #F59E0B (v0.2.0,
+/// F-10; it was yellow #FACC15).
 pub const TRAY_NORMAL: [u8; 4] = [76, 190, 126, 255];
-pub const TRAY_WARNING: [u8; 4] = [250, 204, 21, 255];
+pub const TRAY_WARNING: [u8; 4] = [0xf5, 0x9e, 0x0b, 255];
 pub const TRAY_CRITICAL: [u8; 4] = [224, 88, 95, 255];
+/// Muted fill for stale readings: no semantic state colour, solid (no pattern).
+pub const TRAY_STALE: [u8; 4] = [159, 151, 132, 255];
 
 /// Deterministic RGBA icon pixels, row-major, with transparent unused pixels.
 /// Each bar grows from the bottom in proportion to its own remaining quota.
@@ -714,21 +718,25 @@ pub fn render_rgba_with_thresholds(
         };
         let pct = pct.min(100);
         let fill_height = ((height * u32::from(pct)) / 100).max(1);
+        // Stale readings use one muted, solid colour instead of a misleading
+        // healthy/warning/critical colour. (A former row-skipping pattern read
+        // as a striped artifact at 16–20 px.)
         let color = match value.freshness {
             DataFreshness::Fresh if pct <= critical_threshold => TRAY_CRITICAL,
             DataFreshness::Fresh if pct <= warning_threshold => TRAY_WARNING,
             DataFreshness::Fresh => TRAY_NORMAL,
-            DataFreshness::Stale => [159, 151, 132, 255],
+            DataFreshness::Stale => TRAY_STALE,
             DataFreshness::Unavailable => neutral,
         };
-        for y in bottom - fill_height..bottom {
-            // Stale readings use a subtle two-row break pattern instead of a
-            // misleading current healthy/warning/critical color.
-            if value.freshness == DataFreshness::Stale && (bottom - y) % 3 == 0 {
-                continue;
-            }
-            paint_rect(&mut pixels, size, x0, y, col_width, 1, color);
-        }
+        paint_rect(
+            &mut pixels,
+            size,
+            x0,
+            bottom - fill_height,
+            col_width,
+            fill_height,
+            color,
+        );
     }
     Some(pixels)
 }
@@ -927,8 +935,8 @@ mod tests {
     }
 
     #[test]
-    fn warning_bars_use_the_semantic_yellow_facc15_at_every_size() {
-        assert_eq!(TRAY_WARNING, [0xfa, 0xcc, 0x15, 0xff]);
+    fn warning_bars_use_the_semantic_amber_at_every_size() {
+        assert_eq!(TRAY_WARNING, [0xf5, 0x9e, 0x0b, 0xff]);
         let warning = QuotaValue {
             remaining_percent: Some(20),
             freshness: DataFreshness::Fresh,
@@ -981,6 +989,112 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// F-10: for every state the bar and the percentage text (and the tray
+    /// bar) use the same hue family; only lightness may differ. Reads the
+    /// colours straight from `Theme.level-bar` / `Theme.level-text`.
+    #[test]
+    fn bar_text_and_tray_colours_share_one_hue_per_state() {
+        let source = include_str!("../ui/main.slint");
+        let function = |name: &str| -> Vec<[u8; 3]> {
+            let start = source.find(&format!("function {name}(")).unwrap();
+            let body = &source[start..start + source[start..].find('}').unwrap() + 400];
+            body.lines()
+                .filter(|line| line.contains("if (level =="))
+                .take(3)
+                .flat_map(|line| {
+                    line.match_indices('#')
+                        .map(|(i, _)| {
+                            let hex = &line[i + 1..i + 7];
+                            let v = u32::from_str_radix(hex, 16).unwrap();
+                            [(v >> 16) as u8, (v >> 8) as u8, v as u8]
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        // Pairs per level: [light, dark].
+        let bars = function("level-bar");
+        let texts = function("level-text");
+        assert_eq!((bars.len(), texts.len()), (6, 6));
+        let hue = |[r, g, b]: [u8; 3]| -> f32 {
+            let (r, g, b) = (
+                f32::from(r) / 255.0,
+                f32::from(g) / 255.0,
+                f32::from(b) / 255.0,
+            );
+            let max = r.max(g).max(b);
+            let delta = max - r.min(g).min(b);
+            let h = if max == r {
+                60.0 * (((g - b) / delta) % 6.0)
+            } else if max == g {
+                60.0 * ((b - r) / delta + 2.0)
+            } else {
+                60.0 * ((r - g) / delta + 4.0)
+            };
+            (h + 360.0) % 360.0
+        };
+        let close = |a: f32, b: f32| (a - b).abs().min(360.0 - (a - b).abs()) <= 15.0;
+        let tray = [TRAY_NORMAL, TRAY_WARNING, TRAY_CRITICAL];
+        for level in 0..3 {
+            let reference = hue(bars[level * 2 + 1]);
+            for colour in [bars[level * 2], texts[level * 2], texts[level * 2 + 1]] {
+                assert!(close(hue(colour), reference), "level {level}: {colour:?}");
+            }
+            let t = tray[level];
+            assert!(
+                close(hue([t[0], t[1], t[2]]), reference),
+                "tray level {level}"
+            );
+        }
+        // Warning is amber (not yellow): hue around 35–45°.
+        assert!(
+            (30.0..=46.0).contains(&hue(bars[3])),
+            "warning hue {}",
+            hue(bars[3])
+        );
+    }
+
+    /// F-7 regression: a stale column is one solid block of the muted colour,
+    /// with no skipped rows (the former pattern read as stripes at 16 px), and
+    /// never uses a semantic state colour.
+    #[test]
+    fn stale_bars_are_solid_and_muted_at_every_size() {
+        for size in [16, 20, 24, 32] {
+            for percent in [5, 20, 60, 100] {
+                let pixels = render_rgba_with_thresholds(
+                    size,
+                    [QuotaValue {
+                        remaining_percent: Some(percent),
+                        freshness: DataFreshness::Stale,
+                    }; 2],
+                    true,
+                    25,
+                    10,
+                )
+                .unwrap();
+                let at = |x: u32, y: u32| {
+                    let i = ((y * size + x) * 4) as usize;
+                    [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+                };
+                // First column's centre line, from the bottom edge upwards.
+                let col_width = (size / 4).max(3);
+                let gap = (size / 8).max(2);
+                let x = (size - (col_width * 2 + gap)) / 2 + col_width / 2;
+                let (top, bottom) = (2, size - 2);
+                let fill = (((bottom - top) * u32::from(percent)) / 100).max(1);
+                for y in bottom - fill..bottom {
+                    assert_eq!(at(x, y), TRAY_STALE, "size {size} {percent}% row {y}");
+                }
+                for color in [TRAY_NORMAL, TRAY_WARNING, TRAY_CRITICAL] {
+                    assert!(
+                        !pixels.chunks_exact(4).any(|p| p == color),
+                        "size {size} {percent}%: stale must not use a state colour"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

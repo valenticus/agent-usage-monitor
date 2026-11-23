@@ -23,8 +23,14 @@ pub(crate) enum ClaudeRefreshEvent {
     Failed {
         request_id: Option<u64>,
         timed_out: bool,
+        /// No Claude CLI was found on `PATH`; nothing was started. Shown as
+        /// "not installed" instead of a generic error.
+        cli_missing: bool,
     },
 }
+
+/// Error text when no Claude CLI is resolved (the refresh fails closed).
+const CLI_NOT_FOUND: &str = "Claude CLI not found on PATH";
 
 pub async fn refresh_once(
     cancel: &CancellationToken,
@@ -54,7 +60,7 @@ fn claude_command(resolved: Option<std::path::PathBuf>) -> Result<Command, Strin
         command.args(CLAUDE_ARGUMENTS);
         return Ok(command);
     }
-    let executable = resolved.ok_or("Claude CLI not found on PATH")?;
+    let executable = resolved.ok_or(CLI_NOT_FOUND)?;
     if !executable.is_absolute() {
         return Err("Claude CLI path is not absolute".into());
     }
@@ -428,6 +434,7 @@ async fn run_with_intervals<F>(
                     .send(ClaudeRefreshEvent::Failed {
                         request_id,
                         timed_out,
+                        cli_missing: error == CLI_NOT_FOUND,
                     })
                     .await
                     .is_err()
