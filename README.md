@@ -8,13 +8,13 @@
 
 A small Windows tray app that shows remaining quota, reset countdowns and low-limit alerts for your AI coding assistants.
 
-[![Latest release](https://img.shields.io/badge/Release-v0.1.1-15243D?style=flat-square)](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.1.1)
+[![Latest release](https://img.shields.io/badge/Release-v0.2.0-15243D?style=flat-square)](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.2.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-15243D?style=flat-square)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2B%20x64-15243D?style=flat-square)
 ![Rust](https://img.shields.io/badge/Rust-Slint-15243D?style=flat-square)
 ![Languages](https://img.shields.io/badge/UI-UA%20·%20EN%20·%20PL%20·%20RU-15243D?style=flat-square)
 
-**[Download v0.1.1](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.1.1)** · [All releases](https://github.com/valenticus/agent-usage-monitor/releases) · [Report an issue](https://github.com/valenticus/agent-usage-monitor/issues)
+**[Download v0.2.0](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.2.0)** · [All releases](https://github.com/valenticus/agent-usage-monitor/releases) · [Report an issue](https://github.com/valenticus/agent-usage-monitor/issues)
 
 <img src="assets/hero.png" alt="Agent Usage Monitor: Settings in Light and Bluish Dark themes with the tray window">
 
@@ -40,7 +40,7 @@ AUM is built with **Rust** and **Slint**. It is an independent community project
 
 ## Screenshots
 
-> Screenshots were captured with v0.1.0. v0.1.1 looks the same apart from more consistent provider icon sizing.
+> Screenshots were captured with v0.1.0. v0.2.0 uses green / amber / red status colours and clearer Claude settings text, so some details differ.
 
 ### Tray window
 
@@ -94,13 +94,15 @@ Downloads are on **[GitHub Releases](https://github.com/valenticus/agent-usage-m
 
 ### Windows installer (recommended)
 
-Download `AgentUsageMonitor-0.1.1-win-x64-setup.exe`, run the setup wizard, and launch **Agent Usage Monitor**. Installation is per-user; administrator access is not normally required. Installing over an earlier version upgrades it in place and keeps your settings.
+Download `AgentUsageMonitor-0.2.0-win-x64-setup.exe`, run the setup wizard, and launch **Agent Usage Monitor**. Installation is per-user; administrator access is not normally required. Installing over an earlier version upgrades it in place and keeps your settings.
 
 The installer can create Start Menu and optional desktop shortcuts. AUM can optionally start when you sign in to Windows. Uninstalling the application can preserve your settings for a future reinstall.
 
+The installer and the executables are not code-signed yet. Windows SmartScreen may therefore show "Windows protected your PC" for a newly downloaded file. Before running it, compare the file's SHA-256 checksum with the one on the release page (for example `Get-FileHash .\AgentUsageMonitor-0.2.0-win-x64-setup.exe` in PowerShell). If it matches, **More info → Run anyway** runs this one file; SmartScreen stays on for everything else.
+
 ### Portable ZIP
 
-Download `AgentUsageMonitor-0.1.1-win-x64-portable.zip`, extract the archive, and run `agent-usage-monitor.exe`.
+Download `AgentUsageMonitor-0.2.0-win-x64-portable.zip`, extract the archive, and run `agent-usage-monitor.exe`.
 
 The archive contains the main executable, the optional `agent-usage-monitor-claude-bridge.exe`, LICENSE, and documentation. The bridge executable does not need to be launched manually just to open AUM.
 

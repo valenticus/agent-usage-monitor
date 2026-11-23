@@ -162,3 +162,9 @@ Expected F-8 result on this machine: the user's `statusLine` is Nook's `nook-hoo
 - Validation: fmt, clippy `-D warnings`, `cargo test --workspace -- --test-threads=1` 176/176. Runtime (dev build, EXE mode, isolated fixtures, `qa\v020-r4-statusline-ux-*`): no settings, free, AUM + flag on, AUM + flag off, another command (4 languages), unreadable, CLI missing — all rows correct, no program name, fixtures unchanged, live Claude settings unchanged.
 - Not seen at runtime: the Store toggle's new label (MSIX-only; needs an rc2 MSIX).
 - Next: build rc2 (all three packages) from the commit with this fix; short MSIX recheck of the Claude card.
+
+## RC2 (2026-11-23 16:03, commit e278a90, CI 45200211957 success)
+- Artifacts: `AUM-recovery\release-candidates\v0.2.0-rc2\` (setup, portable, MSIX unsigned, MSIX TEST-SIGNED, SHA256SUMS, BUILD-INFO). Clean isolated target `v0.2.0-rc2-build`. GUI `7E8228AB…`, bridge `3D3AAB96…`, byte-identical in all packages; identity unchanged, 0.2.0.0. rc1 kept and verified intact.
+- Installed MSIX could not be replaced by rc2: same identity and version, different content → `0x80073CFB` (nothing changed). User chose: run the rc2 GUI inside the installed package context (`Invoke-CommandInDesktopPackage`) instead of uninstalling. Installed package stays rc1 0.2.0.0 (GUI `C7777383…`).
+- Visual QA rc2 (Store mode, 4 languages): new toggle label, background refresh description, generic conflict text, note — PASS, no clipping, no third-party name. Manual-setup text: rc2 binary in EXE mode with isolated fixtures, 4 languages — PASS. `CLAUDE_CONFIG_DIR` does not reach the package context, so the Store-only "set up for AUM, live updates off" text was not shown live (unit-tested).
+- New checkpoint before the check: `AUM-recovery\2026-11-23-v020-rc2-pre-checkpoint` (language ukrainian, set by the user at 15:30). Settings restored to it; StartupTask State 2.
