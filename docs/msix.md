@@ -182,7 +182,16 @@ CI (`.github/workflows/rust.yml`) runs `-ValidateManifestOnly`. That is a static
 
 ## Test results and remaining risks
 
-Runtime QA ran on one Windows 11 Home 26300 x64 machine (2026-11-22/23). It used the build of `565dac4`, sideloaded with a temporary test certificate. The Inno v0.1.1 installation was backed up and removed first. Full evidence lives outside the repo in `AUM-recovery\qa\QA-REPORT.md`. This is **not** Microsoft Store certification.
+Runtime QA ran on one Windows 11 Home 26300 x64 machine (2026-11-22/23), sideloaded with a temporary test certificate. The Inno v0.1.1 installation was backed up and removed first. Full evidence lives outside the repo in `AUM-recovery\qa\QA-REPORT.md`. This is **not** Microsoft Store certification.
+
+Two builds were tested:
+- **Rounds 1–2:** the build of `565dac4`. All items below.
+- **Round 3:** the build of `235ca51`, with the DPI manifest and the Codex `.cmd` fix.
+  - Installing it over 0.1.1.0 with the same version is refused by Windows (`0x80073CFB`). It was replaced by remove + add, with an explicit restore of `LocalState` and the notification settings; the startup task was re-enabled through the AUM toggle.
+  - Re-checked on it, all **PASS**:
+    - runtime: one process, tray, compact and full flyouts, settings persistence (the user's settings byte-identical), startup task enabled, real Codex and Claude limits, Claude background refresh, notification registration, bridge alias exit codes with the opt-in off and on;
+    - Q27 coexistence with the corrected assertion.
+  - **PerMonitorV2 verified at run time:** `GetDpiAwarenessContextForProcess` on the running AUM equals `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
 
 Tested and passed on that machine:
 - **Package**
@@ -206,18 +215,23 @@ Tested and passed on that machine:
   - bridge alias from pwsh, cmd and Git Bash; bridge lifecycle and toggles.
 - **Coexistence with Inno v0.1.1:** see "Coexistence with the EXE build".
 
-Windows App Certification Kit 10.0.26100.7705, run on the installed package (`appcert test -packagefullname`). **Overall result: WARNING** (24 tests: 22 PASS, 1 FAIL, 1 WARNING):
+Windows App Certification Kit 10.0.26100.7705, run on the installed package (`appcert test -packagefullname`), on both `565dac4` and `235ca51`. Same result both times: **overall WARNING** (24 tests: 22 PASS, 1 FAIL, 1 WARNING):
 - **FAIL, optional test "Blocked executables".** The GUI binary references `CreateProcessW`/`ShellExecuteW` and the strings `cmd.exe`, `WindowsPowerShell\v1.0\powershell.exe`, `CMD` and `Reg`:
   - `cmd.exe` and PowerShell run npm `.cmd`/`.ps1` CLI shims; `taskkill` cleans up process trees;
   - `ShellExecuteW` opens the repository/issue URLs;
   - `Reg` matches the registry APIs used by the EXE builds; AUM never starts `reg.exe`.
 
   These are required for the CLI integrations and were not removed.
-- **WARNING, "DPIAwarenessValidation".** The executable had no embedded manifest. Addressed by the embedded manifest described under "Build"; WACK has **not** been re-run on a package containing it yet.
+- **WARNING, "DPIAwarenessValidation"** ("Failed to process the binary … not DPI Aware"). It **remains** with the embedded manifest. The evidence points to the installed-package test mode, not to the manifest:
+  - WACK's trace shows `BinaryInfoClass.IsPerMonitorV2DPIAwarenessSet()` failing with `E_FAIL`.
+  - The kit's own `BinaryInfo` component returns `E_FAIL` for **any** executable under `C:\Program Files\WindowsApps`, also elevated, including Microsoft Windows Terminal, whose manifest declares `PerMonitorV2`.
+  - On the identical AUM bytes copied elsewhere, the same component reports PerMonitorV2 as set.
+  - Not yet run: WACK with `-appxpackagepath` (it deploys the package itself) on a clean VM.
 
 Not tested (needs the user, other hardware or a clean VM):
 - **Windows 10/11 S mode:** see "Supported Windows editions". Open Store risk, needs a WDAC audit/enforcement test in a VM.
-- **Multiple monitors with different DPI**, moving windows between them, and the new embedded manifest at 100/150/200 %.
+- **Multiple monitors with different DPI**, moving windows between them, and UI scaling at 100/150/200 % with the embedded manifest. Only the process awareness was verified.
+- **WACK in `-appxpackagepath` mode** on a clean VM, to confirm the DPI result outside the installed-package mode.
 - **Sign-in race** when both the EXE `Run` value and the Store startup task are enabled.
 - **Policy-managed startup states** (`DisabledByPolicy` / `EnabledByPolicy`).
 - **Uninstall/reinstall and first install on a clean** Windows 10 1809 / Windows 11 machine, including a missing VCLibs framework.
@@ -229,7 +243,8 @@ Not tested (needs the user, other hardware or a clean VM):
   - the user's CLIs, found on absolute `PATH` entries;
   - `cmd.exe` (for npm `.cmd` shims), Windows PowerShell (for `.ps1` shims) and `taskkill.exe` (process-tree cleanup), all from `System32` by absolute path.
 
-  It never elevates (`asInvoker`) and never reads CLI credentials. This explains WACK "Blocked executables".
+  It never elevates (`asInvoker`) and never reads CLI credentials. This explains WACK "Blocked executables" (optional test, FAIL).
+- **WACK DPI warning.** It is expected to come from the installed-package test mode (see "Test results"); mention it if Partner Center reports it.
 - **S mode.** The CLIs and shell components cannot run there. AUM should start and show the providers as unavailable, but this is unverified. Microsoft requires Store apps to be compatible with Windows 10 S; acceptance is an **open risk**.
 - **Signing.** Submit the unsigned `.msix` built from the merged branch. Test-certificate builds are for sideloading only.
 

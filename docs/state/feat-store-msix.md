@@ -100,27 +100,46 @@ NOT TESTED (needs a clean VM or second PC): see `docs/msix.md` → "Testing limi
   - Codex PATH search uses absolute entries only, the same as Claude; explicit paths must be absolute;
   - native `codex.exe` and `.ps1` behaviour unchanged (tested).
 - **Tests:** 158/158 (2 consecutive runs). Codex mock test timeouts were widened because PowerShell start-up under load made one pre-existing cancellation test flaky.
-- **QA corrections:** WACK 22/1/1; WACK history; static check M9 renamed; Q27 assertion fixed (repeat run pending); the Explorer script restores Explorer in a `finally` block. Recorded in `QA-REPORT.md` → "Corrections after the independent Codex review".
+- **QA corrections:** WACK 22/1/1; WACK history; static check M9 renamed; Q27 assertion fixed (repeat run PASS on 2026-11-23, see below); the Explorer script restores Explorer in a `finally` block. Recorded in `QA-REPORT.md` → "Corrections after the independent Codex review".
 - **Docs:** `docs/msix.md`: test results, actual WACK result, mutex and installer behaviour, update vs forced downgrade, S mode, CLI dependency, certification notes, untested scenarios. The PR #2 description was updated.
 - **Decisions:**
   - Claude's own `cmd_shim_command_line` stays unchanged, because it is already tested and in use. Moving it onto the shared helper is optional follow-up.
-  - The user turned **Claude background refresh on** in the installed MSIX (2026-11-23 01:51) on purpose. That is the new baseline: do not restore the checkpoint value.
+  - The user turned **Claude background refresh on** in the installed MSIX (2026-11-23 01:51) on purpose. That is the new baseline: do not restore t## Final runtime validation of `235ca51` (2026-11-23, AC power; evidence in `AUM-recovery\qa\QA-REPORT.md` → "Phase 3")
+- **Package replacement.** The same-version install was refused (`0x80073CFB`). Replaced by remove + add with an explicit restore of `LocalState` and the notification key from a fresh checkpoint of the user's current settings. The startup task was re-enabled via the AUM toggle. The installed GUI is the corrected binary (SHA-256 `0BAEF71D…148AAA`).
+- **Runtime QA: PASS.**
+  - one process, tray, compact and full flyouts;
+  - startup State 2;
+  - user settings byte-identical (Claude background refresh still on);
+  - real limits: Codex 99/94 %, Claude 94/52 %;
+  - notification registration;
+  - bridge alias: exit 3 with the opt-in off (pwsh, cmd, Git Bash), delivery with the opt-in on.
+- **PerMonitorV2 verified at run time:** `GetDpiAwarenessContextForProcess` = PER_MONITOR_AWARE_V2.
+- **WACK:** 22 PASS / 1 optional FAIL (Blocked executables) / 1 WARNING (DPIAwarenessValidation), the same as before the fix.
+  - The DPI warning remains, and the evidence points to the installed-package test mode: WACK's `BinaryInfo.IsPerMonitorV2DPIAwarenessSet()` returns `E_FAIL` for any binary under `WindowsApps` (also Windows Terminal, also elevated) but detects PMv2 on the same AUM bytes outside it.
+  - Blocked executables remains an optional FAIL by design (`cmd.exe`/PowerShell for CLI shims).
+- **Q27 repeat: PASS** (0 failed assertions). One instance either way; the losing copy writes nothing; Inno setup/uninstall exit 1 while the Store AUM runs; fresh Inno has `launch_at_startup=false` and no Run value; separate settings and AUMIDs; clean teardown.
+- **Still open:**
+  - Windows S mode (unverified, Store risk);
+  - a clean VM install and WACK `-appxpackagepath`;
+  - mixed-DPI multi-monitor UI;
+  - the sign-in race with both builds registered;
+  - policy startup states;
+  - a Store-signed package.
+- **Final state:**
+  - only `…_0.1.1.0_x64__sfbqfhxtgjc58` (corrected build) installed and running;
+  - no Inno;
+  - all recovery backups and checkpoints verified intact.
 
 ## PR readiness
-PR #2 is open; **do not merge yet**. Still needed:
-1. the final runtime QA of the fixed binary: replace the installed MSIX, re-run WACK and the live checks, check DPI (needs separate user approval for the replacement);
-2. the Q27 repeat (needs mains power or more than 35 % battery);
-3. the final Codex review.
+PR #2 is open. The code and documentation gates are closed. **Ready for the final independent Codex review**; merge only after its approval. Store submission stays blocked on the S-mode decision. Do not merge or submit from this branch without that approval.
 
 ## Next actions
-1. With user approval, replace the installed MSIX with `AUM-recovery\test-signing\2026-11-23-review-fixes\…REVIEW-FIXES.TEST-SIGNED.msix`.
-   - Same version 0.1.1.0, so use `-ForceUpdateFromAnyVersion`; data is kept.
-   - Back up `LocalState` first; the user's current settings are the baseline.
-   - Then re-run WACK and the live checks, and check DPI at 100/150/200 %.
-2. Q27 repeat with the corrected assertion.
-3. Final Codex review. Store submission stays blocked on the S-mode decision.
-4. Remove the test certificate after QA (expires 2026-12-06).
-5. Partner Center (only after the S-mode decision):
-   - listing, with the dependency disclosure at the start of the description;
-   - screenshots, privacy policy URL, age rating;
-   - upload the unsigned `.msix` from a clean build of the merged branch.
+1. Final independent Codex review of PR #2 (code `235ca51` + these documentation updates).
+2. After approval: merge PR #2 (user decision). No release or tag from this branch; v0.2.0 is planned separately.
+3. Before any Store submission:
+   - S-mode WDAC audit/enforcement test in a VM;
+   - a clean-VM install;
+   - WACK with `-appxpackagepath`;
+   - a mixed-DPI check;
+   - then the Partner Center listing (dependency disclosure first), certification notes, and upload of the unsigned `.msix` from a clean build of the merged branch.
+4. Remove the test certificate from LocalMachine\TrustedPeople and CurrentUser\My after QA (expires 2026-12-06).
