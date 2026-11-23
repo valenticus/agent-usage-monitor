@@ -30,7 +30,8 @@ AUM is built with **Rust** and **Slint**. It is an independent community project
 
 - **Codex monitoring:** 5-hour and weekly quota through the local `codex app-server`, with manual refresh and automatic background refresh.
 - **Claude Code monitoring:** session data through an optional local status-line bridge, plus an optional Claude CLI background refresh that you enable explicitly.
-- **Clear overview:** remaining percentages, colour-coded progress bars, reset countdowns and honest "unavailable" states for each provider.
+- **Clear overview:** remaining percentages, green / amber / red status colours, reset countdowns and explicit unavailable or stale states for each provider.
+- **Tray icon quotas:** with both providers enabled, the two columns show Codex 5-hour and Claude 5-hour remaining quotas. With just one provider enabled, they show that provider's 5-hour and weekly quotas.
 - **Tray window:** rest the pointer on the tray icon for a compact preview; double-click the icon or choose **Open** in the tray menu for the full window with refresh and settings. The tray menu also offers **Refresh**, **Settings** and **Exit**.
 - **Windows notifications:** configurable warning and critical thresholds, exhausted-limit alerts, weekly-limit alerts and a test notification.
 - **Themes:** Graphite, Bluish Dark and Light.
@@ -40,7 +41,7 @@ AUM is built with **Rust** and **Slint**. It is an independent community project
 
 ## Screenshots
 
-> Screenshots were captured with v0.1.0. v0.2.0 uses green / amber / red status colours and clearer Claude settings text, so some details differ.
+> **Screenshot note:** The images below were captured with v0.1.0 and are being refreshed. The v0.2.0 release has updated status colours, fixed tray icon quota selection, and clearer Claude Code settings. The screenshots are illustrative; they do not yet show the final v0.2.0 interface.
 
 ### Tray window
 
@@ -112,14 +113,14 @@ The archive contains the main executable, the optional `agent-usage-monitor-clau
 
 **Codex:** install and sign in to the Codex CLI. AUM reads rate-limit information through the local Codex app-server.
 
-**Claude Code:** install and configure Claude Code separately. Session-driven usage information can be supplied through the optional status-line bridge. Optional Claude CLI background usage refresh is configurable in AUM. AUM never changes your Claude settings automatically.
+**Claude Code:** install and authenticate Claude Code separately. Optional background refresh checks usage through the installed Claude CLI every five minutes without requiring an active session. A separate **Live updates from Claude Code** integration receives data from active sessions only after you manually configure the Claude Code `statusLine` command. Switching it on in AUM does **not** configure Claude Code. AUM reads the existing status-line setting but never overwrites it; if another command uses that setting, background refresh can still operate independently.
 
 For manual bridge setup, see [Claude status-line documentation](docs/claude-status-line.md). Feature availability depends on the provider's local interfaces and your configuration.
 
 ## Notes and limitations
 
 - Usage information depends on what Codex and Claude Code expose locally. Providers may be unavailable or return incomplete or stale data.
-- The Claude status-line bridge is optional; enabling Claude monitoring in the UI is not the same as installing or configuring the bridge.
+- Live updates through Claude Code's status line are optional and require one-time manual setup. Enabling Claude monitoring alone does not configure this integration. The in-app bridge toggle is available in the MSIX build; the installer and portable builds use the `--enable-claude-bridge` flag.
 - Notifications follow Windows notification settings and focus policies. The installed version integrates with Windows more completely than a portable launch.
 - This is an independent community project, not an official product of OpenAI or Anthropic.
 - Claude and Codex are trademarks of their respective owners. The provider marks shown in the app identify each provider only; they are not covered by the MIT license (see [brand asset notes](docs/design/brand-assets.md)).
