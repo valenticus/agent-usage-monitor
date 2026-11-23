@@ -9,11 +9,13 @@ mod claude_refresher;
 mod flyout;
 mod localization;
 mod notifications;
+mod packaged;
 mod provider_icons;
 mod settings;
 mod theme;
 mod tray;
 mod tray_menu;
+mod winrt;
 
 slint::include_modules!();
 
@@ -81,12 +83,16 @@ pub(crate) fn skip_redundant_resume_refresh(
 
 struct AlertRuntime {
     engine: AlertEngine,
-    state_path: std::path::PathBuf,
+    /// `None` without persistent storage: alert state stays in memory.
+    state_path: Option<std::path::PathBuf>,
 }
 
 impl AlertRuntime {
-    fn new(settings: &AppSettings, state_path: std::path::PathBuf) -> Self {
-        let state = AlertStateStore::load(&state_path).unwrap_or_default();
+    fn new(settings: &AppSettings, state_path: Option<std::path::PathBuf>) -> Self {
+        let state = state_path
+            .as_deref()
+            .and_then(|path| AlertStateStore::load(path).ok())
+            .unwrap_or_default();
         let engine = AlertEngine::new(alert_settings(settings), state)
             .expect("settings schema validation ensures valid alert configuration");
         Self { engine, state_path }
@@ -101,7 +107,9 @@ impl AlertRuntime {
         let _ = self.engine.set_settings(alert_settings(settings));
         let providers = snapshot.alert_providers(settings.codex_enabled, settings.claude_enabled);
         let events = self.engine.refresh(&providers, now);
-        let _ = AlertStateStore::save(&self.state_path, self.engine.state());
+        if let Some(path) = &self.state_path {
+            let _ = AlertStateStore::save(path, self.engine.state());
+        }
         events
     }
 }
@@ -253,14 +261,27 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     let use_live = live_mode || (!demo_mode && !empty_mode);
-    let settings_path = settings::settings_path();
-    if settings::migrate_legacy_data(
-        &settings::legacy_settings_directory(),
-        &settings::settings_directory(),
-    )
-    .is_err()
+    // Empty path = no persistent storage (Store data folder unavailable or
+    // unknown identity): defaults in memory, every save refused and reported
+    // in Settings. Never a %TEMP% or EXE-folder fallback.
+    let data_directory = settings::settings_directory();
+    let settings_path = settings::settings_path().unwrap_or_default();
+    // The legacy "Agent Monitor" folder belongs to old EXE builds only. The
+    // Store build never migrates automatically; it offers an explicit import.
+    if let Some(directory) = data_directory
+        .as_ref()
+        .filter(|_| packaged::is_confirmed_unpackaged())
+        && settings::migrate_legacy_data(&settings::legacy_settings_directory(), directory).is_err()
     {
         eprintln!("Settings migration could not complete; existing data was retained.");
+    }
+    if let Some(directory) = data_directory.as_ref().filter(|_| packaged::is_packaged()) {
+        // Checked once (read-only) at launch; the row also disappears as soon
+        // as the Store build has its own settings file.
+        let _ = STORE_IMPORT_SOURCE_VALID.set(settings::import_available(
+            &settings::unpackaged_settings_directory(),
+            directory,
+        ));
     }
     let config: SharedSettings = Arc::new(Mutex::new(
         settings::load(&settings_path).unwrap_or_default(),
@@ -295,11 +316,18 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
     let locale: SharedLocale = Arc::new(Mutex::new(resolve_locale(&lock_settings(&config))));
-    let initial_snapshot = initial_snapshot(demo_mode, use_live, claude_bridge_enabled, now_unix());
+    let initial_snapshot = initial_snapshot(
+        demo_mode,
+        use_live,
+        claude_bridge_wanted(claude_bridge_enabled, &lock_settings(&config)),
+        now_unix(),
+    );
     let current: SharedSnapshot = Arc::new(Mutex::new(initial_snapshot.clone()));
     let alerts: SharedAlerts = Arc::new(Mutex::new(AlertRuntime::new(
         &lock_settings(&config),
-        settings_path.with_file_name("alert-state.json"),
+        data_directory
+            .as_ref()
+            .map(|directory| directory.join("alert-state.json")),
     )));
 
     // The flyout is shown without activation only for temporary tray previews.
@@ -479,6 +507,57 @@ fn main() -> Result<(), slint::PlatformError> {
             })
         }
     });
+    settings_window.on_toggle_claude_bridge_listener({
+        let values = callback_context(
+            &config,
+            &settings_path,
+            &locale,
+            &settings_sender,
+            &window,
+            &settings_window,
+            &current,
+        );
+        move || toggle_claude_bridge_listener(&values, claude_bridge_enabled)
+    });
+    settings_window.on_import_exe_settings({
+        let values = callback_context(
+            &config,
+            &settings_path,
+            &locale,
+            &settings_sender,
+            &window,
+            &settings_window,
+            &current,
+        );
+        move || import_exe_settings(&values)
+    });
+    // MSIX: StartupTask results arrive on the controller's worker thread and
+    // are applied on the UI thread. At launch the task is only read.
+    if packaged::is_packaged() {
+        let values = callback_context(
+            &config,
+            &settings_path,
+            &locale,
+            &settings_sender,
+            &window,
+            &settings_window,
+            &current,
+        );
+        let values = Mutex::new(values);
+        let controller = autostart::packaged_controller();
+        controller.set_listener(move |request, result| {
+            let Ok(values) = values.lock().map(|values| values.clone()) else {
+                return;
+            };
+            let result = result.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                apply_packaged_startup_result(&values, request, result);
+            });
+        });
+        if let Some(request) = launch_startup_request(packaged::state()) {
+            controller.submit(request);
+        }
+    }
     settings_window.on_toggle_startup({
         let values = callback_context(
             &config,
@@ -1059,7 +1138,226 @@ fn save_setting_change(context: &CallbackContext, change: impl FnOnce(&mut AppSe
     publish_settings(context, updated);
 }
 
+/// The one rule for the Claude status-line listener: it runs only while the
+/// Claude provider is enabled **and** the user explicitly opted in. The opt-in
+/// is `--enable-claude-bridge` for the EXE builds and, in the MSIX build
+/// (which cannot pass launch arguments on Windows 10 1809), the off-by-default
+/// `claude_bridge_listener_enabled` setting. Disabling Claude or the opt-in
+/// stops the listener; neither ever turns the other on.
+fn claude_bridge_wanted(bridge_argument: bool, settings: &AppSettings) -> bool {
+    claude_bridge_wanted_for(packaged::is_packaged(), bridge_argument, settings)
+}
+
+fn claude_bridge_wanted_for(packaged: bool, bridge_argument: bool, settings: &AppSettings) -> bool {
+    let opted_in = bridge_argument || (packaged && settings.claude_bridge_listener_enabled);
+    settings.claude_enabled && opted_in
+}
+
+/// `--enable-claude-bridge` was passed to this process.
+fn claude_bridge_argument() -> bool {
+    static ARGUMENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARGUMENT.get_or_init(|| std::env::args().any(|argument| argument == "--enable-claude-bridge"))
+}
+
+/// Store build only: flip the persisted listener opt-in. The pipe worker
+/// follows the published setting; the UI snapshot reflects it immediately.
+fn toggle_claude_bridge_listener(context: &CallbackContext, bridge_argument: bool) {
+    if !packaged::is_packaged() {
+        return;
+    }
+    let (config, path, _, _, _, _, snapshot) = context;
+    let mut updated = lock_settings(config);
+    updated.claude_bridge_listener_enabled = !updated.claude_bridge_listener_enabled;
+    if let Err(error) = settings::save(path, &updated) {
+        eprintln!("CLAUDE_BRIDGE: listener preference could not be saved: {error}");
+        return;
+    }
+    if let Ok(mut current) = snapshot.lock() {
+        *current = current.with_claude_bridge(claude_bridge_wanted(bridge_argument, &updated));
+    }
+    publish_settings(context, updated);
+}
+
+/// Waits until the listener's wanted state is `want`. Returns false when the
+/// app is shutting down (or the settings channel closed).
+async fn wait_for_claude_bridge(
+    settings: &mut watch::Receiver<AppSettings>,
+    wanted: &(impl Fn(&AppSettings) -> bool + ?Sized),
+    want: bool,
+    cancellation: &CancellationToken,
+) -> bool {
+    loop {
+        if cancellation.is_cancelled() {
+            return false;
+        }
+        if wanted(&settings.borrow_and_update()) == want {
+            return true;
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => return false,
+            changed = settings.changed() => {
+                if changed.is_err() {
+                    cancellation.cancelled().await;
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+/// Runs the status-line listener exactly while `wanted(settings)` holds.
+///
+/// * At most one listener future exists at a time: a new one is created only
+///   after the previous one has returned or been dropped, so its pipe handle is
+///   closed before the next `first_pipe_instance` server is created.
+/// * When the wanted state turns false, the listener's token is cancelled and
+///   its future is dropped immediately, including mid-message: nothing more is
+///   accepted or parsed.
+/// * A listener error is reported once through `on_failure`; the listener is
+///   retried only after the wanted state turned false and true again (no
+///   busy restart loop).
+/// * Application cancellation stops everything and never restarts.
+async fn run_bridge_lifecycle<L, F>(
+    mut settings: watch::Receiver<AppSettings>,
+    wanted: impl Fn(&AppSettings) -> bool,
+    cancellation: CancellationToken,
+    mut listen: L,
+    mut on_failure: impl FnMut(),
+) where
+    L: FnMut(CancellationToken) -> F,
+    F: std::future::Future<Output = std::io::Result<()>>,
+{
+    loop {
+        if !wait_for_claude_bridge(&mut settings, &wanted, true, &cancellation).await {
+            return;
+        }
+        let listener = cancellation.child_token();
+        let mut stop_settings = settings.clone();
+        let failed = tokio::select! {
+            result = listen(listener.clone()) => result.is_err(),
+            running = wait_for_claude_bridge(&mut stop_settings, &wanted, false, &cancellation) => {
+                listener.cancel();
+                if !running { return; }
+                false
+            }
+        };
+        if cancellation.is_cancelled() {
+            return;
+        }
+        if failed {
+            on_failure();
+            if !wait_for_claude_bridge(&mut settings, &wanted, false, &cancellation).await {
+                return;
+            }
+        }
+    }
+}
+
+/// Store build only: the explicit one-time import from the EXE build.
+fn import_exe_settings(context: &CallbackContext) {
+    // Needs the Store build's own persistent folder; never imports into memory only.
+    let Some(destination) = settings::settings_directory().filter(|_| packaged::is_packaged())
+    else {
+        return;
+    };
+    let (config, path, ..) = context;
+    let report = settings::import_unpackaged_settings(
+        &settings::unpackaged_settings_directory(),
+        &destination,
+        &provider_icons::all_candidate_names(),
+        provider_icons::MAX_ICON_BYTES,
+    );
+    match report {
+        Ok(report) => {
+            eprintln!(
+                "SETTINGS_IMPORT: settings={:?} provider_icons={}",
+                report.settings, report.provider_icons
+            );
+            if report.settings == settings::ImportOutcome::Imported {
+                match settings::load(path) {
+                    Ok(mut imported) => {
+                        // Windows owns the startup task state; keep what was read.
+                        imported.launch_at_startup = lock_settings(config).launch_at_startup;
+                        publish_settings(context, imported);
+                        return;
+                    }
+                    Err(error) => eprintln!("SETTINGS_IMPORT: imported file unreadable: {error}"),
+                }
+            }
+        }
+        Err(error) => eprintln!("SETTINGS_IMPORT: failed: {error}"),
+    }
+    refresh_settings_panel(context);
+}
+
+/// Store build: whether the import row is shown (EXE settings were valid at
+/// launch and the Store build has no settings of its own yet).
+static STORE_IMPORT_SOURCE_VALID: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn store_import_available() -> bool {
+    packaged::is_packaged()
+        && STORE_IMPORT_SOURCE_VALID.get().copied().unwrap_or(false)
+        && settings::settings_path().is_some_and(|path| !path.exists())
+}
+
+/// Re-renders the Settings window from the current settings without
+/// publishing a change to the workers.
+fn refresh_settings_panel(context: &CallbackContext) {
+    let (config, _, locale, _, _, panel, snapshot) = context;
+    let settings = lock_settings(config);
+    if let (Some(panel), Ok(snapshot)) = (panel.upgrade(), snapshot.lock()) {
+        update_settings_window(
+            &panel,
+            &settings,
+            lock_locale(locale),
+            system_light(&settings),
+            &snapshot,
+            now_unix(),
+        );
+    }
+}
+
+/// Requests submitted at launch: the MSIX startup task is only read, never
+/// changed. EXE builds reconcile their Run value synchronously instead.
+fn launch_startup_request(state: packaged::PackageState) -> Option<autostart::StartupRequest> {
+    (state == packaged::PackageState::Packaged).then_some(autostart::StartupRequest::Refresh)
+}
+
+/// UI thread: applies a finished StartupTask request.
+fn apply_packaged_startup_result(
+    context: &CallbackContext,
+    request: autostart::StartupRequest,
+    result: autostart::StartupResult,
+) {
+    let (config, path, ..) = context;
+    let mut updated = lock_settings(config);
+    match &result {
+        Ok(status) => {
+            updated.launch_at_startup = status.enabled;
+            if let autostart::StartupRequest::Set(want) = request {
+                if status.enabled != want {
+                    eprintln!("AUTOSTART: Windows kept the startup task as {status:?}");
+                }
+                // Only a user's change is persisted; reads stay in memory.
+                if let Err(error) = settings::save(path, &updated) {
+                    eprintln!("AUTOSTART: preference could not be saved: {error}");
+                }
+            }
+        }
+        Err(error) => eprintln!("AUTOSTART: startup task {request:?} failed: {error}"),
+    }
+    publish_settings(context, updated);
+}
+
 fn toggle_autostart(context: &CallbackContext) {
+    if packaged::is_packaged() {
+        let controller = autostart::packaged_controller();
+        let request = autostart::toggle_request(controller.last().as_ref());
+        if controller.submit(request) {
+            refresh_settings_panel(context);
+        }
+        return;
+    }
     let (config, path, ..) = context;
     let mut updated = lock_settings(config);
     let executable = match std::env::current_exe() {
@@ -1106,18 +1404,110 @@ fn show_autostart_unverified(context: &CallbackContext) {
     let (_, _, locale, _, _, panel, _) = context;
     if let Some(panel) = panel.upgrade() {
         let labels = lock_locale(locale).settings();
-        panel.set_startup_state_known(false);
-        panel.set_startup_enabled(false);
-        panel.set_startup_description(labels.startup_error.into());
+        let row = startup_row_error();
+        panel.set_startup_state_known(row.interactive);
+        panel.set_startup_busy(row.busy);
+        panel.set_startup_enabled(row.enabled);
+        panel.set_startup_description(startup_text(&labels, row.text).into());
     }
 }
 
+/// Which explanation the sign-in row shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupText {
+    Normal,
+    WindowsControlled,
+    Policy,
+    Error,
+    Checking,
+}
+
+/// What the sign-in row shows. `interactive` maps to `startup-state-known`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StartupRow {
+    enabled: bool,
+    interactive: bool,
+    busy: bool,
+    text: StartupText,
+}
+
+/// Maps the last known state (and whether a request is in flight) to the row.
+/// A locked state (Windows or policy) is shown as it is and is not operable.
+fn startup_row(last: Option<&autostart::StartupResult>, busy: bool) -> StartupRow {
+    use autostart::StartupControl;
+    if busy || last.is_none() {
+        return StartupRow {
+            enabled: matches!(last, Some(Ok(status)) if status.enabled),
+            interactive: false,
+            busy: true,
+            text: StartupText::Checking,
+        };
+    }
+    match last {
+        Some(Ok(status)) => StartupRow {
+            enabled: status.enabled,
+            interactive: status.control == StartupControl::App,
+            busy: false,
+            text: match status.control {
+                StartupControl::App => StartupText::Normal,
+                StartupControl::DisabledInWindows => StartupText::WindowsControlled,
+                StartupControl::Policy => StartupText::Policy,
+            },
+        },
+        _ => StartupRow {
+            enabled: false,
+            interactive: false,
+            busy: false,
+            text: StartupText::Error,
+        },
+    }
+}
+
+fn startup_row_error() -> StartupRow {
+    startup_row(Some(&Err(String::new())), false)
+}
+
+fn startup_text(labels: &localization::SettingsStrings, text: StartupText) -> &'static str {
+    match text {
+        StartupText::Normal => labels.startup_description,
+        StartupText::WindowsControlled => labels.startup_windows_controlled,
+        StartupText::Policy => labels.startup_policy_controlled,
+        StartupText::Error => labels.startup_error,
+        StartupText::Checking => labels.startup_checking,
+    }
+}
+
+/// Whether launch-time reconciliation may write the sign-in registration.
+/// EXE builds rewrite their HKCU `Run` value so it follows a moved or updated
+/// executable. The MSIX startup task survives Store updates and belongs to
+/// Windows: at launch it is only read (asynchronously, see
+/// `launch_startup_request`), and it is enabled solely by the user's own
+/// toggle. Without confirmed package identity nothing is written either.
+fn launch_reconcile_writes_registration(state: packaged::PackageState) -> bool {
+    state == packaged::PackageState::Unpackaged
+}
+
 fn reconcile_autostart(config: &SharedSettings, path: &Path, claude_bridge: bool) {
+    if packaged::is_packaged() {
+        // Read later by the StartupTask controller, off the UI thread.
+        return;
+    }
     let Ok(executable) = std::env::current_exe() else {
         eprintln!("AUTOSTART: could not resolve executable; registration was not changed");
         return;
     };
     let mut settings = lock_settings(config);
+    if !launch_reconcile_writes_registration(packaged::state()) {
+        // Unknown identity: show the Run value as it is, change nothing, save nothing.
+        match autostart::is_enabled_for(&executable) {
+            Ok(actual) => settings.launch_at_startup = actual,
+            Err(error) => eprintln!("AUTOSTART: registration state could not be read: {error}"),
+        }
+        if let Ok(mut current) = config.lock() {
+            *current = settings;
+        }
+        return;
+    }
     if let Err(error) =
         autostart::set_enabled(settings.launch_at_startup, &executable, claude_bridge)
     {
@@ -1153,6 +1543,12 @@ fn publish_settings(context: &CallbackContext, updated: AppSettings) {
         *current_locale = resolved;
     }
     let _ = sender.send(updated.clone());
+    // The "waiting for the status line" state follows the same rule as the
+    // listener (e.g. turning Claude off stops it).
+    if let Ok(mut current) = snapshot.lock() {
+        *current =
+            current.with_claude_bridge(claude_bridge_wanted(claude_bridge_argument(), &updated));
+    }
     if let (Some(window), Ok(snapshot)) = (window.upgrade(), snapshot.lock()) {
         if let Some(panel) = panel.upgrade() {
             update_settings_window(
@@ -1197,18 +1593,23 @@ async fn run_live_workers<P>(
     let claude_cancellation = cancellation.clone();
     let claude_settings = settings.clone();
     let cli_settings = settings.clone();
+    let pipe_settings = settings.clone();
     let pipe_wait_cancellation = cancellation.clone();
     let claude_alerts = context.alerts.clone();
     let claude_settings_window = context.settings_window.clone();
     let claude_notifier = context.notifier.clone();
     let claude_updates = async move {
         let mut state = ProviderState::new("claude");
+        // Always drained, so a listener started later never blocks on a full
+        // channel; a message that arrives after the listener became unwanted
+        // is dropped.
+        let mut bridge_open = true;
         loop {
             tokio::select! {
                 _ = claude_cancellation.cancelled() => break,
-                snapshot = receiver.recv(), if claude_bridge_enabled => {
-                    let Some(snapshot) = snapshot else { continue };
-                    if !claude_settings.borrow().claude_enabled { continue; }
+                snapshot = receiver.recv(), if bridge_open => {
+                    let Some(snapshot) = snapshot else { bridge_open = false; continue };
+                    if !claude_bridge_wanted(claude_bridge_enabled, &claude_settings.borrow()) { continue; }
                     let provider = snapshot.to_provider_snapshot();
                     state.record_success(provider.limits, None, snapshot.snapshot_at);
                     let updated = if let Ok(mut current) = claude_snapshot.lock() {
@@ -1271,16 +1672,14 @@ async fn run_live_workers<P>(
     let pipe_settings_window = context.settings_window.clone();
     let pipe_config = context.config.clone();
     let pipe_locale = context.locale.clone();
-    let pipe_cancellation = cancellation.clone();
-    let pipe_updates = async move {
-        if !claude_bridge_enabled {
-            pipe_wait_cancellation.cancelled().await;
-            return;
-        }
-        if run_claude_status_pipe(sender, pipe_cancellation.clone())
-            .await
-            .is_err()
-        {
+    // The listener runs exactly while `claude_bridge_wanted` holds (Claude on
+    // and explicitly opted in); see `run_bridge_lifecycle`.
+    let pipe_updates = run_bridge_lifecycle(
+        pipe_settings,
+        move |settings: &AppSettings| claude_bridge_wanted(claude_bridge_enabled, settings),
+        pipe_wait_cancellation,
+        move |listener| run_claude_status_pipe(sender.clone(), listener),
+        move || {
             if let Ok(mut current) = pipe_snapshot.lock() {
                 *current = current.replace_claude_error();
             }
@@ -1291,9 +1690,8 @@ async fn run_live_workers<P>(
                 pipe_config.clone(),
                 pipe_locale.clone(),
             );
-            pipe_cancellation.cancelled().await;
-        }
-    };
+        },
+    );
     let codex = refresh_loop(
         provider,
         context,
@@ -1512,24 +1910,49 @@ fn update_settings_window(
     window.set_codex_enabled(settings.codex_enabled);
     window.set_claude_enabled(settings.claude_enabled);
     window.set_claude_cli_refresh_enabled(settings.claude_cli_refresh_enabled);
-    let startup_state = std::env::current_exe().and_then(|executable| {
-        autostart::is_enabled_for(&executable).map_err(|error| {
-            eprintln!("AUTOSTART: could not read actual registration state: {error}");
-            std::io::Error::other("autostart registration state unavailable")
-        })
-    });
-    let startup_state_known = startup_state.is_ok();
-    let startup_enabled = startup_state.unwrap_or(false);
+    window.set_store_build(packaged::is_packaged());
+    window.set_claude_bridge_listener_enabled(settings.claude_bridge_listener_enabled);
+    window.set_store_import_available(store_import_available());
+    // Visible, not silent: without persistent storage changes cannot be saved.
+    window.set_storage_warning(
+        if settings::storage_available() {
+            ""
+        } else {
+            labels.storage_unavailable
+        }
+        .into(),
+    );
+    // EXE: one synchronous HKCU `Run` read. MSIX: the StartupTask controller's
+    // last result, never a WinRT call on this (UI) thread; a locked task
+    // (Windows or policy) is shown with an explanation and is not operable.
+    let startup_row = if packaged::is_packaged() {
+        let controller = autostart::packaged_controller();
+        startup_row(controller.last().as_ref(), controller.busy())
+    } else {
+        let status = std::env::current_exe()
+            .map_err(|error| error.to_string())
+            .and_then(|executable| autostart::status_for(&executable))
+            .inspect_err(|error| {
+                eprintln!("AUTOSTART: could not read actual registration state: {error}");
+            });
+        startup_row(Some(&status), false)
+    };
     // Debug-only visual review of the ON / unverified states (UI values only;
     // the registry is neither read differently nor changed).
     #[cfg(debug_assertions)]
-    let (startup_state_known, startup_enabled) = match PREVIEW_STARTUP.get().map(String::as_str) {
-        Some("on") => (true, true),
-        Some("error") => (false, false),
-        _ => (startup_state_known, startup_enabled),
+    let startup_row = match PREVIEW_STARTUP.get().map(String::as_str) {
+        Some("on") => StartupRow {
+            enabled: true,
+            interactive: true,
+            busy: false,
+            text: StartupText::Normal,
+        },
+        Some("error") => startup_row_error(),
+        _ => startup_row,
     };
-    window.set_startup_state_known(startup_state_known);
-    window.set_startup_enabled(startup_enabled);
+    window.set_startup_state_known(startup_row.interactive);
+    window.set_startup_busy(startup_row.busy);
+    window.set_startup_enabled(startup_row.enabled);
     let icons = provider_icons::local();
     let scale = window.window().scale_factor();
     let codex_icon = icons.icon(provider_icons::Provider::Codex, light, 16.0, scale);
@@ -1668,15 +2091,13 @@ fn update_settings_window(
     window.set_source_note(labels.claude_note.into());
     window.set_claude_refresh_label(labels.claude_refresh.into());
     window.set_claude_refresh_description(labels.claude_refresh_description.into());
+    window.set_claude_bridge_label(labels.claude_bridge.into());
+    window.set_claude_bridge_description(labels.claude_bridge_description.into());
     window.set_startup_label(labels.startup.into());
-    window.set_startup_description(
-        if startup_state_known {
-            labels.startup_description
-        } else {
-            labels.startup_error
-        }
-        .into(),
-    );
+    window.set_startup_description(startup_text(&labels, startup_row.text).into());
+    window.set_import_label(labels.import_title.into());
+    window.set_import_description(labels.import_description.into());
+    window.set_import_button_label(labels.import_button.into());
 
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     window.set_app_version(version.as_str().into());
@@ -1698,6 +2119,13 @@ fn update_settings_window(
 }
 
 fn show_settings_centered(window: &SettingsWindow) {
+    // MSIX: the user may have changed the startup task in Windows meanwhile;
+    // re-read it off the UI thread (the toggle waits until the result is in).
+    if packaged::is_packaged()
+        && autostart::packaged_controller().submit(autostart::StartupRequest::Refresh)
+    {
+        window.set_startup_busy(true);
+    }
     let _ = window.show();
     activate_window(window.window());
     let mode = match window.get_theme_kind() {
@@ -2060,6 +2488,340 @@ mod tests {
             Some(now - 1),
             now
         ));
+    }
+
+    #[test]
+    fn claude_bridge_listener_needs_claude_and_an_explicit_opt_in() {
+        let settings = |claude_enabled, bridge| AppSettings {
+            claude_enabled,
+            claude_bridge_listener_enabled: bridge,
+            ..Default::default()
+        };
+        // Off by default in both distributions.
+        assert!(!claude_bridge_wanted_for(
+            false,
+            false,
+            &AppSettings::default()
+        ));
+        assert!(!claude_bridge_wanted_for(
+            true,
+            false,
+            &AppSettings::default()
+        ));
+        // EXE builds: only the command-line opt-in counts; the Store setting is ignored.
+        assert!(!claude_bridge_wanted_for(
+            false,
+            false,
+            &settings(true, true)
+        ));
+        assert!(claude_bridge_wanted_for(
+            false,
+            true,
+            &settings(true, false)
+        ));
+        // MSIX build: the persisted setting is the opt-in.
+        assert!(claude_bridge_wanted_for(true, false, &settings(true, true)));
+        assert!(!claude_bridge_wanted_for(
+            true,
+            false,
+            &settings(true, false)
+        ));
+        // Claude off stops the listener in every build, whatever the opt-in.
+        for packaged in [false, true] {
+            for argument in [false, true] {
+                assert!(!claude_bridge_wanted_for(
+                    packaged,
+                    argument,
+                    &settings(false, true)
+                ));
+            }
+        }
+        // Tests never run packaged, so the runtime helper follows the EXE rules.
+        assert!(!claude_bridge_wanted(false, &settings(true, true)));
+    }
+
+    #[test]
+    fn only_confirmed_exe_builds_rewrite_startup_registration_at_launch() {
+        use packaged::PackageState;
+        // EXE: the HKCU Run value follows the current executable path.
+        assert!(launch_reconcile_writes_registration(
+            PackageState::Unpackaged
+        ));
+        // MSIX: the startup task is only read at launch, never enabled silently.
+        assert!(!launch_reconcile_writes_registration(
+            PackageState::Packaged
+        ));
+        // Unknown identity: nothing is written.
+        assert!(!launch_reconcile_writes_registration(PackageState::Unknown));
+        assert_eq!(
+            launch_startup_request(PackageState::Packaged),
+            Some(autostart::StartupRequest::Refresh)
+        );
+        assert_eq!(launch_startup_request(PackageState::Unpackaged), None);
+        assert_eq!(launch_startup_request(PackageState::Unknown), None);
+    }
+
+    #[test]
+    fn startup_row_explains_who_controls_sign_in_launch() {
+        use autostart::{StartupControl, StartupStatus};
+        let ok = |enabled, control| Ok(StartupStatus { enabled, control });
+        // Not read yet, or a request in flight: wait, keep the last value.
+        assert_eq!(
+            startup_row(None, false),
+            StartupRow {
+                enabled: false,
+                interactive: false,
+                busy: true,
+                text: StartupText::Checking
+            }
+        );
+        let row = startup_row(Some(&ok(true, StartupControl::App)), true);
+        assert!(row.busy && row.enabled && !row.interactive);
+        assert_eq!(row.text, StartupText::Checking);
+        // App-controlled: operable.
+        let row = startup_row(Some(&ok(false, StartupControl::App)), false);
+        assert!(row.interactive && !row.enabled && !row.busy);
+        assert_eq!(row.text, StartupText::Normal);
+        // Locked by the user in Windows or by policy: shown as is, not operable.
+        let row = startup_row(Some(&ok(false, StartupControl::DisabledInWindows)), false);
+        assert!(!row.interactive && !row.enabled);
+        assert_eq!(row.text, StartupText::WindowsControlled);
+        for enabled in [false, true] {
+            let row = startup_row(Some(&ok(enabled, StartupControl::Policy)), false);
+            assert!(!row.interactive);
+            assert_eq!(row.enabled, enabled);
+            assert_eq!(row.text, StartupText::Policy);
+        }
+        // Failure: reported, not operable, shown off.
+        assert_eq!(startup_row_error().text, StartupText::Error);
+        assert!(!startup_row_error().interactive && !startup_row_error().enabled);
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let labels = locale.settings();
+            assert_eq!(
+                startup_text(&labels, StartupText::Normal),
+                labels.startup_description
+            );
+            assert_eq!(
+                startup_text(&labels, StartupText::WindowsControlled),
+                labels.startup_windows_controlled
+            );
+            assert_eq!(
+                startup_text(&labels, StartupText::Policy),
+                labels.startup_policy_controlled
+            );
+            assert_eq!(
+                startup_text(&labels, StartupText::Error),
+                labels.startup_error
+            );
+            assert_eq!(
+                startup_text(&labels, StartupText::Checking),
+                labels.startup_checking
+            );
+        }
+    }
+
+    /// Fake status-line listener: counts starts, how many run right now (a
+    /// drop guard notices when the lifecycle drops the future) and the peak.
+    #[derive(Default)]
+    struct ListenerProbe {
+        starts: std::sync::atomic::AtomicUsize,
+        running: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+        fail_next: std::sync::atomic::AtomicBool,
+    }
+
+    struct RunningGuard(Arc<ListenerProbe>);
+    impl Drop for RunningGuard {
+        fn drop(&mut self) {
+            self.0.running.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ListenerProbe {
+        fn listener(
+            probe: Arc<ListenerProbe>,
+        ) -> impl FnMut(
+            CancellationToken,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
+        > {
+            let probe = probe.clone();
+            move |token| {
+                let probe = probe.clone();
+                Box::pin(async move {
+                    probe.starts.fetch_add(1, Ordering::SeqCst);
+                    let now = probe.running.fetch_add(1, Ordering::SeqCst) + 1;
+                    probe.peak.fetch_max(now, Ordering::SeqCst);
+                    let _guard = RunningGuard(probe.clone());
+                    if probe.fail_next.swap(false, Ordering::SeqCst) {
+                        return Err(std::io::Error::other("pipe busy"));
+                    }
+                    token.cancelled().await;
+                    Ok(())
+                })
+            }
+        }
+        fn starts(&self) -> usize {
+            self.starts.load(Ordering::SeqCst)
+        }
+        fn running(&self) -> usize {
+            self.running.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn settle() {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn store_settings(claude_enabled: bool, bridge: bool) -> AppSettings {
+        AppSettings {
+            claude_enabled,
+            claude_bridge_listener_enabled: bridge,
+            ..Default::default()
+        }
+    }
+
+    /// The Store-build rule, independent of this process's identity.
+    fn store_rule(settings: &AppSettings) -> bool {
+        claude_bridge_wanted_for(true, false, settings)
+    }
+
+    #[tokio::test]
+    async fn bridge_listener_follows_claude_and_the_opt_in() {
+        let probe = Arc::new(ListenerProbe::default());
+        let failures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (settings, receiver) = watch::channel(AppSettings::default());
+        let cancellation = CancellationToken::new();
+        let failure_count = failures.clone();
+        let lifecycle = tokio::spawn(run_bridge_lifecycle(
+            receiver,
+            store_rule,
+            cancellation.clone(),
+            ListenerProbe::listener(probe.clone()),
+            move || {
+                failure_count.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        // Off by default.
+        settle().await;
+        assert_eq!((probe.starts(), probe.running()), (0, 0));
+        // Enable the bridge.
+        settings.send(store_settings(true, true)).unwrap();
+        settle().await;
+        assert_eq!((probe.starts(), probe.running()), (1, 1));
+        // Disable Claude: the listener stops.
+        settings.send(store_settings(false, true)).unwrap();
+        settle().await;
+        assert_eq!((probe.starts(), probe.running()), (1, 0));
+        // Re-enable Claude: the opt-in was never revoked, so it runs again.
+        settings.send(store_settings(true, true)).unwrap();
+        settle().await;
+        assert_eq!((probe.starts(), probe.running()), (2, 1));
+        // Disable the bridge: the listener stops.
+        settings.send(store_settings(true, false)).unwrap();
+        settle().await;
+        assert_eq!((probe.starts(), probe.running()), (2, 0));
+        // Re-enabling Claude alone never starts it without the opt-in.
+        settings.send(store_settings(false, false)).unwrap();
+        settings.send(store_settings(true, false)).unwrap();
+        settle().await;
+        assert_eq!((probe.starts(), probe.running()), (2, 0));
+        // Rapid toggles: never more than one listener at a time, and the final
+        // state wins.
+        for index in 0..50 {
+            settings
+                .send(store_settings(index % 3 != 0, index % 2 == 0))
+                .unwrap();
+            if index % 7 == 0 {
+                settle().await;
+            }
+        }
+        settings.send(store_settings(true, true)).unwrap();
+        settle().await;
+        assert_eq!(probe.running(), 1);
+        assert_eq!(probe.peak.load(Ordering::SeqCst), 1);
+        // Shutdown while the listener runs: stops and never restarts.
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(2), lifecycle)
+            .await
+            .expect("lifecycle stops on cancellation")
+            .unwrap();
+        assert_eq!(probe.running(), 0);
+        assert_eq!(failures.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_bridge_listener_is_reported_once_and_restarted_only_after_a_toggle() {
+        let probe = Arc::new(ListenerProbe::default());
+        probe.fail_next.store(true, Ordering::SeqCst);
+        let failures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (settings, receiver) = watch::channel(store_settings(true, true));
+        let cancellation = CancellationToken::new();
+        let failure_count = failures.clone();
+        let lifecycle = tokio::spawn(run_bridge_lifecycle(
+            receiver,
+            store_rule,
+            cancellation.clone(),
+            ListenerProbe::listener(probe.clone()),
+            move || {
+                failure_count.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        settle().await;
+        // One attempt, one report, no busy retry loop.
+        assert_eq!((probe.starts(), probe.running()), (1, 0));
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
+        // An unrelated settings change does not retry.
+        settings
+            .send(AppSettings {
+                warning_threshold: 30,
+                ..store_settings(true, true)
+            })
+            .unwrap();
+        settle().await;
+        assert_eq!(probe.starts(), 1);
+        // Turning the bridge off and on retries.
+        settings.send(store_settings(true, false)).unwrap();
+        settle().await;
+        settings.send(store_settings(true, true)).unwrap();
+        settle().await;
+        assert_eq!((probe.starts(), probe.running()), (2, 1));
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(2), lifecycle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(probe.running(), 0);
+    }
+
+    #[tokio::test]
+    async fn closed_settings_channel_stops_the_bridge_on_shutdown() {
+        let probe = Arc::new(ListenerProbe::default());
+        let (settings, receiver) = watch::channel(store_settings(true, true));
+        let cancellation = CancellationToken::new();
+        let lifecycle = tokio::spawn(run_bridge_lifecycle(
+            receiver,
+            store_rule,
+            cancellation.clone(),
+            ListenerProbe::listener(probe.clone()),
+            || {},
+        ));
+        settle().await;
+        assert_eq!(probe.running(), 1);
+        // The UI dropped its sender (shutting down): keep running until the
+        // app cancels, then stop.
+        drop(settings);
+        settle().await;
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(2), lifecycle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(probe.running(), 0);
+        assert_eq!(probe.starts(), 1);
     }
 
     #[test]

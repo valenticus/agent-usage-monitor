@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Win32 application manifest embedded into agent-usage-monitor.exe (GUI only) by build.rs.
+  One GUI binary for the Inno installer, the portable ZIP and the MSIX package.
+  * asInvoker: never requests elevation.
+  * PerMonitorV2 DPI awareness from process start; "PerMonitor" and "true/pm" are the documented
+    fallbacks for Windows versions that do not know PerMonitorV2. Winit later calls
+    SetProcessDpiAwarenessContext, which fails with ERROR_ACCESS_DENIED once the manifest has set
+    the mode; winit ignores that result, so the manifest's mode stays in effect.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

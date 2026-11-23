@@ -122,38 +122,7 @@ impl CodexAppServerClient {
     ) -> Result<Vec<RateLimitSnapshot>, ClientError> {
         let executable =
             resolve_executable(&self.config.executable).ok_or(ClientError::NotFound)?;
-        #[cfg(windows)]
-        let mut command = if std::path::Path::new(&executable)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"))
-        {
-            let mut command = Command::new("powershell.exe");
-            command.args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ]);
-            command.arg(&executable);
-            command
-        } else if std::path::Path::new(&executable)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
-        {
-            let mut command = Command::new("cmd.exe");
-            command.args(["/d", "/s", "/c"]);
-            command.arg(format!(
-                "\"\"{}\" app-server --listen stdio://\"",
-                executable
-            ));
-            command
-        } else {
-            Command::new(&executable)
-        };
-        #[cfg(not(windows))]
-        let mut command = Command::new(&executable);
+        let mut command = app_server_command(&executable)?;
         // The release UI is a GUI-subsystem process without a console: keep
         // the console helper (cmd/powershell/codex) from opening a window.
         #[cfg(windows)]
@@ -161,7 +130,6 @@ impl CodexAppServerClient {
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command
-            .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -243,13 +211,84 @@ impl RateLimitProvider for CodexRateLimitProvider {
     }
 }
 
-fn resolve_executable(name: &str) -> Option<String> {
-    let candidate = std::path::Path::new(name);
-    if candidate.components().count() > 1 {
-        return candidate.is_file().then(|| name.to_owned());
+const APP_SERVER_ARGUMENTS: [&str; 3] = ["app-server", "--listen", "stdio://"];
+
+/// The command for the resolved Codex CLI:
+///
+/// * `.exe` (native, also the npm package's bundled binary): started directly.
+/// * `.ps1`: Windows PowerShell from the system directory with `-File`.
+/// * `.cmd` (npm shim): `cmd.exe` from the system directory with a verbatim
+///   command line ([`crate::process_tools::cmd_shim_command_line`]); paths
+///   cmd.exe cannot pass safely are refused and nothing is started.
+fn app_server_command(executable: &str) -> Result<Command, ClientError> {
+    #[cfg(windows)]
+    {
+        let path = Path::new(executable);
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase);
+        match extension.as_deref() {
+            Some("ps1") => {
+                let mut command = Command::new(
+                    crate::process_tools::system_tool_path(
+                        r"WindowsPowerShell\v1.0\powershell.exe",
+                    )
+                    .map_err(|_| ClientError::Spawn)?,
+                );
+                command.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ]);
+                command.arg(executable);
+                command.args(APP_SERVER_ARGUMENTS);
+                Ok(command)
+            }
+            Some("cmd") => {
+                use std::os::windows::process::CommandExt;
+                let line = crate::process_tools::cmd_shim_command_line(path, &APP_SERVER_ARGUMENTS)
+                    .map_err(|_| ClientError::SpawnInvalidInput)?;
+                let mut command = Command::new(
+                    crate::process_tools::system_tool_path("cmd.exe")
+                        .map_err(|_| ClientError::Spawn)?,
+                );
+                command.as_std_mut().raw_arg(line);
+                Ok(command)
+            }
+            _ => {
+                let mut command = Command::new(executable);
+                command.args(APP_SERVER_ARGUMENTS);
+                Ok(command)
+            }
+        }
     }
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .find_map(|dir| resolve_executable_in_dir(&dir, name))
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new(executable);
+        command.args(APP_SERVER_ARGUMENTS);
+        Ok(command)
+    }
+}
+
+fn resolve_executable(name: &str) -> Option<String> {
+    resolve_executable_in(std::env::var_os("PATH").as_deref(), name)
+}
+
+/// An explicit path must be absolute. A bare name is searched in the
+/// **absolute** entries of `path_variable` only; relative or empty entries
+/// (including `.`) are skipped, so the current directory is never searched.
+fn resolve_executable_in(path_variable: Option<&std::ffi::OsStr>, name: &str) -> Option<String> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 {
+        return (candidate.is_absolute() && candidate.is_file()).then(|| name.to_owned());
+    }
+    std::env::split_paths(path_variable?)
+        .filter(|directory| directory.is_absolute())
+        .find_map(|directory| resolve_executable_in_dir(&directory, name))
 }
 
 fn resolve_executable_in_dir(dir: &Path, name: &str) -> Option<String> {
@@ -311,14 +350,20 @@ async fn terminate_child(child: &mut Child) -> Result<(), ClientError> {
             #[cfg(windows)]
             if let Some(pid) = child.id() {
                 let pid = pid.to_string();
-                let result = Command::new("taskkill.exe")
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .args(["/PID", &pid, "/T", "/F"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .await;
-                if !result.is_ok_and(|status| status.success()) {
+                // Without a verified taskkill path, only the direct child is
+                // killed below; a bare "taskkill.exe" is never started.
+                let succeeded = match crate::process_tools::system_tool_path("taskkill.exe") {
+                    Ok(taskkill) => Command::new(taskkill)
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .args(["/PID", &pid, "/T", "/F"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .await
+                        .is_ok_and(|status| status.success()),
+                    Err(_) => false,
+                };
+                if !succeeded {
                     child.kill().await.map_err(|_| ClientError::Process)?;
                 }
                 child.wait().await.map_err(|_| ClientError::Process)?;
@@ -465,19 +510,39 @@ mod tests {
         executable: String,
         pid_file: std::path::PathBuf,
         descendant_file: std::path::PathBuf,
+        #[cfg_attr(not(windows), allow(dead_code))]
+        args_file: std::path::PathBuf,
     }
 
     impl MockServer {
         fn new(mode: &str) -> Self {
+            Self::in_folder(mode, None)
+        }
+
+        /// Windows: the PowerShell mock behind an npm-style `codex.cmd` shim in
+        /// a folder whose name contains spaces and cmd.exe metacharacters.
+        #[cfg(windows)]
+        fn behind_cmd_shim(mode: &str, folder: &str) -> Self {
+            Self::in_folder(mode, Some(folder))
+        }
+
+        fn in_folder(mode: &str, shim_folder: Option<&str>) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let pid_file = directory.path().join("child.pid");
             let descendant_file = directory.path().join("descendant.pid");
+            let args_file = directory.path().join("args.txt");
+            let script_directory = match shim_folder {
+                Some(folder) => directory.path().join(folder),
+                None => directory.path().to_path_buf(),
+            };
+            std::fs::create_dir_all(&script_directory).unwrap();
             #[cfg(windows)]
             let (extension, script) = (
                 "ps1",
                 format!(
-                    "$ErrorActionPreference='Stop'\n[IO.File]::WriteAllText('{}', [string]$PID)\n$init=[Console]::ReadLine()\nif ('{}' -eq 'exit') {{ exit }}\nif ('{}' -eq 'malformed') {{ [Console]::WriteLine('not-json'); exit }}\n[Console]::WriteLine('{{\"id\":1,\"result\":{{}}}}')\n$notice=[Console]::ReadLine()\n$limits=[Console]::ReadLine()\nif ('{}' -eq 'timeout') {{ $desc=Start-Process $env:ComSpec -WindowStyle Hidden -ArgumentList '/c','ping','-n','31','127.0.0.1' -PassThru; [IO.File]::WriteAllText('{}', [string]$desc.Id); Start-Sleep -Seconds 30; exit }}\nif ('{}' -eq 'wrong_id') {{ [Console]::WriteLine('{{\"id\":99,\"result\":{{}}}}'); exit }}\n[Console]::WriteLine('{{\"id\":2,\"result\":{{\"rateLimits\":{{\"primary\":{{\"usedPercent\":23,\"windowDurationMins\":300}}}}}}}}')\n",
+                    "$ErrorActionPreference='Stop'\n[IO.File]::WriteAllText('{}', [string]$PID)\n[IO.File]::WriteAllText('{}', ($args -join '|'))\n$init=[Console]::ReadLine()\nif ('{}' -eq 'exit') {{ exit }}\nif ('{}' -eq 'malformed') {{ [Console]::WriteLine('not-json'); exit }}\n[Console]::WriteLine('{{\"id\":1,\"result\":{{}}}}')\n$notice=[Console]::ReadLine()\n$limits=[Console]::ReadLine()\nif ('{}' -eq 'timeout') {{ $desc=Start-Process $env:ComSpec -WindowStyle Hidden -ArgumentList '/c','ping','-n','31','127.0.0.1' -PassThru; [IO.File]::WriteAllText('{}', [string]$desc.Id); Start-Sleep -Seconds 30; exit }}\nif ('{}' -eq 'wrong_id') {{ [Console]::WriteLine('{{\"id\":99,\"result\":{{}}}}'); exit }}\n[Console]::WriteLine('{{\"id\":2,\"result\":{{\"rateLimits\":{{\"primary\":{{\"usedPercent\":23,\"windowDurationMins\":300}}}}}}}}')\n",
                     pid_file.display(),
+                    args_file.display(),
                     mode,
                     mode,
                     mode,
@@ -498,7 +563,8 @@ mod tests {
                     mode
                 ),
             );
-            let executable_path = directory.path().join(format!("mock-server.{extension}"));
+            #[cfg_attr(not(windows), allow(unused_mut))]
+            let mut executable_path = script_directory.join(format!("mock-server.{extension}"));
             std::fs::write(&executable_path, script).unwrap();
             #[cfg(unix)]
             {
@@ -507,12 +573,29 @@ mod tests {
                 permissions.set_mode(0o700);
                 std::fs::set_permissions(&executable_path, permissions).unwrap();
             }
+            #[cfg(windows)]
+            if shim_folder.is_some() {
+                // Same shape as npm's generated shims: forward all arguments.
+                let shim = script_directory.join("codex.cmd");
+                std::fs::write(
+                    &shim,
+                    "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0mock-server.ps1\" %*\r\n",
+                )
+                .unwrap();
+                executable_path = shim;
+            }
             Self {
                 _directory: directory,
                 executable: executable_path.to_string_lossy().into_owned(),
                 pid_file,
                 descendant_file,
+                args_file,
             }
+        }
+
+        #[cfg(windows)]
+        fn received_arguments(&self) -> String {
+            std::fs::read_to_string(&self.args_file).unwrap_or_default()
         }
 
         fn config(&self, request_timeout: Duration) -> CodexClientConfig {
@@ -566,12 +649,16 @@ mod tests {
             }
         }
 
+        /// Time-based budget: PowerShell start-up can take many seconds when
+        /// several mock servers run in parallel on a loaded or battery-saving
+        /// machine.
         async fn wait_until_descendant_started(&self) {
-            for _ in 0..500 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(40);
+            while std::time::Instant::now() < deadline {
                 if self.descendant_file.is_file() {
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
             panic!("mock app-server descendant did not start");
         }
@@ -647,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn completes_successful_json_rpc_exchange_and_cleans_child() {
         let mock = MockServer::new("ok");
-        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(8)));
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(30)));
         let limits = client
             .read_rate_limits(CancellationToken::new())
             .await
@@ -659,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_child_and_returns_timeout_error() {
         let mock = MockServer::new("timeout");
-        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(8)));
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(20)));
         let error = client
             .read_rate_limits(CancellationToken::new())
             .await
@@ -672,7 +759,142 @@ mod tests {
     #[tokio::test]
     async fn cancellation_kills_child_and_returns_cancelled_error() {
         let mock = MockServer::new("timeout");
-        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(10)));
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(45)));
+        let cancellation = CancellationToken::new();
+        let trigger = cancellation.clone();
+        let task = tokio::spawn(async move { client.read_rate_limits(trigger).await });
+        mock.wait_until_descendant_started().await;
+        cancellation.cancel();
+        assert_eq!(task.await.unwrap().unwrap_err().code, "codex_cancelled");
+        mock.assert_child_exited().await;
+    }
+
+    /// Folder names with spaces and characters cmd.exe treats specially
+    /// outside quotes (`&`, `^`, `(`, `)`, `!`).
+    #[cfg(windows)]
+    const SHIM_FOLDERS: [&str; 2] = ["npm global (x86)", "a & b ^ c ! d"];
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_shim_runs_with_exact_arguments_in_unusual_folders() {
+        for folder in SHIM_FOLDERS {
+            let mock = MockServer::behind_cmd_shim("ok", folder);
+            let client = CodexAppServerClient::new(mock.config(Duration::from_secs(30)));
+            let limits = client
+                .read_rate_limits(CancellationToken::new())
+                .await
+                .unwrap_or_else(|error| panic!("folder={folder}: {error:?}"));
+            assert_eq!(limits[0].primary.as_ref().unwrap().used_percent, 23.0);
+            assert_eq!(
+                mock.received_arguments(),
+                "app-server|--listen|stdio://",
+                "folder={folder}"
+            );
+            mock.assert_child_exited().await;
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_shim_paths_cmd_cannot_pass_are_refused_without_a_process() {
+        let mock = MockServer::behind_cmd_shim("ok", "100% npm");
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(5)));
+        let error = client
+            .read_rate_limits(CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "codex_spawn_invalid_input");
+        assert!(!mock.pid_file.exists(), "no process may be started");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_exe_and_script_commands_keep_their_arguments() {
+        let native = super::app_server_command(r"C:\tools\codex.exe").unwrap();
+        assert_eq!(native.as_std().get_program(), r"C:\tools\codex.exe");
+        assert_eq!(
+            native.as_std().get_args().collect::<Vec<_>>(),
+            ["app-server", "--listen", "stdio://"]
+        );
+        let script = super::app_server_command(r"C:\npm dir\codex.ps1").unwrap();
+        let program = script
+            .as_std()
+            .get_program()
+            .to_string_lossy()
+            .to_lowercase();
+        assert!(
+            program.ends_with(r"\windowspowershell\v1.0\powershell.exe"),
+            "{program}"
+        );
+        assert_eq!(
+            script.as_std().get_args().collect::<Vec<_>>(),
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                r"C:\npm dir\codex.ps1",
+                "app-server",
+                "--listen",
+                "stdio://"
+            ]
+        );
+        let shim = super::app_server_command(r"C:\npm (x86) & co\codex.cmd").unwrap();
+        let program = shim.as_std().get_program().to_string_lossy().to_lowercase();
+        assert!(program.ends_with(r"\system32\cmd.exe"), "{program}");
+    }
+
+    #[test]
+    fn resolution_uses_absolute_path_entries_and_absolute_explicit_paths_only() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin with space & (x86)");
+        std::fs::create_dir_all(&bin).unwrap();
+        #[cfg(windows)]
+        let file = bin.join("codex.exe");
+        #[cfg(not(windows))]
+        let file = bin.join("codex");
+        std::fs::write(&file, b"").unwrap();
+        let expected = Some(file.to_string_lossy().into_owned());
+        let path = std::env::join_paths([".", "", "relative-bin", bin.to_str().unwrap()]).unwrap();
+        // Relative and empty entries are skipped; the absolute one is found.
+        assert_eq!(super::resolve_executable_in(Some(&path), "codex"), expected);
+        let relative_only = std::env::join_paths([".", "", "relative-bin"]).unwrap();
+        assert_eq!(
+            super::resolve_executable_in(Some(&relative_only), "codex"),
+            None
+        );
+        assert_eq!(super::resolve_executable_in(None, "codex"), None);
+        // Explicit paths: absolute accepted, relative refused.
+        assert_eq!(
+            super::resolve_executable_in(None, &file.to_string_lossy()),
+            expected
+        );
+        assert_eq!(
+            super::resolve_executable_in(
+                None,
+                &format!("relative-bin{}codex", std::path::MAIN_SEPARATOR)
+            ),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_shim_timeout_and_cancellation_clean_up_the_process_tree() {
+        let mock = MockServer::behind_cmd_shim("timeout", SHIM_FOLDERS[1]);
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(20)));
+        let error = client
+            .read_rate_limits(CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "codex_timeout");
+        assert!(mock.descendant_file.is_file());
+        mock.assert_child_exited().await;
+
+        let mock = MockServer::behind_cmd_shim("timeout", SHIM_FOLDERS[0]);
+        let client = CodexAppServerClient::new(mock.config(Duration::from_secs(45)));
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
         let task = tokio::spawn(async move { client.read_rate_limits(trigger).await });
@@ -690,7 +912,7 @@ mod tests {
             ("wrong_id", "codex_protocol_error"),
         ] {
             let mock = MockServer::new(mode);
-            let client = CodexAppServerClient::new(mock.config(Duration::from_secs(8)));
+            let client = CodexAppServerClient::new(mock.config(Duration::from_secs(30)));
             assert_eq!(
                 client
                     .read_rate_limits(CancellationToken::new())

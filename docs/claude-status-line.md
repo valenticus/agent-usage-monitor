@@ -28,6 +28,16 @@ command-specific wrapper is ready. The executable path and app startup options a
 [the Rust UI README](../rust/agent-monitor-ui/README.md). Agent Usage Monitor never
 writes Claude settings.
 
+**Microsoft Store (MSIX) build:** packaged apps cannot receive launch arguments on
+Windows 10 1809, so the listener is enabled instead in Settings → General → Claude →
+**Status-line bridge**. That toggle exists only in the Store build and is off by default.
+In every build the listener runs only while the Claude provider is on and the opt-in
+(the launch argument or the Store toggle) is set; turning either off stops it at once.
+The bridge is reachable through the package's App Execution Alias, so the
+`statusLine` command is just `agent-usage-monitor-claude-bridge.exe`. Executables
+inside `WindowsApps` cannot be started by path. The same rules apply: AUM never writes
+Claude settings, and you configure the command yourself. See [MSIX build](msix.md).
+
 Build the bridge from the repository root with:
 
 ```powershell

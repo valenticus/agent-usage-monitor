@@ -28,8 +28,11 @@ png = "0.18"
 resvg = { version = "0.49", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-# WinRT toast notifications (ToastNotificationManager) with AUM's own AppUserModelID.
-windows = { version = "0.62.2", features = ["Data_Xml_Dom", "UI_Notifications"] }
+# WinRT toast notifications (ToastNotificationManager) and, in the MSIX build,
+# the package StartupTask (Windows.ApplicationModel) and the package's own
+# data folder (Windows.Storage.ApplicationData); RoInitialize for the threads
+# that call them (Win32_System_WinRT; Win32_System_Com for the STA test).
+windows = { version = "0.62.2", features = ["ApplicationModel", "Data_Xml_Dom", "Foundation", "Storage", "Storage_Search", "UI_Notifications", "Win32_System_Com", "Win32_System_WinRT"] }
 
 [build-dependencies]
 slint-build.workspace = true

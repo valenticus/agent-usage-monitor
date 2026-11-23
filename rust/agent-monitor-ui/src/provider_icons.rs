@@ -5,7 +5,23 @@ use std::path::Path;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 /// Largest accepted source file (SVG or PNG).
-const MAX_ICON_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_ICON_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Every file name the local `provider-icons` folder is searched for, each
+/// once (used by the Store build's optional settings import).
+pub fn all_candidate_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    for provider in [Provider::Codex, Provider::Claude] {
+        for light in [false, true] {
+            for name in candidates(provider, light) {
+                if !names.contains(name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
+}
 /// Largest accepted raster source edge, to bound decode memory.
 const MAX_SOURCE_EDGE: u32 = 4096;
 /// Raster sources are trimmed and kept at most this large after loading.
@@ -152,8 +168,10 @@ pub fn local() -> std::rc::Rc<ProviderIcons> {
         cached
             .borrow_mut()
             .get_or_insert_with(|| {
-                let directory = crate::settings::settings_directory().join("provider-icons");
-                let (icons, origins) = load_icons(bundled::BUNDLED, &directory);
+                // Without persistent storage only the embedded marks are used.
+                let directory = crate::settings::settings_directory()
+                    .map(|directory| directory.join("provider-icons"));
+                let (icons, origins) = load_icons_from(bundled::BUNDLED, directory.as_deref());
                 for ((provider, light), (name, origin)) in &origins {
                     eprintln!(
                         "PROVIDER_ICONS: {provider:?} {} source={origin:?} file={name}",
@@ -170,7 +188,15 @@ type Slot = (Provider, bool);
 /// Which file (and from where) filled each slot.
 type SlotOrigins = Vec<(Slot, (&'static str, Origin))>;
 
+#[cfg(test)]
 fn load_icons(embedded: &[(&str, &[u8])], directory: &Path) -> (ProviderIcons, SlotOrigins) {
+    load_icons_from(embedded, Some(directory))
+}
+
+fn load_icons_from(
+    embedded: &[(&str, &[u8])],
+    directory: Option<&Path>,
+) -> (ProviderIcons, SlotOrigins) {
     let mut sources = HashMap::new();
     let mut origins = Vec::new();
     for provider in [Provider::Codex, Provider::Claude] {
@@ -180,7 +206,7 @@ fn load_icons(embedded: &[(&str, &[u8])], directory: &Path) -> (ProviderIcons, S
                 .iter()
                 .find_map(|name| {
                     Some((
-                        load_source(&directory.join(name))?,
+                        load_source(&directory?.join(name))?,
                         (*name, Origin::LocalFolder),
                     ))
                 })

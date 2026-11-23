@@ -37,8 +37,17 @@ jobs:
         run: cargo fmt --all --check
         working-directory: rust
 
+      # Static check only: the Store (MSIX) manifest, the identity against the
+      # Partner Center package family name, the assets and the package layout,
+      # via makepri + makeappx with zero-byte placeholder EXEs. It does not
+      # build, sign, install or run the packaged application, so it says
+      # nothing about runtime behaviour (see docs/msix.md, "Testing limits").
+      - name: Validate MSIX manifest and identity (static, placeholder EXEs)
+        shell: pwsh
+        run: ./packaging/msix/build-msix.ps1 -ValidateManifestOnly
+
       - name: Run Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: rust
 
       - name: Run tests

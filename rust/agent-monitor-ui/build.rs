@@ -19,11 +19,30 @@ fn main() {
             if let Err(error) = embed_windows_icon() {
                 println!("cargo:warning=Windows icon resource was not embedded: {error}");
             }
+            embed_windows_manifest();
         } else {
             println!(
-                "cargo:warning=Windows icon resource embedding is configured for the MSVC linker only"
+                "cargo:warning=Windows icon and manifest embedding are configured for the MSVC linker only"
             );
         }
+    }
+}
+
+/// Embeds `windows/agent-usage-monitor.manifest` (asInvoker, PerMonitorV2 DPI
+/// awareness) into the GUI executable only, so the Inno, portable and MSIX
+/// builds keep one identical GUI binary. `/MANIFESTUAC:NO`: the execution level
+/// comes from the manifest file instead of a linker-generated fragment.
+fn embed_windows_manifest() {
+    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"))
+        .join("windows")
+        .join("agent-usage-monitor.manifest");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    for argument in [
+        "/MANIFEST:EMBED".to_string(),
+        format!("/MANIFESTINPUT:{}", manifest.display()),
+        "/MANIFESTUAC:NO".to_string(),
+    ] {
+        println!("cargo:rustc-link-arg-bin=agent-usage-monitor={argument}");
     }
 }
 
