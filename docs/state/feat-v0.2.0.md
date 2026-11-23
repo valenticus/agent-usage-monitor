@@ -145,3 +145,20 @@ Expected F-8 result on this machine: the user's `statusLine` is Nook's `nook-hoo
 3. Runtime check of the new UI on a test install (needs approval to replace the installed MSIX or to install a separate EXE build):
    - tray stale and amber colours on dark and light taskbars;
    - the statusLine row with Nook present.
+
+## v0.2.0-rc1 runtime QA (2026-11-23 14:20–15:20, user-authorized MSIX update)
+- Installed MSIX updated 0.1.1.0 (review-fixes, GUI `0BAEF71D…`) → **0.2.0.0** (RC, GUI `C7777383…`) with `Add-AppxPackage`, no uninstall. Settings byte-identical, StartupTask State 2, notification key and bridge alias kept. Left installed.
+- Recovery checkpoint: `AUM-recovery\2026-11-23-v020-checkpoint` (+ `ROLLBACK.md`, rollback package verified).
+- Runtime: PASS for real quotas, F-11 (4 modes), F-10 (3 themes, tray `F59E0B`/`E0585F`), F-7 (solid `9F9784`, isolated portable after > 900 s), F-8 Nook conflict (no button, live settings hash unchanged), F-8 copy + failed copy + command run in Git Bash / PowerShell 5.1 / 7 (isolated portable), missing-CLI texts, 4 languages, toasts, background refresh. No crashes.
+- WACK 0.2.0.0: 22 PASS / 1 optional FAIL (Blocked executables) / 1 WARNING (DPI tool limitation) = same as 0.1.1.0.
+- NOT TESTED: Inno installer runtime (no isolated environment), light taskbar, Explorer restart, real sign-in launch.
+- Details: `AUM-recovery\qa\QA-REPORT.md`, section "v0.2.0-rc1 runtime QA".
+
+## StatusLine UX fix (2026-11-23, after rc1 QA; NOT committed, not in rc1)
+- Decision (user): AUM is standalone; never assume or name third-party tools. Conflict text is generic; the program name is no longer shown (`statusline_other_unknown` removed, `{program}` gone).
+- Clear split in Settings → Claude: **Background refresh** ("every 5 minutes … Claude CLI, no open session needed") vs **Live updates from Claude Code** (Store-only toggle, formerly "Status-line bridge"; description says manual setup is needed and the toggle does not change Claude Code).
+- Status-line row: "Manual setup needed…" for free/missing settings; "Set up for AUM…, live updates are off" now differs per build (`statusline_aum_inactive` = Store toggle, new `statusline_aum_inactive_exe` = `--enable-claude-bridge`). `statusline_row(…, store_build)`.
+- UA/EN/PL/RU updated, including the Store import description. Docs: `claude-status-line.md`, `msix.md`.
+- Validation: fmt, clippy `-D warnings`, `cargo test --workspace -- --test-threads=1` 176/176. Runtime (dev build, EXE mode, isolated fixtures, `qa\v020-r4-statusline-ux-*`): no settings, free, AUM + flag on, AUM + flag off, another command (4 languages), unreadable, CLI missing — all rows correct, no program name, fixtures unchanged, live Claude settings unchanged.
+- Not seen at runtime: the Store toggle's new label (MSIX-only; needs an rc2 MSIX).
+- Next: build rc2 (all three packages) from the commit with this fix; short MSIX recheck of the Claude card.

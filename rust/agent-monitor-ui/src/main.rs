@@ -2166,30 +2166,30 @@ fn bridge_command() -> Result<String, claude_statusline::CommandError> {
 
 /// (text, error, copy offered) for the statusLine row. `command_supported`
 /// is false when AUM's own path cannot be put into a shell command safely;
-/// then nothing is offered for copying.
+/// then nothing is offered for copying. `store_build` picks how live updates
+/// are turned on: the Settings toggle (MSIX) or `--enable-claude-bridge`
+/// (EXE builds, which have no toggle). Another tool's status line is
+/// described generically; its program is never named in the UI.
 fn statusline_row(
     state: &claude_statusline::StatusLineState,
     labels: &localization::SettingsStrings,
     bridge_wanted: bool,
     command_supported: bool,
+    store_build: bool,
 ) -> (String, bool, bool) {
     use claude_statusline::StatusLineState as State;
     match state {
         State::ConfiguredForAum if bridge_wanted => (labels.statusline_aum.into(), false, false),
-        State::ConfiguredForAum => (labels.statusline_aum_inactive.into(), true, false),
+        State::ConfiguredForAum if store_build => {
+            (labels.statusline_aum_inactive.into(), true, false)
+        }
+        State::ConfiguredForAum => (labels.statusline_aum_inactive_exe.into(), true, false),
         State::NotConfigured | State::SettingsNotFound if !command_supported => {
             (labels.statusline_path_unsupported.into(), true, false)
         }
         State::NotConfigured => (labels.statusline_free.into(), false, true),
         State::SettingsNotFound => (labels.statusline_no_settings.into(), false, true),
-        State::OtherCommand { program } if program.is_empty() => {
-            (labels.statusline_other_unknown.into(), true, false)
-        }
-        State::OtherCommand { program } => (
-            labels.statusline_other.replace("{program}", program),
-            true,
-            false,
-        ),
+        State::OtherCommand { .. } => (labels.statusline_other.into(), true, false),
         State::Unreadable => (labels.statusline_unreadable.into(), true, false),
     }
 }
@@ -2207,8 +2207,13 @@ fn apply_statusline_row(window: &SettingsWindow) {
         window.set_statusline_can_copy(false);
         return;
     };
-    let (text, error, can_copy) =
-        statusline_row(&state, &labels, bridge_wanted, bridge_command().is_ok());
+    let (text, error, can_copy) = statusline_row(
+        &state,
+        &labels,
+        bridge_wanted,
+        bridge_command().is_ok(),
+        packaged::is_packaged(),
+    );
     window.set_statusline_text(text.into());
     window.set_statusline_error(error);
     window.set_statusline_can_copy(can_copy);
@@ -2983,48 +2988,89 @@ mod tests {
         use claude_statusline::StatusLineState as State;
         for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
             let labels = locale.settings();
-            let row = |state: State, bridge| statusline_row(&state, &labels, bridge, true);
-            assert_eq!(
-                row(State::ConfiguredForAum, true),
-                (labels.statusline_aum.into(), false, false)
-            );
-            assert!(row(State::ConfiguredForAum, false).1);
-            assert!(
-                row(State::ConfiguredForAum, false)
-                    .0
-                    .contains("--enable-claude-bridge")
-            );
-            assert!(row(State::NotConfigured, true).2);
-            assert!(row(State::SettingsNotFound, false).2);
-            assert_eq!(
-                row(State::Unreadable, true),
-                (labels.statusline_unreadable.into(), true, false)
-            );
-            let (text, error, copy) = row(
-                State::OtherCommand {
-                    program: "nook-hook-standalone.exe".into(),
-                },
-                true,
-            );
-            assert!(text.contains("nook-hook-standalone.exe") && !text.contains("{program}"));
-            assert!(
-                error && !copy,
-                "{locale:?}: a foreign status line is never offered for replacement"
-            );
-            let (text, _, copy) = row(
-                State::OtherCommand {
-                    program: String::new(),
-                },
-                true,
-            );
-            assert!(!text.contains("{program}") && !copy);
-            // AUM's own path refused for a shell command: nothing to copy.
-            for state in [State::NotConfigured, State::SettingsNotFound] {
+            for store in [true, false] {
+                let row =
+                    |state: State, bridge| statusline_row(&state, &labels, bridge, true, store);
+                // Configured and receiving: confirmation, nothing to copy.
                 assert_eq!(
-                    statusline_row(&state, &labels, true, false),
-                    (labels.statusline_path_unsupported.into(), true, false)
+                    row(State::ConfiguredForAum, true),
+                    (labels.statusline_aum.into(), false, false)
+                );
+                // Configured but live updates off: says how to turn them on
+                // in this build (toggle in the Store build, flag in EXE builds).
+                let (text, error, copy) = row(State::ConfiguredForAum, false);
+                assert!(error && !copy);
+                assert_eq!(
+                    text.contains("--enable-claude-bridge"),
+                    !store,
+                    "{locale:?}"
+                );
+                if store {
+                    assert!(
+                        text.contains(labels.claude_bridge),
+                        "{locale:?}: names the toggle"
+                    );
+                }
+                // Free or missing settings: manual setup with the copy offer,
+                // whether or not the live updates are on.
+                for bridge in [true, false] {
+                    for state in [State::NotConfigured, State::SettingsNotFound] {
+                        let (text, error, copy) = row(state, bridge);
+                        assert!(!error && copy && text.contains("~/.claude/settings.json"));
+                    }
+                }
+                assert_eq!(
+                    row(State::Unreadable, true),
+                    (labels.statusline_unreadable.into(), true, false)
+                );
+                // Another command: one generic text, no program name, never
+                // offered for replacement.
+                for program in ["nook-hook-standalone.exe", "", "ccline"] {
+                    let (text, error, copy) = row(
+                        State::OtherCommand {
+                            program: program.into(),
+                        },
+                        true,
+                    );
+                    assert_eq!(text, labels.statusline_other, "{locale:?}");
+                    assert!(
+                        error && !copy,
+                        "{locale:?}: a foreign status line is never offered for replacement"
+                    );
+                }
+                // AUM's own path refused for a shell command: nothing to copy.
+                for state in [State::NotConfigured, State::SettingsNotFound] {
+                    assert_eq!(
+                        statusline_row(&state, &labels, true, false, store),
+                        (labels.statusline_path_unsupported.into(), true, false)
+                    );
+                }
+            }
+            // No UI string names a third-party tool or leaves a placeholder.
+            for text in [
+                labels.claude_note,
+                labels.claude_refresh_description,
+                labels.claude_bridge,
+                labels.claude_bridge_description,
+                labels.statusline_title,
+                labels.statusline_aum,
+                labels.statusline_aum_inactive,
+                labels.statusline_aum_inactive_exe,
+                labels.statusline_free,
+                labels.statusline_other,
+                labels.statusline_no_settings,
+                labels.statusline_unreadable,
+            ] {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("nook") && !text.contains('{'),
+                    "{locale:?}: {text}"
                 );
             }
+            // The toggle never claims to configure Claude Code: its
+            // description and the free-state text both say setup is manual.
+            assert!(labels.claude_bridge_description.contains("Claude Code"));
+            assert!(labels.statusline_free.contains("~/.claude/settings.json"));
         }
     }
 

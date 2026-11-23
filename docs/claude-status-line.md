@@ -36,7 +36,8 @@ Settings → General → Claude shows a **Claude Code status line** row in every
 - The clipboard is owned by the Settings window.
   - The text is prepared before the clipboard is opened, so a failure to open it (another program holding it) leaves the previous content in place.
   - The button shows the actual result: "Copied" or "Copy failed".
-- When another tool (for example Nook) owns the status line, AUM shows a conflict and suggests **Background refresh** instead. It never replaces, wraps or chains that command.
+- When another command owns the status line, AUM shows one generic message ("Already used by another command…; Background refresh still works") without naming the program. It never replaces, wraps or chains that command.
+- Settings names the two Claude sources plainly: **Background refresh** (the Claude CLI every 5 minutes, no open session needed) and, in the Store build, **Live updates from Claude Code** (the status-line listener). Turning the toggle on does not configure Claude Code; the status-line row says when manual setup is needed.
 - Project-level settings (`.claude/settings.json` in a repository) can override the user setting and are not checked.
 
 ## Implemented opt-in bridge
@@ -59,7 +60,7 @@ writes Claude settings.
 
 **Microsoft Store (MSIX) build:** packaged apps cannot receive launch arguments on
 Windows 10 1809, so the listener is enabled instead in Settings → General → Claude →
-**Status-line bridge**. That toggle exists only in the Store build and is off by default.
+**Live updates from Claude Code** (named "Status-line bridge" before v0.2.0). That toggle exists only in the Store build and is off by default.
 In every build the listener runs only while the Claude provider is on and the opt-in
 (the launch argument or the Store toggle) is set; turning either off stops it at once.
 The bridge is reachable through the package's App Execution Alias, so the
