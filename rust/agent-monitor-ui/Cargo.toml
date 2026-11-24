@@ -38,6 +38,9 @@ windows = { version = "0.62.2", features = ["ApplicationModel", "Data_Xml_Dom", 
 [build-dependencies]
 slint-build.workspace = true
 
+[dev-dependencies]
+i-slint-backend-testing = "=1.19.0"
+
 [[bin]]
 name = "agent-usage-monitor"
 path = "src/main.rs"

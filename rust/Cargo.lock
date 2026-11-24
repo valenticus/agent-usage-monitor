@@ -153,6 +153,7 @@ version = "0.3.0"
 dependencies = [
  "agent-usage-monitor-core",
  "chrono",
+ "i-slint-backend-testing",
  "png",
  "raw-window-handle",
  "resvg",

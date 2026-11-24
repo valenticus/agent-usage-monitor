@@ -1434,6 +1434,16 @@ export component SettingsWindow inherits Window {
     in property <string> update-auto-label: "";
     in property <string> update-auto-description: "";
     in property <string> update-store-button-label: "";
+    in property <length> settings-window-height: 480px;
+    in property <length> minimum-settings-window-height: 0px;
+    out property <length> general-page-required-height: general-page.preferred-height;
+    out property <length> notifications-page-required-height: notifications-page.preferred-height;
+    out property <length> about-page-required-height: about-page.preferred-height;
+    out property <length> settings-content-width: content.width;
+    out property <length> required-settings-height: max(max(general-page.preferred-height, notifications-page.preferred-height), about-page.preferred-height);
+    out property <length> active-page-required-height: root.selected-tab == 0 ? general-page.preferred-height : (root.selected-tab == 1 ? notifications-page.preferred-height : about-page.preferred-height);
+    out property <length> settings-scroll-y: content.content-y;
+    out property <length> settings-scroll-content-height: content.content-height;
     in property <string> codex-source: "";
     in property <string> claude-source: "";
     in property <string> legal-note: "";
@@ -1465,18 +1475,13 @@ export component SettingsWindow inherits Window {
 
     title: "AgentUsageMonitor — " + root.title-label;
     icon: root.window-icon;
-    // Default size, also read by Rust when opening (clamped to the monitor
-    // work area; the content scrolls only when the window is shorter).
-    // Smallest default that shows the whole About page without scrolling in
-    // UA/PL/EN/RU (measured: ~617 px of content incl. the 16 px minimum spacer).
-    // Also fits 150 % scaling on a 1080p screen (688 px logical work area).
+    // Rust measures every page while hidden and sets one shared window height
+    // before showing it. This value is only the initial hidden-window fallback.
     out property <length> default-width: 720px;
-    out property <length> default-height: 640px;
     preferred-width: root.default-width;
-    preferred-height: root.default-height;
+    preferred-height: root.settings-window-height;
     min-width: 680px;
-    // Low enough for 200 % scaling on a 1080p screen (516 px logical work area).
-    min-height: 420px;
+    min-height: root.minimum-settings-window-height;
     default-font-family: Typography.family;
     default-font-size: 14px;
     background: Theme.window-bg;
@@ -1486,6 +1491,13 @@ export component SettingsWindow inherits Window {
     public function apply-theme-palette() {
         Theme.kind = root.theme-kind;
         Palette.color-scheme = root.theme-kind == 2 ? ColorScheme.light : ColorScheme.dark;
+    }
+    public function select-settings-tab(tab: int) {
+        root.selected-tab = tab;
+        content.scroll-to({ x: 0px, y: 0px }, ScrollBehavior.instant);
+    }
+    public function scroll-settings-to-bottom() {
+        content.scroll-to({ x: 0px, y: content.content-height }, ScrollBehavior.instant);
     }
 
     // Sidebar: 200px, padding 20/12, header padding 0 14 20.
@@ -1577,9 +1589,16 @@ export component SettingsWindow inherits Window {
         width: root.width - 201px;
         height: root.height;
         content-width: self.width;
-        content-height: max(self.height, page.preferred-height);
-        page := VerticalLayout {
+        content-height: max(self.height, root.active-page-required-height);
+        // Keep all pages instantiated at the same origin. Visibility changes
+        // only paint/input state; each page keeps an independently measured
+        // preferred height for the common window size.
+        general-page := VerticalLayout {
+            x: 0px;
+            y: 0px;
             width: content.width;
+            height: self.preferred-height;
+            visible: root.selected-tab == 0;
             padding-top: 28px;
             padding-left: 32px;
             padding-right: 32px;
@@ -1589,7 +1608,7 @@ export component SettingsWindow inherits Window {
 
             Text {
                 height: 28px;
-                text: root.selected-tab == 0 ? root.general-label : (root.selected-tab == 1 ? root.notifications-label : root.about-label);
+                text: root.general-label;
                 font-size: 22px;
                 font-weight: 600;
                 color: Theme.text-primary;
@@ -1597,7 +1616,7 @@ export component SettingsWindow inherits Window {
             }
 
             // ── General ──
-            if root.selected-tab == 0: VerticalLayout {
+            VerticalLayout {
                 spacing: 0px;
                 // Settings cannot be saved (no persistent storage).
                 if root.storage-warning != "": Rectangle { height: 20px; }
@@ -1756,9 +1775,32 @@ export component SettingsWindow inherits Window {
                     }
                 }
             }
+        }
+
+        notifications-page := VerticalLayout {
+            x: 0px;
+            y: 0px;
+            width: content.width;
+            height: self.preferred-height;
+            visible: root.selected-tab == 1;
+            padding-top: 28px;
+            padding-left: 32px;
+            padding-right: 32px;
+            padding-bottom: 24px;
+            spacing: 0px;
+            alignment: start;
+
+            Text {
+                height: 28px;
+                text: root.notifications-label;
+                font-size: 22px;
+                font-weight: 600;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+            }
 
             // ── Notifications ──
-            if root.selected-tab == 1: VerticalLayout {
+            VerticalLayout {
                 spacing: 0px;
                 Rectangle { height: 20px; }
                 Card {
@@ -1858,13 +1900,33 @@ export component SettingsWindow inherits Window {
                     }
                 }
             }
+        }
+
+        about-page := VerticalLayout {
+            x: 0px;
+            y: 0px;
+            width: content.width;
+            height: self.preferred-height;
+            visible: root.selected-tab == 2;
+            padding-top: 28px;
+            padding-left: 32px;
+            padding-right: 32px;
+            padding-bottom: 24px;
+            spacing: 0px;
+            alignment: start;
+
+            Text {
+                height: 28px;
+                text: root.about-label;
+                font-size: 22px;
+                font-weight: 600;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+            }
 
             // ── About ──
-            if root.selected-tab == 2: VerticalLayout {
+            VerticalLayout {
                 spacing: 0px;
-                // Fill the viewport below the page title (28 top + 28 title +
-                // 24 bottom padding) so the footer sits at the bottom edge.
-                min-height: content.height - 80px;
                 Rectangle { height: 10px; }
                 HorizontalLayout {
                     height: 64px;
@@ -1950,12 +2012,18 @@ export component SettingsWindow inherits Window {
                     wrap: word-wrap;
                 }
                 Rectangle { height: 8px; }
-                Text {
-                    text: root.update-status;
-                    visible: root.update-status != "";
-                    font-size: 13px;
-                    color: root.update-available ? Theme.accent : Theme.text-secondary;
-                    wrap: word-wrap;
+                Rectangle {
+                    height: 40px;
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.update-status;
+                        visible: root.update-status != "";
+                        font-size: 13px;
+                        color: root.update-available ? Theme.accent : Theme.text-secondary;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
                 }
                 VerticalLayout {
                     HorizontalLayout {
@@ -2019,11 +2087,10 @@ export component SettingsWindow inherits Window {
                         wrap: word-wrap;
                     }
                 }
-                // Pushes the copyright footer to the bottom of the content area;
-                // keeps at least 16 px from the disclaimer and scrolls when short.
+                // Keep a deliberate gap before the footer. Its natural content
+                // height is measured with the rest of About when Settings opens.
                 Rectangle {
                     min-height: 16px;
-                    vertical-stretch: 1;
                 }
                 Divider { }
                 Rectangle { height: 10px; }

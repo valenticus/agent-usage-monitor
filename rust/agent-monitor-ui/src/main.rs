@@ -51,6 +51,47 @@ type SharedAlerts = Arc<Mutex<AlertRuntime>>;
 static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
 static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus::Idle);
 static SETTINGS_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SETTINGS_LAYOUT: std::sync::Mutex<SettingsLayoutSnapshot> =
+    std::sync::Mutex::new(SettingsLayoutSnapshot::new());
+
+const SETTINGS_MARGIN_LOGICAL: f32 = 16.0;
+const SETTINGS_CAPTION_LOGICAL: f32 = 32.0;
+const SETTINGS_MIN_HEIGHT_LOGICAL: f32 = 420.0;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PhysicalWorkArea {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SettingsScreenSignature {
+    monitor: usize,
+    work_area: PhysicalWorkArea,
+    scale_bits: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SettingsLayoutSnapshot {
+    screen: Option<SettingsScreenSignature>,
+}
+
+impl SettingsLayoutSnapshot {
+    const fn new() -> Self {
+        Self { screen: None }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SettingsGeometry {
+    width: f32,
+    height: f32,
+    minimum_height: f32,
+    x: i32,
+    y: i32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ManualRefreshRequest {
@@ -440,7 +481,8 @@ fn main() -> Result<(), slint::PlatformError> {
         move |tab| {
             if valid_settings_tab(tab) {
                 if let Some(panel) = panel.upgrade() {
-                    panel.set_selected_tab(tab);
+                    // Tab changes reset only the active page's scroll position.
+                    panel.invoke_select_settings_tab(tab);
                 }
             }
         }
@@ -1198,7 +1240,25 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // The flyout starts hidden: run the loop without showing any window
     // (ComponentHandle::run() would show the flyout).
+    let settings_layout_timer = {
+        let panel = settings_window.as_weak();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(500),
+            move || {
+                if let Some(panel) = panel.upgrade() {
+                    if panel.window().is_visible() {
+                        refresh_settings_layout_if_screen_changed(&panel);
+                    }
+                }
+            },
+        );
+        timer
+    };
+
     let result = slint::run_event_loop_until_quit();
+    drop(settings_layout_timer);
     cancellation.cancel();
     if let Some(worker) = worker {
         let _ = worker.join();
@@ -2623,6 +2683,8 @@ fn show_settings_centered(window: &SettingsWindow) {
     {
         window.set_startup_busy(true);
     }
+    // Measure and set the final size before showing to avoid first-open flicker.
+    recalculate_settings_layout(window, true, true);
     let _ = window.show();
     activate_window(window.window());
     let mode = match window.get_theme_kind() {
@@ -2633,13 +2695,16 @@ fn show_settings_centered(window: &SettingsWindow) {
     if !theme::apply_title_bar(window.window(), mode) {
         retry_title_bar(window.as_weak(), mode, 20);
     }
-    place_settings(window);
-    // The final scale factor can arrive a few event-loop turns after show()
-    // (per-monitor DPI); place once more with it.
+    // The window can receive its final per-monitor DPI after it becomes
+    // visible. Recheck once, without resetting a size that still fits.
+    #[cfg(windows)]
     let weak = window.as_weak();
+    #[cfg(windows)]
     slint::Timer::single_shot(Duration::from_millis(150), move || {
-        if let Some(window) = weak.upgrade() {
-            place_settings(&window);
+        if let Some(window) = weak.upgrade()
+            && !settings_user_is_dragging_or_resizing()
+        {
+            recalculate_settings_layout(&window, false, true);
         }
     });
 }
@@ -2672,57 +2737,180 @@ fn activate_window(window: &slint::Window) {
     }
 }
 
-/// Default size at the window's scale, clamped to the work area of the
-/// monitor under the cursor (outer frame included), centred there.
-fn place_settings(window: &SettingsWindow) {
+fn settings_geometry(
+    requested_width: f32,
+    requested_height: f32,
+    screen: SettingsScreenSignature,
+) -> SettingsGeometry {
+    let scale = f32::from_bits(screen.scale_bits).max(0.5);
+    let margin = (SETTINGS_MARGIN_LOGICAL * scale).round() as i32;
+    let caption = (SETTINGS_CAPTION_LOGICAL * scale).round() as i32;
+    let work_width = (screen.work_area.right - screen.work_area.left).max(1);
+    let work_height = (screen.work_area.bottom - screen.work_area.top).max(1);
+    let max_width = (work_width - 2 * margin).max(1) as f32 / scale;
+    let max_height = (work_height - 2 * margin - caption).max(1) as f32 / scale;
+    let width = requested_width.min(max_width).max(1.0);
+    let height = requested_height.min(max_height).max(1.0);
+    let minimum_height = SETTINGS_MIN_HEIGHT_LOGICAL.min(height);
+    let physical_width = (width * scale).round() as i32;
+    let physical_height = (height * scale).round() as i32;
+    let x = screen.work_area.left + ((work_width - physical_width).max(0) / 2);
+    let y = screen.work_area.top + ((work_height - physical_height - caption).max(0) / 2);
+    SettingsGeometry {
+        width,
+        height,
+        minimum_height,
+        x,
+        y,
+    }
+}
+
+fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, center: bool) {
+    let required_height = window.get_required_settings_height();
     #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::POINT;
-        use windows_sys::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    if let Some(screen) = settings_screen_signature(window, use_common_size) {
+        let (requested_width, requested_height) = if use_common_size {
+            (window.get_default_width(), required_height)
+        } else {
+            let scale = f32::from_bits(screen.scale_bits);
+            let current = window.window().size().to_logical(scale);
+            (current.width, current.height)
         };
-        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-        let mut cursor = POINT { x: 0, y: 0 };
-        let mut monitor_info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            rcMonitor: Default::default(),
-            rcWork: Default::default(),
-            dwFlags: 0,
+        let geometry = settings_geometry(requested_width, requested_height, screen);
+        window.set_settings_window_height(geometry.height);
+        window.set_minimum_settings_window_height(geometry.minimum_height);
+
+        let logical_size = slint::LogicalSize::new(geometry.width, geometry.height);
+        let current = window
+            .window()
+            .size()
+            .to_logical(f32::from_bits(screen.scale_bits));
+        if (current.width - geometry.width).abs() > 0.5
+            || (current.height - geometry.height).abs() > 0.5
+        {
+            window.window().set_size(logical_size);
+        }
+        let position = if center {
+            slint::PhysicalPosition::new(geometry.x, geometry.y)
+        } else {
+            clamp_settings_position(window, screen, geometry)
         };
-        unsafe {
-            if GetCursorPos(&mut cursor) != 0 {
-                let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-                if !monitor.is_null() && GetMonitorInfoW(monitor, &mut monitor_info) != 0 {
-                    let area = monitor_info.rcWork;
-                    // Keep the whole window inside the work area on small
-                    // screens or high DPI; the content scrolls when shortened.
-                    // `size()` is the client area; reserve the native title bar
-                    // (~32 logical px) so the outer window also fits.
-                    let scale = window.window().scale_factor();
-                    let margin = (16.0 * scale).round() as i32;
-                    let caption = (32.0 * scale).round() as i32;
-                    let max_width = (area.right - area.left - 2 * margin).max(1) as u32;
-                    let max_height = (area.bottom - area.top - 2 * margin - caption).max(1) as u32;
-                    // Open at the default size (fits the whole About page)
-                    // at the window's actual scale, never larger than the
-                    // work area. `size()` can still report the pre-show size
-                    // here, so it is computed from the logical default.
-                    let logical = slint::LogicalSize::new(
-                        window.get_default_width().min(max_width as f32 / scale),
-                        window.get_default_height().min(max_height as f32 / scale),
-                    );
-                    window.window().set_size(logical);
-                    let size = logical.to_physical(scale);
-                    let x = area.left + ((area.right - area.left - size.width as i32) / 2);
-                    let y = area.top
-                        + ((area.bottom - area.top - size.height as i32 - caption) / 2).max(0);
-                    window
-                        .window()
-                        .set_position(slint::PhysicalPosition::new(x, y));
-                }
-            }
+        if window.window().position() != position {
+            window.window().set_position(position);
+        }
+        if let Ok(mut layout) = SETTINGS_LAYOUT.lock() {
+            layout.screen = Some(screen);
         }
     }
+    #[cfg(not(windows))]
+    if use_common_size {
+        window.set_settings_window_height(required_height);
+    }
+}
+
+#[cfg(windows)]
+fn clamp_settings_position(
+    window: &SettingsWindow,
+    screen: SettingsScreenSignature,
+    geometry: SettingsGeometry,
+) -> slint::PhysicalPosition {
+    let scale = f32::from_bits(screen.scale_bits);
+    let width = (geometry.width * scale).round() as i32;
+    let height = (geometry.height * scale).round() as i32;
+    let caption = (SETTINGS_CAPTION_LOGICAL * scale).round() as i32;
+    let left = screen.work_area.left + (SETTINGS_MARGIN_LOGICAL * scale).round() as i32;
+    let top = screen.work_area.top + (SETTINGS_MARGIN_LOGICAL * scale).round() as i32;
+    let max_x = (screen.work_area.right - width - (SETTINGS_MARGIN_LOGICAL * scale).round() as i32)
+        .max(left);
+    let max_y = (screen.work_area.bottom
+        - height
+        - caption
+        - (SETTINGS_MARGIN_LOGICAL * scale).round() as i32)
+        .max(top);
+    let current = window.window().position();
+    slint::PhysicalPosition::new(current.x.clamp(left, max_x), current.y.clamp(top, max_y))
+}
+
+#[cfg(windows)]
+fn settings_screen_signature(
+    window: &SettingsWindow,
+    use_cursor: bool,
+) -> Option<SettingsScreenSignature> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+    };
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let monitor = unsafe {
+        if use_cursor {
+            let mut cursor = POINT { x: 0, y: 0 };
+            (GetCursorPos(&mut cursor) != 0)
+                .then(|| MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST))?
+        } else {
+            let handle = window.window().window_handle();
+            let Ok(handle) = handle.window_handle() else {
+                return None;
+            };
+            let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+                return None;
+            };
+            MonitorFromWindow(handle.hwnd.get() as _, MONITOR_DEFAULTTONEAREST)
+        }
+    };
+    if monitor.is_null() {
+        return None;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT::default(),
+        rcWork: RECT::default(),
+        dwFlags: 0,
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return None;
+    }
+    let mut dpi_x = 96;
+    let mut dpi_y = 96;
+    let hr = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    let scale = if hr >= 0 {
+        dpi_x as f32 / 96.0
+    } else {
+        window.window().scale_factor()
+    };
+    Some(SettingsScreenSignature {
+        monitor: monitor as usize,
+        work_area: PhysicalWorkArea {
+            left: info.rcWork.left,
+            top: info.rcWork.top,
+            right: info.rcWork.right,
+            bottom: info.rcWork.bottom,
+        },
+        scale_bits: scale.to_bits(),
+    })
+}
+
+#[cfg(windows)]
+fn refresh_settings_layout_if_screen_changed(window: &SettingsWindow) {
+    // If the user is dragging or resizing the native window between monitors,
+    // defer bounds adjustment until release so the timer cannot fight them.
+    if settings_user_is_dragging_or_resizing() {
+        return;
+    }
+    if let Some(current) = settings_screen_signature(window, false) {
+        let previous = SETTINGS_LAYOUT.lock().ok().and_then(|layout| layout.screen);
+        if previous != Some(current) {
+            recalculate_settings_layout(window, false, false);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn settings_user_is_dragging_or_resizing() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 }
 }
 
 /// The native window can be created a few event-loop turns after show();
@@ -2887,6 +3075,236 @@ fn now_unix() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use super::{PhysicalWorkArea, SettingsScreenSignature, settings_geometry};
+
+    #[test]
+    fn slint_keeps_inactive_settings_pages_measurable_at_their_actual_widths() {
+        i_slint_backend_testing::init_no_event_loop();
+        let window = SettingsWindow::new().unwrap();
+        window.set_storage_warning("storage warning ".repeat(18).into());
+        window.set_alerts_description("notification description ".repeat(12).into());
+        window.set_legal_note("legal note ".repeat(120).into());
+
+        let general = window.get_general_page_required_height();
+        let notifications = window.get_notifications_page_required_height();
+        let about = window.get_about_page_required_height();
+        let required = window.get_required_settings_height();
+
+        assert!(window.get_settings_content_width() > 0.0);
+        assert!(
+            general > 0.0,
+            "general page has a non-zero measured width/height"
+        );
+        assert!(notifications > 0.0);
+        assert!(about > 0.0);
+        assert_ne!(
+            general, notifications,
+            "test pages must have distinct heights"
+        );
+        assert_ne!(
+            notifications, about,
+            "test pages must have distinct heights"
+        );
+        assert_ne!(general, about, "test pages must have distinct heights");
+        assert_eq!(required, general.max(notifications).max(about));
+        assert_eq!(about, required, "long About copy is the tallest page");
+
+        window.set_settings_window_height(required);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(720.0, required));
+        let stable_size = window.window().size();
+
+        for selected_tab in 0..3 {
+            window.set_selected_tab(selected_tab);
+            assert_eq!(window.get_general_page_required_height(), general);
+            assert_eq!(
+                window.get_notifications_page_required_height(),
+                notifications
+            );
+            assert_eq!(window.get_about_page_required_height(), about);
+            assert_eq!(window.get_required_settings_height(), required);
+            assert_eq!(window.window().size(), stable_size);
+        }
+
+        // N1: the full About page scrolls inside a constrained viewport,
+        // while the Window still retains the maximum height for all pages.
+        let constrained_viewport = 420.0;
+        window.set_settings_window_height(constrained_viewport);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(720.0, constrained_viewport));
+        window.invoke_select_settings_tab(2);
+        assert_eq!(window.get_active_page_required_height(), about);
+        assert_eq!(
+            window.get_settings_scroll_content_height(),
+            about.max(constrained_viewport)
+        );
+        assert_eq!(window.get_required_settings_height(), required);
+        window.invoke_scroll_settings_to_bottom();
+        assert!(window.get_settings_scroll_y() < 0.0);
+        let about_scrolled_window_size = window.window().size();
+
+        window.invoke_select_settings_tab(0);
+        assert_eq!(window.get_settings_scroll_y(), 0.0);
+        assert_eq!(window.get_active_page_required_height(), general);
+        assert_eq!(
+            window.get_settings_scroll_content_height(),
+            general.max(constrained_viewport)
+        );
+        assert!(window.get_settings_scroll_content_height() < about);
+        assert_eq!(window.get_required_settings_height(), required);
+        assert_eq!(window.window().size(), about_scrolled_window_size);
+
+        // Simulate a user-adjusted native size, then a setting/language/content
+        // change. None of these UI updates may overwrite that manual size.
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(720.0, required - 24.0));
+        let manually_resized_size = window.window().size();
+        window.set_alerts_enabled(!window.get_alerts_enabled());
+        window.set_legal_note("short legal note".into());
+        assert!(window.get_required_settings_height() < required);
+        let required_after_content_change = window.get_required_settings_height();
+        assert_eq!(window.window().size(), manually_resized_size);
+
+        // Reserve the status row and action row for the largest update state.
+        window.set_update_status("update available: version 0.3.1".into());
+        window.set_update_available(true);
+        window.set_update_release_visible(true);
+        assert_eq!(window.window().size(), manually_resized_size);
+        assert_eq!(
+            window.get_required_settings_height(),
+            required_after_content_change
+        );
+
+        // N2: the native size survives a DPI change when it fits the new work
+        // area; only an oversized manual width/height is clamped.
+        let fitting_size = window.window().size().to_logical(1.25);
+        let changed_dpi_screen = screen(1.25);
+        let retained =
+            settings_geometry(fitting_size.width, fitting_size.height, changed_dpi_screen);
+        assert_eq!(retained.width, fitting_size.width);
+        assert_eq!(retained.height, fitting_size.height);
+        assert_eq!(
+            (retained.width * 1.25).round() as u32,
+            manually_resized_size.width
+        );
+        assert_eq!(
+            (retained.height * 1.25).round() as u32,
+            manually_resized_size.height
+        );
+        assert_eq!(window.window().size(), manually_resized_size);
+
+        let constrained_screen = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1300,
+                bottom: 800,
+            },
+            ..changed_dpi_screen
+        };
+        let clamped = settings_geometry(1100.0, 700.0, constrained_screen);
+        assert_eq!(clamped.width, (1300.0 - 2.0 * 16.0 * 1.25) / 1.25);
+        assert_eq!(
+            clamped.height,
+            (800.0 - 2.0 * 16.0 * 1.25 - 32.0 * 1.25) / 1.25
+        );
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(1100.0, 700.0));
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(clamped.width, clamped.height));
+        assert_eq!(window.window().size().width as f32, clamped.width);
+        assert_eq!(window.window().size().height as f32, clamped.height);
+    }
+
+    fn screen(scale: f32) -> SettingsScreenSignature {
+        SettingsScreenSignature {
+            monitor: 7,
+            // A 1920x1040 work area represents a 1080px display with the
+            // taskbar excluded; negative X models a monitor left of primary.
+            work_area: PhysicalWorkArea {
+                left: -1920,
+                top: 0,
+                right: 0,
+                bottom: 1040,
+            },
+            scale_bits: scale.to_bits(),
+        }
+    }
+
+    #[test]
+    fn settings_height_is_capped_to_taskbar_excluded_work_area_at_common_dpis() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let screen = screen(scale);
+            let geometry = settings_geometry(720.0, 1200.0, screen);
+            let allowed_physical_height =
+                1040 - 2 * (16.0 * scale).round() as i32 - (32.0 * scale).round() as i32;
+            assert!(geometry.height <= allowed_physical_height as f32 / scale + 0.01);
+            assert!(geometry.height >= geometry.minimum_height);
+            assert!(geometry.x >= -1920);
+            assert!(geometry.x < 0);
+            assert!(geometry.y >= 0);
+        }
+    }
+
+    #[test]
+    fn fitting_manual_size_is_preserved_across_dpi_and_only_oversized_axes_clamp() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let screen = SettingsScreenSignature {
+                work_area: PhysicalWorkArea {
+                    left: -3840,
+                    top: 0,
+                    right: 0,
+                    bottom: 2160,
+                },
+                ..screen(scale)
+            };
+            let geometry = settings_geometry(900.0, 700.0, screen);
+            assert_eq!(geometry.width, 900.0);
+            assert_eq!(geometry.height, 700.0);
+        }
+
+        let wide_but_short = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 800,
+            },
+            ..screen(1.0)
+        };
+        let height_only = settings_geometry(800.0, 900.0, wide_but_short);
+        assert_eq!(height_only.width, 800.0);
+        assert!(height_only.height < 900.0);
+
+        let narrow_but_tall = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1000,
+                bottom: 1400,
+            },
+            ..screen(1.0)
+        };
+        let width_only = settings_geometry(1100.0, 700.0, narrow_but_tall);
+        assert!(width_only.width < 1100.0);
+        assert_eq!(width_only.height, 700.0);
+    }
+
+    #[test]
+    fn settings_geometry_keeps_content_scrollable_on_short_work_areas() {
+        let mut screen = screen(2.0);
+        screen.work_area.bottom = 600;
+        let geometry = settings_geometry(720.0, 900.0, screen);
+        assert!(geometry.height < 900.0);
+        assert_eq!(geometry.minimum_height, geometry.height);
+        assert!(geometry.y + (geometry.height * 2.0).round() as i32 + 64 <= 600);
+    }
+
     use super::*;
 
     #[test]
