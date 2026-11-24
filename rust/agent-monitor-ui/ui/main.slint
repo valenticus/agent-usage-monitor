@@ -365,6 +365,7 @@ component HeaderButton inherits Rectangle {
 
 component SettingsButton inherits Rectangle {
     in property <string> text;
+    in property <bool> enabled: true;
     in property <bool> external: false;
     in property <bool> small: false;
     callback clicked();
@@ -402,6 +403,7 @@ component SettingsButton inherits Rectangle {
         }
     }
     touch := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
@@ -1420,6 +1422,18 @@ export component SettingsWindow inherits Window {
     in property <string> about-feature-tray: "";
     in property <string> about-feature-local: "";
     in property <string> about-feature-agents: "";
+    in property <string> update-status: "";
+    in property <string> update-check-label: "";
+    in property <string> update-release-label: "";
+    in property <string> update-distribution-label: "";
+    in property <bool> update-checking: false;
+    in property <bool> update-available: false;
+    in property <bool> update-release-visible: false;
+    in property <bool> update-check-available: true;
+    in property <bool> automatic-update-checks-enabled: false;
+    in property <string> update-auto-label: "";
+    in property <string> update-auto-description: "";
+    in property <string> update-store-button-label: "";
     in property <string> codex-source: "";
     in property <string> claude-source: "";
     in property <string> legal-note: "";
@@ -1444,6 +1458,9 @@ export component SettingsWindow inherits Window {
     callback show-test-notification();
     callback open-repository();
     callback open-issues();
+    callback check-for-updates();
+    callback open-update-release();
+    callback toggle-automatic-update-checks();
     callback close-settings();
 
     title: "AgentUsageMonitor — " + root.title-label;
@@ -1921,6 +1938,52 @@ export component SettingsWindow inherits Window {
                             StatusChip {
                                 text: root.claude-state;
                                 level: root.claude-state-level;
+                            }
+                        }
+                    }
+                }
+                Rectangle { height: 16px; }
+                Text {
+                    text: root.update-distribution-label;
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 8px; }
+                Text {
+                    text: root.update-status;
+                    visible: root.update-status != "";
+                    font-size: 13px;
+                    color: root.update-available ? Theme.accent : Theme.text-secondary;
+                    wrap: word-wrap;
+                }
+                VerticalLayout {
+                    HorizontalLayout {
+                        height: 32px;
+                        spacing: 8px;
+                        if root.update-check-available: SettingsButton {
+                            text: root.update-check-label;
+                            enabled: !root.update-checking;
+                            clicked => { root.check-for-updates(); }
+                        }
+                        if root.update-release-visible: SettingsButton {
+                            text: root.update-release-label;
+                            external: true;
+                            clicked => { root.open-update-release(); }
+                        }
+                    }
+                    if root.store-build || !root.update-check-available: Rectangle {
+                        height: 32px;
+                        Text { text: root.update-store-button-label; color: Theme.text-secondary; }
+                    }
+                    Rectangle { height: 8px; }
+                    if !root.store-build && root.update-check-available: Card {
+                        SettingsRow {
+                            title: root.update-auto-label;
+                            description: root.update-auto-description;
+                            ToggleSwitch {
+                                checked: root.automatic-update-checks-enabled;
+                                toggled => { root.toggle-automatic-update-checks(); }
                             }
                         }
                     }

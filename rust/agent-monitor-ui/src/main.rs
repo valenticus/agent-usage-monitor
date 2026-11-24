@@ -16,13 +16,14 @@ mod settings;
 mod theme;
 mod tray;
 mod tray_menu;
+mod update_checker;
 mod winrt;
 
 slint::include_modules!();
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -36,6 +37,7 @@ use localization::Locale;
 use settings::{AppSettings, Language, ThemeMode};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use update_checker::{Distribution, UiState, UpdateStatus};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Delay after a Windows resume before the background refresh, so networking
@@ -47,6 +49,8 @@ type SharedLocale = Arc<Mutex<Locale>>;
 type SharedSnapshot = Arc<Mutex<adapter::UiSnapshot>>;
 type SharedAlerts = Arc<Mutex<AlertRuntime>>;
 static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
+static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus::Idle);
+static SETTINGS_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ManualRefreshRequest {
@@ -364,6 +368,9 @@ fn main() -> Result<(), slint::PlatformError> {
         &initial_snapshot,
         now_unix(),
     );
+    let update_state = Arc::new(Mutex::new(UiState::default()));
+    let update_checking = Arc::new(AtomicBool::new(false));
+    let update_distribution = Distribution::current();
 
     let (settings_sender, settings_receiver) = watch::channel(lock_settings(&config));
     window.on_open_settings({
@@ -687,6 +694,165 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     settings_window.on_open_repository(open_repository);
     settings_window.on_open_issues(open_issues);
+    settings_window.set_update_distribution_label(
+        update_checker::distribution_label(update_distribution, lock_locale(&locale)).into(),
+    );
+    settings_window.set_update_check_label(lock_locale(&locale).settings().update_check.into());
+    settings_window.set_update_release_label(lock_locale(&locale).settings().update_release.into());
+    let labels = lock_locale(&locale).settings();
+    settings_window.set_update_auto_label(labels.update_auto.into());
+    settings_window.set_update_auto_description(labels.update_auto_description.into());
+    settings_window.set_automatic_update_checks_enabled(
+        lock_settings(&config).automatic_update_checks_enabled,
+    );
+    settings_window.set_update_check_available(update_distribution.can_offer_github_update());
+    settings_window.set_update_store_button_label(labels.update_store.into());
+    if update_distribution == Distribution::Unknown {
+        settings_window.set_update_store_button_label(labels.update_unknown.into());
+    }
+    if update_distribution == Distribution::MicrosoftStore
+        || update_distribution == Distribution::Unknown
+    {
+        settings_window.set_update_check_label(labels.update_store.into());
+    }
+    settings_window.on_open_update_release({
+        let state = update_state.clone();
+        move || {
+            if let Some(url) = state
+                .lock()
+                .ok()
+                .and_then(|state| state.release_url.clone())
+            {
+                open_url(&url);
+            }
+        }
+    });
+    settings_window.on_toggle_automatic_update_checks({
+        let context = callback_context(
+            &config,
+            &settings_path,
+            &locale,
+            &settings_sender,
+            &window,
+            &settings_window,
+            &current,
+        );
+        move || {
+            save_setting_change(&context, |settings| {
+                settings.automatic_update_checks_enabled =
+                    !settings.automatic_update_checks_enabled;
+            })
+        }
+    });
+    settings_window.on_check_for_updates({
+        let panel = settings_window.as_weak();
+        let state = update_state.clone();
+        let in_flight = update_checking.clone();
+        let distribution = update_distribution;
+        let locale = locale.clone();
+        let manual_config = config.clone();
+        let manual_settings_path = settings_path.clone();
+        let manual_settings_sender = settings_sender.clone();
+        move || {
+            if distribution.can_offer_github_update() {
+                request_update_check(
+                    panel.clone(),
+                    state.clone(),
+                    in_flight.clone(),
+                    distribution,
+                    locale.clone(),
+                    Some((
+                        manual_config.clone(),
+                        manual_settings_path.clone(),
+                        manual_settings_sender.clone(),
+                    )),
+                );
+            }
+        }
+    });
+    let update_timer = slint::Timer::default();
+    if update_distribution.can_offer_github_update() && !demo_mode {
+        let panel = settings_window.as_weak();
+        let state = update_state.clone();
+        let in_flight = update_checking.clone();
+        let update_config = config.clone();
+        let update_settings_path = settings_path.clone();
+        let settings_sender = settings_sender.clone();
+        let locale = locale.clone();
+        let startup_panel = settings_window.as_weak();
+        let startup_state = update_state.clone();
+        let startup_in_flight = update_checking.clone();
+        let startup_config = config.clone();
+        let startup_settings_path = settings_path.clone();
+        let startup_settings_sender = settings_sender.clone();
+        let startup_locale = locale.clone();
+        update_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(60),
+            move || {
+                let due = {
+                    let settings = lock_settings(&update_config);
+                    settings.automatic_update_checks_enabled
+                        && update_checker::automatic_check_due(
+                            now_unix(),
+                            settings.last_update_check_success_unix,
+                            settings.last_automatic_update_check_attempt_unix,
+                        )
+                };
+                if due {
+                    record_automatic_check_attempt(
+                        &update_config,
+                        &update_settings_path,
+                        &settings_sender,
+                    );
+                    request_update_check(
+                        panel.clone(),
+                        state.clone(),
+                        in_flight.clone(),
+                        update_distribution,
+                        locale.clone(),
+                        Some((
+                            update_config.clone(),
+                            update_settings_path.clone(),
+                            settings_sender.clone(),
+                        )),
+                    );
+                }
+            },
+        );
+        slint::Timer::single_shot(Duration::from_secs(3), {
+            move || {
+                let due = {
+                    let settings = lock_settings(&startup_config);
+                    settings.automatic_update_checks_enabled
+                        && update_checker::automatic_check_due(
+                            now_unix(),
+                            settings.last_update_check_success_unix,
+                            settings.last_automatic_update_check_attempt_unix,
+                        )
+                };
+                if due {
+                    record_automatic_check_attempt(
+                        &startup_config,
+                        &startup_settings_path,
+                        &startup_settings_sender,
+                    );
+                    request_update_check(
+                        startup_panel,
+                        startup_state,
+                        startup_in_flight,
+                        update_distribution,
+                        startup_locale,
+                        Some((
+                            startup_config,
+                            startup_settings_path,
+                            startup_settings_sender,
+                        )),
+                    );
+                }
+            }
+        });
+    }
 
     #[cfg(windows)]
     let (native_tray, tray_events) = match tray::NativeTray::start(lock_locale(&locale)) {
@@ -1138,6 +1304,7 @@ fn callback_context(
 }
 
 fn save_setting_change(context: &CallbackContext, change: impl FnOnce(&mut AppSettings)) {
+    let _mutation = settings_mutation_guard();
     let (config, path, ..) = context;
     let mut updated = lock_settings(config);
     change(&mut updated);
@@ -1171,6 +1338,7 @@ fn claude_bridge_argument() -> bool {
 /// Store build only: flip the persisted listener opt-in. The pipe worker
 /// follows the published setting; the UI snapshot reflects it immediately.
 fn toggle_claude_bridge_listener(context: &CallbackContext, bridge_argument: bool) {
+    let _mutation = settings_mutation_guard();
     if !packaged::is_packaged() {
         return;
     }
@@ -1264,6 +1432,7 @@ async fn run_bridge_lifecycle<L, F>(
 
 /// Store build only: the explicit one-time import from the EXE build.
 fn import_exe_settings(context: &CallbackContext) {
+    let _mutation = settings_mutation_guard();
     // Needs the Store build's own persistent folder; never imports into memory only.
     let Some(destination) = settings::settings_directory().filter(|_| packaged::is_packaged())
     else {
@@ -1338,6 +1507,7 @@ fn apply_packaged_startup_result(
     request: autostart::StartupRequest,
     result: autostart::StartupResult,
 ) {
+    let _mutation = settings_mutation_guard();
     let (config, path, ..) = context;
     let mut updated = lock_settings(config);
     match &result {
@@ -1359,6 +1529,7 @@ fn apply_packaged_startup_result(
 }
 
 fn toggle_autostart(context: &CallbackContext) {
+    let _mutation = settings_mutation_guard();
     if packaged::is_packaged() {
         let controller = autostart::packaged_controller();
         let request = autostart::toggle_request(controller.last().as_ref());
@@ -1497,6 +1668,7 @@ fn launch_reconcile_writes_registration(state: packaged::PackageState) -> bool {
 }
 
 fn reconcile_autostart(config: &SharedSettings, path: &Path, claude_bridge: bool) {
+    let _mutation = settings_mutation_guard();
     if packaged::is_packaged() {
         // Read later by the StartupTask controller, off the UI thread.
         return;
@@ -2123,6 +2295,33 @@ fn update_settings_window(
     window.set_app_version(version.as_str().into());
     window.set_about_product("AgentUsageMonitor".into());
     window.set_about_tagline(labels.about_tagline.into());
+    let distribution = Distribution::current();
+    window.set_update_check_label(if distribution == Distribution::MicrosoftStore {
+        labels.update_store.into()
+    } else {
+        labels.update_check.into()
+    });
+    let update_status = lock_update_status();
+    window.set_update_checking(matches!(update_status, UpdateStatus::Checking));
+    set_update_status_text(window, labels, &update_status);
+    window.set_update_auto_label(labels.update_auto.into());
+    window.set_update_auto_description(labels.update_auto_description.into());
+    window.set_automatic_update_checks_enabled(settings.automatic_update_checks_enabled);
+    window.set_update_release_label(labels.update_release.into());
+    window.set_update_distribution_label(
+        update_checker::distribution_label(distribution, locale).into(),
+    );
+    window.set_update_check_available(distribution.can_offer_github_update());
+    window.set_update_store_button_label(if distribution == Distribution::MicrosoftStore {
+        labels.update_store.into()
+    } else {
+        labels.update_unknown.into()
+    });
+    if distribution == Distribution::MicrosoftStore {
+        window.set_update_check_label(labels.update_store.into());
+    } else {
+        window.set_update_check_label(labels.update_check.into());
+    }
     window.set_about_version(format!("{}  {}", labels.version, env!("CARGO_PKG_VERSION")).into());
     window.set_about_author(format!("{}  Valentyn Fetisov", labels.author).into());
     window.set_about_repository(labels.repository.into());
@@ -2136,6 +2335,148 @@ fn update_settings_window(
     window.set_claude_source(labels.claude_source.into());
     window.set_legal_note(labels.legal.into());
     window.set_copyright_line(format!("© 2026 Valentyn Fetisov · {}", labels.license).into());
+}
+
+fn request_update_check(
+    panel: slint::Weak<SettingsWindow>,
+    state: Arc<Mutex<UiState>>,
+    in_flight: Arc<AtomicBool>,
+    distribution: Distribution,
+    locale: SharedLocale,
+    persistence: Option<(SharedSettings, PathBuf, watch::Sender<AppSettings>)>,
+) {
+    if !distribution.can_offer_github_update() || in_flight.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Ok(mut state) = state.lock() {
+        state.update_available = false;
+    }
+    set_update_status(UpdateStatus::Checking);
+    if let Some(panel) = panel.upgrade() {
+        panel.set_update_checking(true);
+        panel.set_update_available(false);
+        panel.set_update_release_visible(false);
+        panel.set_update_status(lock_locale(&locale).settings().update_checking.into());
+    }
+    thread::spawn(move || {
+        let result = update_checker::check_latest();
+        in_flight.store(false, Ordering::Release);
+        let update_status = match &result {
+            Ok(info) if info.update_available => UpdateStatus::Available {
+                current: info.current_version.clone(),
+                latest: info.latest_version.clone(),
+            },
+            Ok(_) => UpdateStatus::Current,
+            Err(update_checker::CheckError::Offline) => UpdateStatus::Offline,
+            Err(update_checker::CheckError::Http(code)) => UpdateStatus::Http(*code),
+            Err(update_checker::CheckError::InvalidMetadata) => UpdateStatus::Invalid,
+            Err(update_checker::CheckError::Timeout) => UpdateStatus::Timeout,
+        };
+        let url = result
+            .as_ref()
+            .ok()
+            .filter(|info| info.update_available)
+            .map(|info| info.release_url.clone());
+        let available = result.as_ref().is_ok_and(|info| info.update_available);
+        if let Ok(mut model) = state.lock() {
+            model.release_url = url;
+            model.update_available = available;
+        }
+        set_update_status(update_status.clone());
+        if result.is_ok() {
+            if let Some((config, path, sender)) = persistence {
+                let _mutation = settings_mutation_guard();
+                let mut settings = lock_settings(&config);
+                settings.last_update_check_success_unix = Some(now_unix());
+                let save_result = settings::save(&path, &settings);
+                if let Ok(mut current) = config.lock() {
+                    *current = settings.clone();
+                }
+                let _ = sender.send(settings);
+                if let Err(error) = save_result {
+                    eprintln!("Could not persist successful update check timestamp: {error}");
+                }
+            }
+        }
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(panel) = panel.upgrade() {
+                let labels = lock_locale(&locale).settings();
+                panel.set_update_release_label(labels.update_release.into());
+                panel.set_update_distribution_label(
+                    update_checker::distribution_label(distribution, lock_locale(&locale)).into(),
+                );
+                panel.set_update_check_label(if distribution == Distribution::MicrosoftStore {
+                    labels.update_store.into()
+                } else {
+                    labels.update_check.into()
+                });
+                panel.set_update_checking(false);
+                panel.set_update_available(available && distribution.can_offer_github_update());
+                panel.set_update_release_visible(
+                    available && distribution.can_offer_github_update(),
+                );
+                set_update_status_text(&panel, labels, &update_status);
+            }
+        });
+    });
+}
+
+fn lock_update_status() -> UpdateStatus {
+    UPDATE_STATUS
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_default()
+}
+
+fn set_update_status(status: UpdateStatus) {
+    if let Ok(mut current) = UPDATE_STATUS.lock() {
+        *current = status;
+    }
+}
+
+fn record_automatic_check_attempt(
+    config: &SharedSettings,
+    path: &Path,
+    sender: &watch::Sender<AppSettings>,
+) {
+    let _mutation = settings_mutation_guard();
+    let mut settings = lock_settings(config);
+    settings.last_automatic_update_check_attempt_unix = Some(now_unix());
+    let save_result = settings::save(path, &settings);
+    if let Ok(mut current) = config.lock() {
+        *current = settings.clone();
+    }
+    let _ = sender.send(settings);
+    if let Err(error) = save_result {
+        eprintln!("Could not persist automatic update check attempt: {error}");
+    }
+}
+
+fn settings_mutation_guard() -> std::sync::MutexGuard<'static, ()> {
+    SETTINGS_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn set_update_status_text(
+    window: &SettingsWindow,
+    labels: localization::SettingsStrings,
+    status: &UpdateStatus,
+) {
+    use slint::SharedString;
+    let text: SharedString = match status {
+        UpdateStatus::Idle => "".into(),
+        UpdateStatus::Checking => labels.update_checking.into(),
+        UpdateStatus::Available { current, latest } => {
+            format!("{}: v{} → v{}", labels.update_available, current, latest).into()
+        }
+        UpdateStatus::Current => labels.update_current.into(),
+        UpdateStatus::Offline => labels.update_offline.into(),
+        UpdateStatus::Http(code) => format!("{} ({code})", labels.update_http).into(),
+        UpdateStatus::Invalid => labels.update_invalid.into(),
+        UpdateStatus::Timeout => labels.update_timeout.into(),
+    };
+    window.set_update_status(text);
 }
 
 /// Last read Claude Code statusLine state; read when Settings opens, never
@@ -2599,6 +2940,39 @@ mod tests {
         ));
         assert_eq!(receiver.try_recv().unwrap().id, 1);
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn settings_mutations_preserve_concurrent_independent_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let settings = Arc::new(Mutex::new(AppSettings::default()));
+        let provider_settings = settings.clone();
+        let provider_path = path.clone();
+        let provider = thread::spawn(move || {
+            let _mutation = settings_mutation_guard();
+            let mut updated = lock_settings(&provider_settings);
+            updated.codex_enabled = false;
+            settings::save(&provider_path, &updated).unwrap();
+            *provider_settings.lock().unwrap() = updated;
+        });
+        let update_settings = settings.clone();
+        let update_path = path.clone();
+        let update_checks = thread::spawn(move || {
+            let _mutation = settings_mutation_guard();
+            let mut updated = lock_settings(&update_settings);
+            updated.automatic_update_checks_enabled = true;
+            settings::save(&update_path, &updated).unwrap();
+            *update_settings.lock().unwrap() = updated;
+        });
+        provider.join().unwrap();
+        update_checks.join().unwrap();
+
+        let actual = settings.lock().unwrap().clone();
+        assert!(!actual.codex_enabled);
+        assert!(actual.automatic_update_checks_enabled);
+        let persisted = settings::load(&path).unwrap();
+        assert_eq!(persisted, actual);
     }
 
     #[test]
