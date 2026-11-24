@@ -49,6 +49,10 @@ type SharedLocale = Arc<Mutex<Locale>>;
 type SharedSnapshot = Arc<Mutex<adapter::UiSnapshot>>;
 type SharedAlerts = Arc<Mutex<AlertRuntime>>;
 static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
+static QA_ISOLATED: AtomicBool = AtomicBool::new(false);
+#[cfg(debug_assertions)]
+static QA_ABOUT_PREVIEW: std::sync::Mutex<Option<AboutPreview>> = std::sync::Mutex::new(None);
+static SETTINGS_OPEN_PENDING: AtomicBool = AtomicBool::new(false);
 static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus::Idle);
 static SETTINGS_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SETTINGS_LAYOUT: std::sync::Mutex<SettingsLayoutSnapshot> =
@@ -57,6 +61,55 @@ static SETTINGS_LAYOUT: std::sync::Mutex<SettingsLayoutSnapshot> =
 const SETTINGS_MARGIN_LOGICAL: f32 = 16.0;
 const SETTINGS_CAPTION_LOGICAL: f32 = 32.0;
 const SETTINGS_MIN_HEIGHT_LOGICAL: f32 = 420.0;
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+struct AboutPreview {
+    distribution: Distribution,
+    status: AboutPreviewStatus,
+}
+
+#[cfg(any(debug_assertions, test))]
+#[derive(Debug, Clone, Copy)]
+enum AboutPreviewStatus {
+    Idle,
+    Available,
+    Long,
+    Offline,
+    Http,
+    Invalid,
+}
+
+#[cfg(debug_assertions)]
+impl AboutPreview {
+    fn from_args(args: &[String]) -> Option<Self> {
+        let distribution = match args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--qa-about-distribution="))
+        {
+            Some("portable") => Distribution::GitHubPortable,
+            Some("installer") => Distribution::GitHubInstaller,
+            Some("store") => Distribution::MicrosoftStore,
+            _ => return None,
+        };
+        let status = match args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--qa-about-status="))
+        {
+            Some("available") => AboutPreviewStatus::Available,
+            Some("long") => AboutPreviewStatus::Long,
+            Some("offline") => AboutPreviewStatus::Offline,
+            Some("http") => AboutPreviewStatus::Http,
+            Some("invalid") => AboutPreviewStatus::Invalid,
+            None => AboutPreviewStatus::Idle,
+            _ => return None,
+        };
+        Some(Self {
+            distribution,
+            status,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PhysicalWorkArea {
@@ -274,8 +327,15 @@ struct WorkerUiContext {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let args: Vec<String> = std::env::args().collect();
+    #[cfg(debug_assertions)]
+    let qa_isolated = args.iter().any(|arg| arg == "--qa-isolated");
+    #[cfg(not(debug_assertions))]
+    let qa_isolated = false;
+    QA_ISOLATED.store(qa_isolated, Ordering::Release);
+
     #[cfg(windows)]
-    let _instance_guard = match SingleInstance::acquire() {
+    let _instance_guard = match SingleInstance::acquire(qa_isolated) {
         Ok(Some(guard)) => guard,
         Ok(None) => return Ok(()),
         Err(()) => {
@@ -285,10 +345,9 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     // App identity for toasts (sender name + static AUM icon); per-user only.
     #[cfg(windows)]
-    if let Err(error) = notifications::register_identity() {
+    if !qa_isolated && let Err(error) = notifications::register_identity() {
         eprintln!("NOTIFY: app identity registration failed: {error}");
     }
-    let args: Vec<String> = std::env::args().collect();
     #[cfg(debug_assertions)]
     if let Some(state) = args
         .iter()
@@ -300,6 +359,26 @@ fn main() -> Result<(), slint::PlatformError> {
     let live_mode = args.iter().any(|arg| arg == "--live");
     let empty_mode = args.iter().any(|arg| arg == "--empty");
     let claude_bridge_enabled = args.iter().any(|arg| arg == "--enable-claude-bridge");
+    if qa_isolated && (!empty_mode || live_mode || demo_mode || claude_bridge_enabled) {
+        eprintln!("--qa-isolated requires --empty and cannot use live integrations.");
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
+    if qa_isolated {
+        let preview = AboutPreview::from_args(&args);
+        let has_about_preview_args = args.iter().any(|arg| {
+            arg.starts_with("--qa-about-distribution=") || arg.starts_with("--qa-about-status=")
+        });
+        if has_about_preview_args {
+            let Some(preview) = preview else {
+                eprintln!("Invalid About QA preview arguments.");
+                return Ok(());
+            };
+            if let Ok(mut current) = QA_ABOUT_PREVIEW.lock() {
+                *current = Some(preview);
+            }
+        }
+    }
     if usize::from(demo_mode) + usize::from(live_mode) + usize::from(empty_mode) > 1
         || (claude_bridge_enabled && (demo_mode || empty_mode))
     {
@@ -332,7 +411,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let config: SharedSettings = Arc::new(Mutex::new(
         settings::load(&settings_path).unwrap_or_default(),
     ));
-    reconcile_autostart(&config, &settings_path, claude_bridge_enabled);
+    if !qa_isolated {
+        reconcile_autostart(&config, &settings_path, claude_bridge_enabled);
+    }
     // Debug-only visual review aid: override the theme in memory (never saved).
     #[cfg(debug_assertions)]
     if let Some(theme) = args
@@ -616,18 +697,24 @@ fn main() -> Result<(), slint::PlatformError> {
             controller.submit(request);
         }
     }
-    settings_window.on_toggle_startup({
-        let values = callback_context(
-            &config,
-            &settings_path,
-            &locale,
-            &settings_sender,
-            &window,
-            &settings_window,
-            &current,
-        );
-        move || toggle_autostart(&values)
-    });
+    if !qa_isolated {
+        settings_window.on_toggle_startup({
+            let values = callback_context(
+                &config,
+                &settings_path,
+                &locale,
+                &settings_sender,
+                &window,
+                &settings_window,
+                &current,
+            );
+            move || toggle_autostart(&values)
+        });
+    } else {
+        settings_window.set_startup_state_known(false);
+        settings_window.set_startup_busy(false);
+        settings_window.set_startup_enabled(false);
+    }
     settings_window.on_toggle_alerts({
         let values = callback_context(
             &config,
@@ -748,10 +835,6 @@ fn main() -> Result<(), slint::PlatformError> {
         lock_settings(&config).automatic_update_checks_enabled,
     );
     settings_window.set_update_check_available(update_distribution.can_offer_github_update());
-    settings_window.set_update_store_button_label(labels.update_store.into());
-    if update_distribution == Distribution::Unknown {
-        settings_window.set_update_store_button_label(labels.update_unknown.into());
-    }
     if update_distribution == Distribution::MicrosoftStore
         || update_distribution == Distribution::Unknown
     {
@@ -905,16 +988,18 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     #[cfg(windows)]
-    settings_window.on_show_test_notification({
-        let notifier = native_tray.notifier();
-        let locale = locale.clone();
-        let config = config.clone();
-        move || {
-            let labels = lock_locale(&locale).settings();
-            let duration = lock_settings(&config).popup_duration_seconds;
-            notifier.notify(labels.test_title, labels.test_message, duration);
-        }
-    });
+    if !qa_isolated {
+        settings_window.on_show_test_notification({
+            let notifier = native_tray.notifier();
+            let locale = locale.clone();
+            let config = config.clone();
+            move || {
+                let labels = lock_locale(&locale).settings();
+                let duration = lock_settings(&config).popup_duration_seconds;
+                notifier.notify(labels.test_title, labels.test_message, duration);
+            }
+        });
+    }
     #[cfg(windows)]
     let worker_notifier = Some(native_tray.notifier());
     #[cfg(not(windows))]
@@ -1238,6 +1323,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
+    if qa_isolated {
+        show_settings_centered(&settings_window);
+    }
+
     // The flyout starts hidden: run the loop without showing any window
     // (ComponentHandle::run() would show the flyout).
     let settings_layout_timer = {
@@ -1304,12 +1393,16 @@ struct SingleInstance(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
 impl SingleInstance {
-    fn acquire() -> Result<Option<Self>, ()> {
+    fn acquire(qa_isolated: bool) -> Result<Option<Self>, ()> {
         use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
         use windows_sys::Win32::System::Threading::CreateMutexW;
-        let name: Vec<u16> = "Local\\AgentUsageMonitor.Singleton\0"
-            .encode_utf16()
-            .collect();
+        let name: Vec<u16> = if qa_isolated {
+            "Local\\AgentUsageMonitor.Singleton.QA\0"
+        } else {
+            "Local\\AgentUsageMonitor.Singleton\0"
+        }
+        .encode_utf16()
+        .collect();
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         if handle.is_null() {
             return Err(());
@@ -2152,9 +2245,24 @@ fn update_settings_window(
 ) {
     let labels = locale.settings();
     use slint::SharedString;
+    let production_distribution = Distribution::current();
+    #[cfg(debug_assertions)]
+    let preview = if QA_ISOLATED.load(Ordering::Acquire) {
+        QA_ABOUT_PREVIEW.lock().ok().and_then(|preview| *preview)
+    } else {
+        None
+    };
+    #[cfg(debug_assertions)]
+    let distribution = preview
+        .map(|preview| preview.distribution)
+        .unwrap_or(production_distribution);
+    #[cfg(not(debug_assertions))]
+    let distribution = production_distribution;
     window.set_codex_enabled(settings.codex_enabled);
     window.set_claude_enabled(settings.claude_enabled);
     window.set_claude_cli_refresh_enabled(settings.claude_cli_refresh_enabled);
+    // The QA preview substitutes About-only values. Preserve actual runtime
+    // package identity for every Store-specific Settings control elsewhere.
     window.set_store_build(packaged::is_packaged());
     window.set_claude_bridge_listener_enabled(settings.claude_bridge_listener_enabled);
     window.set_store_import_available(store_import_available());
@@ -2170,7 +2278,14 @@ fn update_settings_window(
     // EXE: one synchronous HKCU `Run` read. MSIX: the StartupTask controller's
     // last result, never a WinRT call on this (UI) thread; a locked task
     // (Windows or policy) is shown with an explanation and is not operable.
-    let startup_row = if packaged::is_packaged() {
+    let startup_row = if QA_ISOLATED.load(Ordering::Acquire) {
+        StartupRow {
+            enabled: false,
+            interactive: false,
+            busy: false,
+            text: StartupText::Normal,
+        }
+    } else if packaged::is_packaged() {
         let controller = autostart::packaged_controller();
         startup_row(controller.last().as_ref(), controller.busy())
     } else {
@@ -2185,15 +2300,19 @@ fn update_settings_window(
     // Debug-only visual review of the ON / unverified states (UI values only;
     // the registry is neither read differently nor changed).
     #[cfg(debug_assertions)]
-    let startup_row = match PREVIEW_STARTUP.get().map(String::as_str) {
-        Some("on") => StartupRow {
-            enabled: true,
-            interactive: true,
-            busy: false,
-            text: StartupText::Normal,
-        },
-        Some("error") => startup_row_error(),
-        _ => startup_row,
+    let startup_row = if QA_ISOLATED.load(Ordering::Acquire) {
+        startup_row
+    } else {
+        match PREVIEW_STARTUP.get().map(String::as_str) {
+            Some("on") => StartupRow {
+                enabled: true,
+                interactive: true,
+                busy: false,
+                text: StartupText::Normal,
+            },
+            Some("error") => startup_row_error(),
+            _ => startup_row,
+        }
     };
     window.set_startup_state_known(startup_row.interactive);
     window.set_startup_busy(startup_row.busy);
@@ -2301,7 +2420,11 @@ fn update_settings_window(
     ));
 
     let section = |value: &str| SharedString::from(value.to_uppercase());
-    window.set_title_label(labels.title.into());
+    window.set_title_label(if QA_ISOLATED.load(Ordering::Acquire) {
+        format!("{} — QA", labels.title).into()
+    } else {
+        labels.title.into()
+    });
     window.set_general_label(labels.general.into());
     window.set_notifications_label(labels.notifications.into());
     window.set_about_label(labels.about.into());
@@ -2355,33 +2478,18 @@ fn update_settings_window(
     window.set_app_version(version.as_str().into());
     window.set_about_product("AgentUsageMonitor".into());
     window.set_about_tagline(labels.about_tagline.into());
-    let distribution = Distribution::current();
-    window.set_update_check_label(if distribution == Distribution::MicrosoftStore {
-        labels.update_store.into()
-    } else {
-        labels.update_check.into()
-    });
     let update_status = lock_update_status();
-    window.set_update_checking(matches!(update_status, UpdateStatus::Checking));
-    set_update_status_text(window, labels, &update_status);
+    configure_about_update_ui(window, distribution, locale, &update_status);
+    #[cfg(debug_assertions)]
+    if let Some(preview) = preview
+        && preview.distribution.can_offer_github_update()
+    {
+        apply_about_preview_status(window, locale, preview.status);
+    }
     window.set_update_auto_label(labels.update_auto.into());
     window.set_update_auto_description(labels.update_auto_description.into());
     window.set_automatic_update_checks_enabled(settings.automatic_update_checks_enabled);
     window.set_update_release_label(labels.update_release.into());
-    window.set_update_distribution_label(
-        update_checker::distribution_label(distribution, locale).into(),
-    );
-    window.set_update_check_available(distribution.can_offer_github_update());
-    window.set_update_store_button_label(if distribution == Distribution::MicrosoftStore {
-        labels.update_store.into()
-    } else {
-        labels.update_unknown.into()
-    });
-    if distribution == Distribution::MicrosoftStore {
-        window.set_update_check_label(labels.update_store.into());
-    } else {
-        window.set_update_check_label(labels.update_check.into());
-    }
     window.set_about_version(format!("{}  {}", labels.version, env!("CARGO_PKG_VERSION")).into());
     window.set_about_author(format!("{}  Valentyn Fetisov", labels.author).into());
     window.set_about_repository(labels.repository.into());
@@ -2395,6 +2503,76 @@ fn update_settings_window(
     window.set_claude_source(labels.claude_source.into());
     window.set_legal_note(labels.legal.into());
     window.set_copyright_line(format!("© 2026 Valentyn Fetisov · {}", labels.license).into());
+}
+
+fn configure_about_update_ui(
+    window: &SettingsWindow,
+    distribution: Distribution,
+    locale: Locale,
+    update_status: &UpdateStatus,
+) {
+    let labels = locale.settings();
+    window.set_update_check_label(if distribution == Distribution::MicrosoftStore {
+        labels.update_store.into()
+    } else {
+        labels.update_check.into()
+    });
+    window.set_update_distribution_label(
+        update_checker::distribution_label(distribution, locale).into(),
+    );
+    window.set_update_check_available(distribution.can_offer_github_update());
+    window.set_update_checking(matches!(update_status, UpdateStatus::Checking));
+
+    if distribution == Distribution::MicrosoftStore {
+        window.set_update_status(labels.update_store.into());
+        window.set_update_available(false);
+        window.set_update_release_visible(false);
+        window.set_update_checking(false);
+        return;
+    }
+
+    if !distribution.can_offer_github_update() {
+        window.set_update_status(labels.update_unknown.into());
+        window.set_update_available(false);
+        window.set_update_release_visible(false);
+        window.set_update_checking(false);
+        return;
+    }
+
+    set_update_status_text(window, labels, update_status);
+}
+
+#[cfg(any(debug_assertions, test))]
+fn apply_about_preview_status(
+    window: &SettingsWindow,
+    locale: Locale,
+    preview_status: AboutPreviewStatus,
+) {
+    let labels = locale.settings();
+    let (status, available, release_visible) = match preview_status {
+        AboutPreviewStatus::Idle => (String::new(), false, false),
+        AboutPreviewStatus::Available => (
+            format!("{}: 0.3.0 → 0.3.1", labels.update_available),
+            true,
+            true,
+        ),
+        AboutPreviewStatus::Long => (
+            format!(
+                "{}: 0.3.0 → 0.3.1 · {}",
+                labels.update_available,
+                [labels.update_available; 5].join(" · ")
+            ),
+            true,
+            true,
+        ),
+        AboutPreviewStatus::Offline => (labels.update_offline.into(), false, false),
+        AboutPreviewStatus::Http => (format!("{} (503)", labels.update_http), false, false),
+        AboutPreviewStatus::Invalid => (labels.update_invalid.into(), false, false),
+    };
+    window.set_update_status(status.into());
+    window.set_update_available(available);
+    window.set_update_release_visible(release_visible);
+    window.set_update_checking(false);
 }
 
 fn request_update_check(
@@ -2674,6 +2852,13 @@ fn copy_statusline_setting(window: &SettingsWindow) {
 }
 
 fn show_settings_centered(window: &SettingsWindow) {
+    if window.window().is_visible() {
+        activate_window(window.window());
+        return;
+    }
+    if SETTINGS_OPEN_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
     refresh_statusline_state();
     apply_statusline_row(window);
     // MSIX: the user may have changed the startup task in Windows meanwhile;
@@ -2683,7 +2868,20 @@ fn show_settings_centered(window: &SettingsWindow) {
     {
         window.set_startup_busy(true);
     }
-    // Measure and set the final size before showing to avoid first-open flicker.
+    // Give Slint one event-loop turn to lay out wrapped text at the intended
+    // width before measuring. The hidden window gets its final size before it
+    // is shown, avoiding a full-work-area first-open measurement and resize.
+    prepare_settings_content_measurement(window);
+    let weak = window.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(16), move || {
+        if let Some(window) = weak.upgrade() {
+            show_settings_measured(&window);
+        }
+        SETTINGS_OPEN_PENDING.store(false, Ordering::Release);
+    });
+}
+
+fn show_settings_measured(window: &SettingsWindow) {
     recalculate_settings_layout(window, true, true);
     let _ = window.show();
     activate_window(window.window());
@@ -2765,7 +2963,30 @@ fn settings_geometry(
     }
 }
 
+fn prepare_settings_content_measurement(window: &SettingsWindow) {
+    let scale = window.window().scale_factor().max(0.5);
+    let current = window.window().size().to_logical(scale);
+    let width = window.get_default_width();
+    let height = if current.height > 0.0 {
+        current.height
+    } else {
+        window.get_settings_window_height().max(1.0)
+    };
+
+    // A newly created hidden Winit window can still have a zero-sized layout.
+    // Set its intended width while hidden so wrapped text is measured at the
+    // real content width, not at zero (which can inflate preferred heights).
+    if (current.width - width).abs() > 0.5 || current.height <= 0.0 {
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(width, height));
+    }
+}
+
 fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, center: bool) {
+    if use_common_size {
+        prepare_settings_content_measurement(window);
+    }
     let required_height = window.get_required_settings_height();
     #[cfg(windows)]
     if let Some(screen) = settings_screen_signature(window, use_common_size) {
@@ -3075,7 +3296,188 @@ fn now_unix() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{PhysicalWorkArea, SettingsScreenSignature, settings_geometry};
+    use super::{
+        AboutPreviewStatus, Distribution, PhysicalWorkArea, SettingsScreenSignature, UpdateStatus,
+        apply_about_preview_status, configure_about_update_ui, settings_geometry,
+    };
+
+    #[test]
+    fn normal_settings_content_fits_below_a_1080p_work_area() {
+        i_slint_backend_testing::init_no_event_loop();
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let window = SettingsWindow::new().unwrap();
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(0.0, 480.0));
+            update_settings_window(
+                &window,
+                &AppSettings::default(),
+                locale,
+                false,
+                &adapter::UiSnapshot::unavailable(),
+                now_unix(),
+            );
+
+            let zero_width_required = window.get_required_settings_height();
+            prepare_settings_content_measurement(&window);
+            let measurement_width = window.get_settings_content_width();
+            let general = window.get_general_page_required_height();
+            let notifications = window.get_notifications_page_required_height();
+            let about = window.get_about_page_required_height();
+            let required = window.get_required_settings_height();
+            let work_area = SettingsScreenSignature {
+                work_area: PhysicalWorkArea {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1032,
+                },
+                ..screen(1.0)
+            };
+            let geometry = settings_geometry(720.0, required, work_area);
+
+            println!(
+                "{locale:?}: zero-width max={zero_width_required:.1}px; width={measurement_width:.1}px; General={general:.1}px Notifications={notifications:.1}px About={about:.1}px max={required:.1}px"
+            );
+            assert!(measurement_width > 500.0);
+            assert!(zero_width_required > 1032.0);
+            assert!(zero_width_required >= required);
+            assert_eq!(required, general.max(notifications).max(about));
+            assert_eq!(
+                geometry.height, required,
+                "work area is only an upper bound"
+            );
+            assert!(
+                geometry.height < 0.8 * 1032.0,
+                "normal {locale:?} content should not nearly fill the 1080p work area: {geometry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn about_distribution_and_status_layout_is_shared_and_stable() {
+        i_slint_backend_testing::init_no_event_loop();
+        let locales = [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru];
+        let distributions = [
+            Distribution::GitHubPortable,
+            Distribution::GitHubInstaller,
+            Distribution::MicrosoftStore,
+        ];
+        let statuses = [
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Available,
+            AboutPreviewStatus::Long,
+            AboutPreviewStatus::Offline,
+            AboutPreviewStatus::Http,
+            AboutPreviewStatus::Invalid,
+        ];
+
+        for locale in locales {
+            let labels = locale.settings();
+            for distribution in distributions {
+                let window = SettingsWindow::new().unwrap();
+                update_settings_window(
+                    &window,
+                    &AppSettings::default(),
+                    locale,
+                    false,
+                    &adapter::UiSnapshot::unavailable(),
+                    now_unix(),
+                );
+                let store = distribution == Distribution::MicrosoftStore;
+                let mut expected_window_size = None;
+                let mut measurements = Vec::new();
+
+                for status in statuses {
+                    configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
+                    if !store {
+                        apply_about_preview_status(&window, locale, status);
+                    }
+                    assert_eq!(
+                        window.get_update_check_available(),
+                        !store,
+                        "GitHub check visibility for {distribution:?}/{locale:?}"
+                    );
+                    assert_eq!(
+                        window.get_update_distribution_label().as_str(),
+                        super::update_checker::distribution_label(distribution, locale),
+                        "localized distribution label for {distribution:?}/{locale:?}"
+                    );
+                    assert_eq!(
+                        window.get_update_release_visible(),
+                        !store
+                            && matches!(
+                                status,
+                                AboutPreviewStatus::Available | AboutPreviewStatus::Long
+                            ),
+                        "release action visibility for {distribution:?}/{locale:?}/{status:?}"
+                    );
+                    assert_eq!(
+                        window.get_update_available(),
+                        !store
+                            && matches!(
+                                status,
+                                AboutPreviewStatus::Available | AboutPreviewStatus::Long
+                            )
+                    );
+                    if store {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_store);
+                    } else if matches!(status, AboutPreviewStatus::Offline) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_offline);
+                    } else if matches!(status, AboutPreviewStatus::Http) {
+                        assert!(
+                            window
+                                .get_update_status()
+                                .as_str()
+                                .starts_with(labels.update_http)
+                        );
+                    } else if matches!(status, AboutPreviewStatus::Invalid) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_invalid);
+                    }
+                    if !store && matches!(status, AboutPreviewStatus::Long) {
+                        assert!(window.get_update_status().len() > 100);
+                    }
+
+                    let required = window.get_required_settings_height();
+                    measurements.push((status, window.get_about_page_required_height(), required));
+                    assert_eq!(
+                        required,
+                        window
+                            .get_general_page_required_height()
+                            .max(window.get_notifications_page_required_height())
+                            .max(window.get_about_page_required_height())
+                    );
+                    if expected_window_size.is_none() {
+                        window
+                            .window()
+                            .set_size(slint::LogicalSize::new(720.0, required));
+                        expected_window_size = Some(window.window().size());
+                    }
+                    for tab in 0..3 {
+                        window.set_selected_tab(tab);
+                        assert_eq!(window.window().size(), expected_window_size.unwrap());
+                    }
+                }
+                if !store {
+                    let empty_height = measurements
+                        .iter()
+                        .find(|(status, _, _)| matches!(status, AboutPreviewStatus::Idle))
+                        .map(|(_, about, _)| *about)
+                        .unwrap();
+                    let long_height = measurements
+                        .iter()
+                        .find(|(status, _, _)| matches!(status, AboutPreviewStatus::Long))
+                        .map(|(_, about, _)| *about)
+                        .unwrap();
+                    assert!(
+                        long_height > empty_height,
+                        "long localized status should increase scrollable About content for {distribution:?}/{locale:?}"
+                    );
+                }
+                println!("{locale:?}/{distribution:?}: {measurements:?}");
+            }
+        }
+    }
 
     #[test]
     fn slint_keeps_inactive_settings_pages_measurable_at_their_actual_widths() {
@@ -3168,14 +3570,20 @@ mod tests {
         let required_after_content_change = window.get_required_settings_height();
         assert_eq!(window.window().size(), manually_resized_size);
 
-        // Reserve the status row and action row for the largest update state.
+        // A newly visible status can increase the About page's scroll extent,
+        // but must not resize a window the user has already sized.
         window.set_update_status("update available: version 0.3.1".into());
         window.set_update_available(true);
         window.set_update_release_visible(true);
         assert_eq!(window.window().size(), manually_resized_size);
+        let required_after_status = window.get_required_settings_height();
+        assert!(required_after_status > required_after_content_change);
         assert_eq!(
-            window.get_required_settings_height(),
-            required_after_content_change
+            required_after_status,
+            window
+                .get_general_page_required_height()
+                .max(window.get_notifications_page_required_height())
+                .max(window.get_about_page_required_height())
         );
 
         // N2: the native size survives a DPI change when it fits the new work

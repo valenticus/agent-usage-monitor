@@ -1433,7 +1433,6 @@ export component SettingsWindow inherits Window {
     in property <bool> automatic-update-checks-enabled: false;
     in property <string> update-auto-label: "";
     in property <string> update-auto-description: "";
-    in property <string> update-store-button-label: "";
     in property <length> settings-window-height: 480px;
     in property <length> minimum-settings-window-height: 0px;
     out property <length> general-page-required-height: general-page.preferred-height;
@@ -2011,12 +2010,13 @@ export component SettingsWindow inherits Window {
                     color: Theme.text-muted;
                     wrap: word-wrap;
                 }
-                Rectangle { height: 8px; }
                 Rectangle {
-                    height: 40px;
-                    Text {
+                    // Use only the height required by the current status. A
+                    // small cap keeps pathological QA text from dominating
+                    // About; the Flickable remains available for overflow.
+                    height: root.update-status == "" ? 0px : min(72px, max(24px, update-status-label.preferred-height));
+                    update-status-label := Text {
                         width: parent.width;
-                        height: parent.height;
                         text: root.update-status;
                         visible: root.update-status != "";
                         font-size: 13px;
@@ -2039,10 +2039,6 @@ export component SettingsWindow inherits Window {
                             external: true;
                             clicked => { root.open-update-release(); }
                         }
-                    }
-                    if root.store-build || !root.update-check-available: Rectangle {
-                        height: 32px;
-                        Text { text: root.update-store-button-label; color: Theme.text-secondary; }
                     }
                     Rectangle { height: 8px; }
                     if !root.store-build && root.update-check-available: Card {
