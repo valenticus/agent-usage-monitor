@@ -122,6 +122,7 @@ For manual bridge setup, see [Claude status-line documentation](docs/claude-stat
 - Usage information depends on what Codex and Claude Code expose locally. Providers may be unavailable or return incomplete or stale data.
 - Live updates through Claude Code's status line are optional and require one-time manual setup. Enabling Claude monitoring alone does not configure this integration. The in-app bridge toggle is available in the MSIX build; the installer and portable builds use the `--enable-claude-bridge` flag.
 - Notifications follow Windows notification settings and focus policies. The installed version integrates with Windows more completely than a portable launch.
+- **Update checks (0.3.0):** About can query public GitHub release metadata over HTTPS. The request does not send credentials or provider data; GitHub receives the request IP and standard HTTP metadata. Manual checks are explicit. Automatic checks are optional, off by default, and run at most once per 24 hours after a successful check while AUM is running. The checker does not download or install updates. MSIX updates are managed by Microsoft Store. See [update checker privacy and limitations](docs/update-checker.md).
 - This is an independent community project, not an official product of OpenAI or Anthropic.
 - Claude and Codex are trademarks of their respective owners. The provider marks shown in the app identify each provider only; they are not covered by the MIT license (see [brand asset notes](docs/design/brand-assets.md)).
 

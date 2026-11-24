@@ -20,7 +20,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tempfile = "3"
 slint = { version = "~1.19", default-features = false, features = ["std", "compat-1-2", "accessibility", "backend-winit", "renderer-software", "raw-window-handle-06", "unstable-winit-030"] }
 slint-build = "~1.19"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Storage_Packaging_Appx", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Storage_Packaging_Appx", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Networking_WinHttp"] }
 raw-window-handle = "0.6.2"
 
 # Optimize release binaries for size. Other release settings keep Cargo's

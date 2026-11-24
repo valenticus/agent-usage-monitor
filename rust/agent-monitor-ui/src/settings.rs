@@ -42,6 +42,12 @@ pub struct AppSettings {
     /// Packaged apps cannot receive `--enable-claude-bridge`, so the opt-in is
     /// this explicit setting instead. Off by default; ignored when unpackaged.
     pub claude_bridge_listener_enabled: bool,
+    /// Opt-in for public GitHub release checks; off by default for privacy.
+    pub automatic_update_checks_enabled: bool,
+    /// Unix time of the last successful release metadata check.
+    pub last_update_check_success_unix: Option<i64>,
+    /// Last automatic attempt; failures also wait a day before retrying.
+    pub last_automatic_update_check_attempt_unix: Option<i64>,
     pub launch_at_startup: bool,
     pub alerts_enabled: bool,
     pub warning_threshold: u8,
@@ -61,6 +67,9 @@ impl Default for AppSettings {
             claude_enabled: true,
             claude_cli_refresh_enabled: false,
             claude_bridge_listener_enabled: false,
+            automatic_update_checks_enabled: false,
+            last_update_check_success_unix: None,
+            last_automatic_update_check_attempt_unix: None,
             launch_at_startup: false,
             alerts_enabled: true,
             warning_threshold: 25,
@@ -296,6 +305,9 @@ pub fn sanitize_import(source: &AppSettings) -> AppSettings {
         claude_enabled: source.claude_enabled,
         claude_cli_refresh_enabled: false,
         claude_bridge_listener_enabled: false,
+        automatic_update_checks_enabled: false,
+        last_update_check_success_unix: None,
+        last_automatic_update_check_attempt_unix: None,
         launch_at_startup: false,
         alerts_enabled: source.alerts_enabled,
         warning_threshold: source.warning_threshold,
@@ -564,6 +576,9 @@ mod tests {
             claude_cli_refresh_enabled: true,
             launch_at_startup: true,
             language: Language::Polish,
+            automatic_update_checks_enabled: true,
+            last_update_check_success_unix: Some(1_700_000_000),
+            last_automatic_update_check_attempt_unix: Some(1_700_000_000),
             ..Default::default()
         };
         save(&path, &settings).unwrap();
@@ -574,6 +589,9 @@ mod tests {
         assert!(loaded.claude_enabled);
         assert!(!loaded.claude_cli_refresh_enabled);
         assert!(!loaded.claude_bridge_listener_enabled);
+        assert!(!loaded.automatic_update_checks_enabled);
+        assert_eq!(loaded.last_update_check_success_unix, None);
+        assert_eq!(loaded.last_automatic_update_check_attempt_unix, None);
         assert!(!loaded.launch_at_startup);
         assert_eq!(loaded.warning_threshold, 25);
         // The Store-only bridge opt-in survives a save/load round trip.
