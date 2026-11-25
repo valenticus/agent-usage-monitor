@@ -114,6 +114,13 @@ try {
     $manifest = (Get-Content -Raw (Join-Path $PSScriptRoot 'AppxManifest.xml')).Replace('__VERSION__', $version)
     if ($manifest -match '__[A-Z]+__') { throw 'Unreplaced placeholder left in AppxManifest.xml' }
     [xml]$null = $manifest   # well-formed XML check
+    [xml]$manifestXml = $manifest
+    $expectedLanguages = @('en-US', 'uk-UA', 'pl-PL', 'ru-RU')
+    $languageNodes = @($manifestXml.SelectNodes("/*[local-name()='Package']/*[local-name()='Resources']/*[local-name()='Resource']"))
+    $declaredLanguages = @($languageNodes | ForEach-Object { $_.GetAttribute('Language') })
+    if (($declaredLanguages -join ',') -cne ($expectedLanguages -join ',')) {
+        throw "AppxManifest.xml must declare languages in this order (default first): $($expectedLanguages -join ', '); found: $($declaredLanguages -join ', ')"
+    }
     [IO.File]::WriteAllText((Join-Path $stage 'AppxManifest.xml'), $manifest, (New-Object Text.UTF8Encoding $false))
 
     # --- VC++ runtime ------------------------------------------------------

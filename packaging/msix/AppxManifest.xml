@@ -40,7 +40,10 @@
   </Dependencies>
 
   <Resources>
-    <Resource Language="en-us" />
+    <Resource Language="en-US" />
+    <Resource Language="uk-UA" />
+    <Resource Language="pl-PL" />
+    <Resource Language="ru-RU" />
   </Resources>
 
   <Applications>
