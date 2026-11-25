@@ -45,8 +45,6 @@ AUM is built with **Rust** and **Slint**. It is an independent community project
 
 ## Screenshots
 
-> **Screenshot note:** The images below were captured with v0.1.0 and are being refreshed. The v0.2.0 release has updated status colours, fixed tray icon quota selection, and clearer Claude Code settings. The screenshots are illustrative; they do not yet show the final v0.2.0 interface.
-
 ### Tray window
 
 The compact preview appears on hover; the full window opens on double-click or from the tray menu.
