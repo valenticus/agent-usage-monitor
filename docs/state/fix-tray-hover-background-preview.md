@@ -32,7 +32,7 @@ Keep the approved main statistics and compact preview visuals unchanged while gi
 - External debug build: `C:\Users\fetis\AppData\Local\AUM-QA\PR8-two-window\target\debug\agent-usage-monitor.exe`, SHA-256 `4B8AC11A4479504F820ECFB16BEB1E99D374FC72F7CF580FEE1F16832070B6B2`.
 - New isolated launcher: `C:\Users\fetis\AppData\Local\AUM-QA\PR8-two-window\Start-AUM-PR8-QA.ps1`. It verifies the QA executable hash and exactly one healthy Store package at v0.2.0.0 with expected executable hash before launch; isolates APPDATA, LOCALAPPDATA, TEMP/TMP, and CLAUDE_CONFIG_DIR; passes only `--qa-isolated --empty`; and relies on the QA-only singleton mutex. Source guards disable notification identity registration, startup reconciliation, and live workers. Launcher syntax was parsed successfully. The QA app has not been launched during this follow-up; no runtime or visual QA is claimed.
 - Installed Store package remains `ValentynFetisov.AgentUsageMonitor_0.2.0.0_x64__sfbqfhxtgjc58`, status `Ok`; its `agent-usage-monitor.exe` SHA-256 was rechecked as `7E8228AB52D320AB35AF69EC9C41ECF6BF6CFF2DEE5A944803F5F70F0FBE6150`, matching the earlier baseline. No Store app files/settings were modified and the Store app was not started or stopped.
-- PR #8 remains open and unmerged. CI for the eventual pushed two-window commit must be checked after push. Manual runtime and visual approval remains required.
+- Two-window implementation commit `310ed2d14e22c68f8c8a1b409bf3e3edfcfba7f1` is pushed to PR #8; GitHub Actions run `45628522040` passed the `windows` job in 2m53s. PR #8 remains open and unmerged. Manual runtime and visual approval remains required.
 
 ## Changed files
 - `rust/agent-monitor-ui/src/flyout.rs`
@@ -40,6 +40,6 @@ Keep the approved main statistics and compact preview visuals unchanged while gi
 - `docs/state/fix-tray-hover-background-preview.md`
 
 ## Next
-- Commit and push these changes to the existing PR #8, then inspect the resulting CI status.
+- Complete manual runtime and visual approval against the isolated build before any merge.
 - Run the external launcher from PowerShell and complete the manual visual/runtime checks: hover preview while main is closed; activate main by double-click; keep main behind foreground apps during repeated preview show/dismiss cycles; verify exact main HWND/bounds/visibility/Z-order do not change; test two side-by-side foreground apps and overlapping windows; verify no focus stealing, flicker, stuck TOPMOST, position loss, or duplicate windows; then test close/rehover, Settings, tray menu, refresh, and notifications.
 - Compare full and compact visuals against the approved source and repository references at matched demo data/theme/language/DPI/display settings. Do not merge until manual visual and runtime QA passes.
