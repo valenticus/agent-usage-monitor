@@ -21,6 +21,7 @@ mod winrt;
 
 slint::include_modules!();
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -57,6 +58,9 @@ static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(Upd
 static SETTINGS_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static SETTINGS_LAYOUT: std::sync::Mutex<SettingsLayoutSnapshot> =
     std::sync::Mutex::new(SettingsLayoutSnapshot::new());
+thread_local! {
+    static PREVIEW_WINDOW: RefCell<Option<slint::Weak<MainWindow>>> = const { RefCell::new(None) };
+}
 
 const SETTINGS_MARGIN_LOGICAL: f32 = 16.0;
 const SETTINGS_CAPTION_LOGICAL: f32 = 32.0;
@@ -486,11 +490,23 @@ fn main() -> Result<(), slint::PlatformError> {
         .select()?;
 
     let window = MainWindow::new()?;
+    let preview_window = MainWindow::new()?;
+    preview_window.set_compact(true);
+    PREVIEW_WINDOW.with(|preview| *preview.borrow_mut() = Some(preview_window.as_weak()));
     let settings_window = SettingsWindow::new()?;
     window.set_refresh_enabled(use_live);
+    preview_window.set_refresh_enabled(use_live);
     settings_window.set_window_icon(theme::aum_icon_image(64));
     adapter::apply_config(
         &window,
+        &initial_snapshot,
+        now_unix(),
+        &lock_settings(&config),
+        lock_locale(&locale),
+        system_light(&lock_settings(&config)),
+    );
+    adapter::apply_config(
+        &preview_window,
         &initial_snapshot,
         now_unix(),
         &lock_settings(&config),
@@ -1030,7 +1046,8 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(not(windows))]
     let worker_notifier = None;
 
-    // One flyout window with two presentations; its state lives on the UI thread.
+    // The main and hover-preview windows reuse the same Slint component and
+    // shared snapshot, but their lifecycle controllers own different HWNDs.
     #[cfg(windows)]
     let flyout = {
         let notifier = native_tray.notifier();
@@ -1038,6 +1055,13 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     #[cfg(not(windows))]
     let flyout = flyout::Flyout::new(&window, || None);
+    #[cfg(windows)]
+    let hover_preview = {
+        let notifier = native_tray.notifier();
+        flyout::Flyout::new_with_main(&preview_window, Some(&window), move || notifier.icon_rect())
+    };
+    #[cfg(not(windows))]
+    let hover_preview = flyout::Flyout::new_with_main(&preview_window, Some(&window), || None);
     window.on_close_flyout({
         let flyout = flyout.clone();
         move || flyout.close()
@@ -1047,8 +1071,8 @@ fn main() -> Result<(), slint::PlatformError> {
         move || flyout.start_drag()
     });
     window.on_refresh_finished({
-        let flyout = flyout.clone();
-        move || flyout.refresh_finished()
+        let hover_preview = hover_preview.clone();
+        move || hover_preview.refresh_finished()
     });
     window.window().on_close_requested({
         let flyout = flyout.clone();
@@ -1057,9 +1081,20 @@ fn main() -> Result<(), slint::PlatformError> {
             slint::CloseRequestResponse::HideWindow
         }
     });
+    preview_window.window().on_close_requested({
+        let hover_preview = hover_preview.clone();
+        move || {
+            hover_preview.close();
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
     {
         let flyout = flyout.clone();
         slint::Timer::single_shot(Duration::from_millis(0), move || flyout.warm_up());
+    }
+    {
+        let hover_preview = hover_preview.clone();
+        slint::Timer::single_shot(Duration::from_millis(0), move || hover_preview.warm_up());
     }
 
     // One custom tray menu for the whole run (re-used on every right-click).
@@ -1080,6 +1115,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let live_config = config.clone();
         let live_locale = locale.clone();
         let flyout = flyout.clone();
+        let hover_preview = hover_preview.clone();
         let menu = tray_menu.as_weak();
         Rc::new(move |event| match event {
             tray::TrayEvent::Hover => {
@@ -1091,17 +1127,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 {
                     return;
                 }
-                apply_latest_to_window(&live_window, &live_snapshot, &live_config, &live_locale);
-                flyout.hover();
+                apply_latest_to_preview(&live_snapshot, &live_config, &live_locale);
+                hover_preview.hover();
             }
-            tray::TrayEvent::Pointer => flyout.pointer_over_icon(),
+            tray::TrayEvent::Pointer => hover_preview.pointer_over_icon(),
             tray::TrayEvent::OpenFull => {
                 apply_latest_to_window(&live_window, &live_snapshot, &live_config, &live_locale);
+                hover_preview.dismiss_preview();
                 flyout.open_full();
             }
             tray::TrayEvent::Refresh => {
                 apply_latest_to_window(&live_window, &live_snapshot, &live_config, &live_locale);
-                flyout.menu_refresh(|| request_refresh(RefreshOrigin::Manual));
+                hover_preview.menu_refresh(|| request_refresh(RefreshOrigin::Manual));
             }
             tray::TrayEvent::OpenSettings => {
                 if let Some(settings) = settings.upgrade() {
@@ -1119,7 +1156,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 };
                 // The menu replaces a temporary preview instead of overlapping it.
-                flyout.dismiss_preview();
+                hover_preview.dismiss_preview();
                 let settings = lock_settings(&live_config);
                 let theme = adapter::theme_kind(settings.theme_mode, system_light(&settings));
                 let locale = lock_locale(&live_locale);
@@ -1235,7 +1272,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let (Some(window), Ok(snapshot)) =
                 (countdown_window.upgrade(), countdown_snapshot.lock())
             {
-                apply_current(&window, &snapshot, &countdown_config, &countdown_locale);
+                apply_current_to_both(&window, &snapshot, &countdown_config, &countdown_locale);
             }
         },
     );
@@ -1265,6 +1302,7 @@ fn main() -> Result<(), slint::PlatformError> {
     );
 
     let theme_window = window.as_weak();
+    let theme_preview = preview_window.as_weak();
     let theme_panel = settings_window.as_weak();
     let theme_timer = slint::Timer::default();
     theme_timer.start(
@@ -1275,6 +1313,9 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(window) = theme_window.upgrade() {
                 window.set_accent_color(accent);
             }
+            if let Some(preview) = theme_preview.upgrade() {
+                preview.set_accent_color(accent);
+            }
             if let Some(panel) = theme_panel.upgrade() {
                 panel.set_accent_color(accent);
             }
@@ -1284,7 +1325,9 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(windows)]
     let _popup_style_timer = {
         let popup = window.as_weak();
+        let compact_popup = preview_window.as_weak();
         let flyout = flyout.clone();
+        let hover_preview = hover_preview.clone();
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -1294,7 +1337,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 };
                 let _ = apply_popup_taskbar_style(&popup);
+                if let Some(compact_popup) = compact_popup.upgrade() {
+                    let _ = apply_popup_taskbar_style(&compact_popup);
+                }
                 flyout.tick();
+                hover_preview.tick();
             },
         );
         timer
@@ -1307,11 +1354,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let preview_compact = args.iter().any(|arg| arg == "--preview-compact");
         if preview_full || preview_compact {
             let flyout = flyout.clone();
+            let hover_preview = hover_preview.clone();
             slint::Timer::single_shot(Duration::from_millis(300), move || {
                 if preview_full {
                     flyout.open_full();
                 } else {
-                    flyout.preview_compact();
+                    hover_preview.preview_compact();
                 }
             });
         }
@@ -1331,6 +1379,9 @@ fn main() -> Result<(), slint::PlatformError> {
         {
             let family = slint::SharedString::from(family);
             window.global::<Typography>().set_family(family.clone());
+            preview_window
+                .global::<Typography>()
+                .set_family(family.clone());
             settings_window
                 .global::<Typography>()
                 .set_family(family.clone());
@@ -1919,7 +1970,7 @@ fn publish_settings(context: &CallbackContext, updated: AppSettings) {
                 now_unix(),
             );
         }
-        apply_current(&window, &snapshot, config, locale);
+        apply_current_to_both(&window, &snapshot, config, locale);
     } else if let (Some(panel), Ok(snapshot)) = (panel.upgrade(), snapshot.lock()) {
         update_settings_window(
             &panel,
@@ -2196,6 +2247,20 @@ fn apply_current(
     );
 }
 
+fn apply_current_to_both(
+    main: &MainWindow,
+    snapshot: &adapter::UiSnapshot,
+    config: &SharedSettings,
+    locale: &SharedLocale,
+) {
+    apply_current(main, snapshot, config, locale);
+    PREVIEW_WINDOW.with(|preview| {
+        if let Some(preview) = preview.borrow().as_ref().and_then(slint::Weak::upgrade) {
+            apply_current(&preview, snapshot, config, locale);
+        }
+    });
+}
+
 fn apply_latest_to_window(
     window: &slint::Weak<MainWindow>,
     snapshot: &SharedSnapshot,
@@ -2203,7 +2268,21 @@ fn apply_latest_to_window(
     locale: &SharedLocale,
 ) {
     if let (Some(window), Ok(snapshot)) = (window.upgrade(), snapshot.lock()) {
-        apply_current(&window, &snapshot, config, locale);
+        apply_current_to_both(&window, &snapshot, config, locale);
+    }
+}
+
+fn apply_latest_to_preview(
+    snapshot: &SharedSnapshot,
+    config: &SharedSettings,
+    locale: &SharedLocale,
+) {
+    if let Ok(snapshot) = snapshot.lock() {
+        PREVIEW_WINDOW.with(|preview| {
+            if let Some(preview) = preview.borrow().as_ref().and_then(slint::Weak::upgrade) {
+                apply_current(&preview, &snapshot, config, locale);
+            }
+        });
     }
 }
 
@@ -2238,7 +2317,7 @@ fn queue_ui_snapshot_for_refresh(
             return;
         };
         let snapshot = snapshot.clone();
-        apply_current(&window, &snapshot, &config, &locale);
+        apply_current_to_both(&window, &snapshot, &config, &locale);
         if let Some(id) = refresh_id {
             eprintln!(
                 "CLAUDE_REFRESH: ui_updated request_id={id} propagation_ms={}",
