@@ -161,6 +161,30 @@ enum PreviewEndAction {
     RestorePinned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundRestoreZOrder {
+    /// Insert immediately behind the current normal (non-topmost) foreground window.
+    AfterForeground,
+    /// The foreground window is topmost; leaving the topmost band puts AUM behind it.
+    BehindTopmostForeground,
+    /// There is no other foreground window to follow; stay at the bottom of the stack.
+    Bottom,
+}
+
+fn background_restore_z_order(
+    foreground_available: bool,
+    foreground_is_this_window: bool,
+    foreground_is_topmost: bool,
+) -> BackgroundRestoreZOrder {
+    if !foreground_available || foreground_is_this_window {
+        BackgroundRestoreZOrder::Bottom
+    } else if foreground_is_topmost {
+        BackgroundRestoreZOrder::BehindTopmostForeground
+    } else {
+        BackgroundRestoreZOrder::AfterForeground
+    }
+}
+
 fn next_hover_since(
     pending_since: Option<Instant>,
     candidate: bool,
@@ -527,6 +551,20 @@ impl Flyout {
                 self.animation.stop();
                 self.generation.set(self.generation.get() + 1);
                 self.hiding.set(false);
+                if let Some(window) = self.window.upgrade() {
+                    // Lower the still-compact HWND before changing its content or
+                    // geometry. Resizing a TOPMOST preview first can briefly show
+                    // the full window above the foreground application.
+                    match lower_behind_foreground(&window) {
+                        Ok(()) => self.topmost.set(false),
+                        Err(error) => {
+                            self.log_style_error("background_restore_z_order", false, &error);
+                            self.mode.set(Mode::Hidden);
+                            self.animate(false, false);
+                            return;
+                        }
+                    }
+                }
                 self.present(false, false);
             }
             Some(PreviewEndAction::Hide) => {
@@ -579,7 +617,7 @@ impl Flyout {
         let position = if !compact {
             self.pinned_position
                 .get()
-                .and_then(|position| restore_position(position, width, height, scale))
+                .and_then(|position| restore_position(position, width, height))
                 .unwrap_or_else(|| self.anchor(width, height, scale))
         } else {
             self.anchor(width, height, scale)
@@ -600,9 +638,9 @@ impl Flyout {
             self.animation.stop();
             set_alpha(&window, 255);
             window.window().set_position(position);
-            // Apply activation/Z-order styles only after applying the target
-            // geometry, so a pinned full-size window is never briefly raised
-            // TOPMOST during its compact transition.
+            // For an ordinary transition, apply native styles after geometry.
+            // Background restoration first removes TOPMOST while still compact
+            // (above), so the full-size window is never briefly raised.
             self.sync_native_style(&window);
             if activate {
                 activate_window(&window);
@@ -869,6 +907,73 @@ fn set_topmost(_window: &MainWindow, _topmost: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Removes the compact preview from TOPMOST before it is resized or moved,
+/// placing it behind the current foreground application without activation.
+#[cfg(windows)]
+fn lower_behind_foreground(window: &MainWindow) -> Result<(), String> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Foundation::{GetLastError, HWND};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, HWND_BOTTOM, HWND_NOTOPMOST,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowPos, WS_EX_TOPMOST,
+    };
+
+    let native = window.window().window_handle();
+    let handle = native
+        .window_handle()
+        .map_err(|error| format!("no native window handle: {error}"))?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return Err("not a Win32 window".into());
+    };
+    let hwnd = handle.hwnd.get() as HWND;
+    let foreground = unsafe { GetForegroundWindow() };
+    let foreground_available = !foreground.is_null();
+    let foreground_is_this = foreground == hwnd;
+    let foreground_is_topmost = foreground_available
+        && !foreground_is_this
+        && unsafe { GetWindowLongPtrW(foreground, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0 };
+    let target = background_restore_z_order(
+        foreground_available,
+        foreground_is_this,
+        foreground_is_topmost,
+    );
+    let insert_after = match target {
+        BackgroundRestoreZOrder::AfterForeground => foreground,
+        BackgroundRestoreZOrder::BehindTopmostForeground => HWND_NOTOPMOST,
+        BackgroundRestoreZOrder::Bottom => HWND_BOTTOM,
+    };
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    let positioned = unsafe { SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags) } != 0;
+    let still_topmost =
+        || unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0 };
+    if positioned && !still_topmost() {
+        return Ok(());
+    }
+
+    let error = unsafe { GetLastError() };
+    // A stale/destroyed foreground HWND must never make us fall back to
+    // HWND_NOTOPMOST, which would put the full window above normal apps.
+    if target != BackgroundRestoreZOrder::Bottom {
+        let moved_to_bottom = unsafe { SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, flags) } != 0;
+        if moved_to_bottom && !still_topmost() {
+            return Ok(());
+        }
+    }
+    let detail = if still_topmost() {
+        "WS_EX_TOPMOST remained set"
+    } else {
+        "SetWindowPos failed"
+    };
+    Err(format!(
+        "{detail} while lowering background window (Windows error {error})"
+    ))
+}
+
+#[cfg(not(windows))]
+fn lower_behind_foreground(_window: &MainWindow) -> Result<(), String> {
+    Ok(())
+}
+
 /// Sets or clears `WS_EX_NOACTIVATE` (read-modify-write of the extended
 /// style, so `WS_EX_LAYERED` set by `set_alpha` is preserved) and verifies it.
 #[cfg(windows)]
@@ -1002,13 +1107,12 @@ pub(crate) fn work_area_at(_x: i32, _y: i32) -> Option<WorkArea> {
     None
 }
 
-/// Restores a remembered pinned position if its center is still on a monitor
-/// (handles monitor configuration changes), clamped into that work area.
+/// Restores a remembered pinned position unchanged while its center remains on
+/// a monitor. If that monitor disappeared, the caller falls back to the tray.
 fn restore_position(
     position: slint::PhysicalPosition,
     width: i32,
     height: i32,
-    scale: f32,
 ) -> Option<slint::PhysicalPosition> {
     #[cfg(windows)]
     {
@@ -1018,20 +1122,24 @@ fn restore_position(
             x: position.x + width / 2,
             y: position.y + height / 2,
         };
-        if unsafe { MonitorFromPoint(center, MONITOR_DEFAULTTONULL) }.is_null() {
-            return None;
-        }
+        let center_on_monitor =
+            !unsafe { MonitorFromPoint(center, MONITOR_DEFAULTTONULL) }.is_null();
+        restore_pinned_position(position, center_on_monitor)
     }
-    let work = work_area_at(position.x + width / 2, position.y + height / 2)?;
-    let gap = (4.0 * scale).round() as i32;
-    Some(slint::PhysicalPosition::new(
-        position
-            .x
-            .clamp(work.left + gap, (work.right - width - gap).max(work.left)),
-        position
-            .y
-            .clamp(work.top + gap, (work.bottom - height - gap).max(work.top)),
-    ))
+    #[cfg(not(windows))]
+    {
+        restore_pinned_position(
+            position,
+            work_area_at(position.x + width / 2, position.y + height / 2).is_some(),
+        )
+    }
+}
+
+fn restore_pinned_position(
+    position: slint::PhysicalPosition,
+    center_on_monitor: bool,
+) -> Option<slint::PhysicalPosition> {
+    center_on_monitor.then_some(position)
 }
 
 #[cfg(windows)]
@@ -1184,9 +1292,11 @@ fn set_alpha(window: &MainWindow, alpha: u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOVER_DELAY, HoverAction, HoverTimerAction, MAX_NO_ACTIVATE_WRITES, Mode, NativeStyle,
-        PreviewEndAction, StyleAction, hover_action, hover_timer_action, native_style,
+        BackgroundRestoreZOrder, HOVER_DELAY, HoverAction, HoverTimerAction,
+        MAX_NO_ACTIVATE_WRITES, Mode, NativeStyle, PreviewEndAction, StyleAction,
+        background_restore_z_order, hover_action, hover_timer_action, native_style,
         next_hover_since, no_activate_action, pointer_hover_candidate, preview_end_action,
+        restore_pinned_position,
     };
     use std::time::{Duration, Instant};
 
@@ -1442,5 +1552,46 @@ mod tests {
                 "{mode:?} visible={visible} compact={compact}"
             );
         }
+    }
+
+    #[test]
+    fn background_restore_places_window_behind_the_foreground_without_activation() {
+        assert_eq!(
+            background_restore_z_order(true, false, false),
+            BackgroundRestoreZOrder::AfterForeground,
+            "normal foreground apps must stay above the restored AUM window"
+        );
+        assert_eq!(
+            background_restore_z_order(true, false, true),
+            BackgroundRestoreZOrder::BehindTopmostForeground
+        );
+        assert_eq!(
+            background_restore_z_order(false, false, false),
+            BackgroundRestoreZOrder::Bottom
+        );
+        assert_eq!(
+            background_restore_z_order(true, true, false),
+            BackgroundRestoreZOrder::Bottom,
+            "never insert the window after itself"
+        );
+
+        let full = native_style(Mode::FullPinned, true, false);
+        assert!(!full.topmost);
+        assert!(!full.no_activate);
+    }
+
+    #[test]
+    fn background_restore_preserves_the_pinned_position_while_its_monitor_exists() {
+        let saved = slint::PhysicalPosition::new(2, 3);
+        assert_eq!(
+            restore_pinned_position(saved, true),
+            Some(saved),
+            "a pinned position on a connected monitor must not be clamped or re-anchored"
+        );
+        assert_eq!(
+            restore_pinned_position(saved, false),
+            None,
+            "when the monitor containing the saved center disappears, use the tray anchor"
+        );
     }
 }
