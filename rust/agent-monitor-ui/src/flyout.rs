@@ -139,6 +139,21 @@ fn native_style(mode: Mode, visible: bool, compact: bool) -> NativeStyle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoverAction {
+    KeepFull,
+    KeepCompact,
+    ShowCompact,
+}
+
+fn hover_action(mode: Mode, full_window_is_foreground: bool) -> HoverAction {
+    match mode {
+        Mode::FullPinned if full_window_is_foreground => HoverAction::KeepFull,
+        Mode::FullPinned | Mode::Hidden => HoverAction::ShowCompact,
+        Mode::CompactTemporary => HoverAction::KeepCompact,
+    }
+}
+
 impl Flyout {
     pub fn new(
         window: &MainWindow,
@@ -235,19 +250,53 @@ impl Flyout {
 
     /// Tray hover: show the compact preview unless the full flyout is open.
     pub fn hover(self: &Rc<Self>) {
-        match self.mode.get() {
-            Mode::FullPinned => {}
-            Mode::CompactTemporary => {
+        match hover_action(self.mode.get(), self.window_is_foreground()) {
+            HoverAction::KeepFull => {}
+            HoverAction::ShowCompact => {
+                self.remember_pinned_position();
+                self.mode.set(Mode::CompactTemporary);
+                self.clear_timers();
+                self.present(true);
+            }
+            HoverAction::KeepCompact => {
                 self.hide_deadline.set(None);
                 if self.hiding.get() {
                     self.present(true);
                 }
             }
-            Mode::Hidden => {
-                self.mode.set(Mode::CompactTemporary);
-                self.hide_deadline.set(None);
-                self.present(true);
-            }
+        }
+    }
+
+    /// Visibility only says that a window is shown. A pinned main window may
+    /// remain visible behind another application, where tray hover should
+    /// still switch this same window to its compact, non-activating preview.
+    fn window_is_foreground(&self) -> bool {
+        let Some(window) = self.window.upgrade() else {
+            return false;
+        };
+        if !window.window().is_visible() {
+            return false;
+        }
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+            let native_window = window.window().window_handle();
+            let Ok(handle) = native_window.window_handle() else {
+                return false;
+            };
+            let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+                return false;
+            };
+            unsafe { GetForegroundWindow() == handle.hwnd.get() as _ }
+        }
+        #[cfg(not(windows))]
+        {
+            use slint::winit_030::WinitWindowAccessor;
+            window
+                .window()
+                .with_winit_window(|native| native.has_focus())
+                .unwrap_or(false)
         }
     }
 
@@ -1046,7 +1095,8 @@ fn set_alpha(window: &MainWindow, alpha: u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_NO_ACTIVATE_WRITES, Mode, NativeStyle, StyleAction, native_style, no_activate_action,
+        HoverAction, MAX_NO_ACTIVATE_WRITES, Mode, NativeStyle, StyleAction, hover_action,
+        native_style, no_activate_action,
     };
 
     #[test]
@@ -1157,6 +1207,24 @@ mod tests {
                 assert!(!native_style(Mode::FullPinned, visible, compact).no_activate);
             }
         }
+    }
+
+    #[test]
+    fn tray_hover_decision_distinguishes_closed_active_and_inactive_full_window() {
+        assert_eq!(hover_action(Mode::Hidden, false), HoverAction::ShowCompact);
+        assert_eq!(
+            hover_action(Mode::CompactTemporary, false),
+            HoverAction::KeepCompact
+        );
+        assert_eq!(
+            hover_action(Mode::CompactTemporary, true),
+            HoverAction::KeepCompact
+        );
+        assert_eq!(hover_action(Mode::FullPinned, true), HoverAction::KeepFull);
+        assert_eq!(
+            hover_action(Mode::FullPinned, false),
+            HoverAction::ShowCompact
+        );
     }
 
     #[test]
