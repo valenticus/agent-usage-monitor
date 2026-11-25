@@ -18,13 +18,13 @@ Fix tray hover preview for an open but inactive main statistics window. Keep the
 - External debug build: `C:\Users\fetis\AppData\Local\AUM-QA\PR8-daab355\target\debug\agent-usage-monitor.exe` (SHA-256 `D21E636FAF76932688A5AEF234D70FA67C7D11B5D753C281B01F71061B15EFD1`).
 - Store AUM v0.2.0 remains installed at `ValentynFetisov.AgentUsageMonitor_0.2.0.0_x64__sfbqfhxtgjc58`, status `Ok`; installed EXE SHA-256 remains `7E8228AB52D320AB35AF69EC9C41ECF6BF6CFF2DEE5A944803F5F70F0FBE6150`. It was not running during this follow-up. It was not started to avoid triggering its existing provider refresh configuration.
 - The user-supplied runtime reproduction is confirmed by source/API behavior. Independent replay of the tray-hover sequence was not completed in this session; visual QA is still required and has not passed.
-- Fix and state update are prepared for commit/push to the same PR #8. Check CI after push. Do not merge until manual Windows QA passes.
+- Fix commit `0898c62c305d969be6abe2ca59e66d36d2746191` was pushed to the same PR #8. GitHub Actions run `45616958537` passed the `windows` job in 3m10s (formatting, static MSIX validation, Clippy, tests, and Windows application build).
+- PR #8 remains open and unmerged. Do not merge until manual Windows QA passes.
 
 ## Changed files
 - `rust/agent-monitor-ui/src/flyout.rs`
 - `docs/state/fix-tray-hover-background-preview.md`
 
 ## Next
-- Commit and push these changes to `fix/tray-hover-background-preview` / PR #8.
-- Check the new PR CI status.
+- Confirm the final PR head check after the state update.
 - Provide the updated isolated QA launcher for manual scenarios A–H. Do not merge until those scenarios pass.
