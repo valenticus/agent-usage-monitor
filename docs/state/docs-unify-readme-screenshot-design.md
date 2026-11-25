@@ -7,13 +7,14 @@
 ## Done
 - Replaced all 11 matching files under assets/ with corresponding ZIP originals; SHA-256 equality verified.
 - Removed the obsolete v0.1.0 screenshot note from README.md; image paths and README structure remain unchanged.
-- Verified each local README image link exists and git diff --check passes.
-- Committed the work; branch push and PR creation are next.
+- Verified all local README image links exist and git diff --check passes.
+- Committed and pushed branch docs/unify-readme-screenshot-design.
+- Opened PR https://github.com/valenticus/agent-usage-monitor/pull/9 targeting main; not merged.
 
 ## Git state
 - Branch: docs/unify-readme-screenshot-design
-- Base HEAD before this change: cff1a83941adc9765d2d1728cccb015cd6e1382b
-- Working tree clean after commit.
+- HEAD before this state update: 682248e50e8fd37f833d2461c0aeba6f15feef6e
+- Worktree was clean after the image update commit.
 
 ## Changed files
 - README.md
@@ -27,10 +28,10 @@
 
 ## Decisions (and why)
 - Kept existing filenames and links to avoid unnecessary README edits.
-- Replaced social-preview.jpg with the supplied counterpart because it is a matching repository image asset.
+- Replaced social-preview.jpg with supplied counterpart as it is a matching repository image asset.
 
 ## Blockers
 - None.
 
 ## Next actions
-1. Push branch and open a PR targeting main.
+1. Await PR review; do not merge without the user request.
