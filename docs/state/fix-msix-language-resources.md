@@ -5,14 +5,17 @@
 - No app translation, Rust/UI, package identity, publisher, version, signing, Store listing, installed app, or Store submission changes.
 
 ## Done
-- Changed AppxManifest.xml to declare en-US, uk-UA, pl-PL, and ru-RU, with en-US first as the default language.
-- Added build-time validation in build-msix.ps1 requiring this exact ordered language list. The existing CI MSIX validation invokes this script.
-- Confirmed the UI language strings are embedded in Rust source; the package does not use language-specific PRI resource files.
+- Updated AppxManifest.xml to declare en-US, uk-UA, pl-PL, and ru-RU, with en-US first as the default language.
+- Added build-time validation in build-msix.ps1 requiring this exact ordered language list; existing CI invokes this script.
+- Kept MakePri /dq en-US because it is the default PRI qualifier; AUM uses compiled Rust UI strings and has no language-specific PRI resources.
+- XML parse and exact language list check passed. build-msix.ps1 -ValidateManifestOnly passed using MakePri and MakeAppx with placeholder EXEs. git diff --check passed.
+- Commit 5d875c1700804919eccaf5284f52efc48588bec2 pushed to the branch.
+- PR https://github.com/valenticus/agent-usage-monitor/pull/10 opened against main; not merged.
 
 ## Git state
 - Branch: fix/msix-language-resources
-- Base HEAD: cff1a83941adc9765d2d1728cccb015cd6e1382b (main, equal to origin/main at task start).
-- The README screenshots PR remains on its own branch.
+- HEAD before this state update: 5d875c1700804919eccaf5284f52efc48588bec2
+- No application runtime or Store package installation/submission was performed.
 
 ## Changed files
 - packaging/msix/AppxManifest.xml
@@ -20,17 +23,18 @@
 - docs/state/fix-msix-language-resources.md
 
 ## Checks
-- XML parse and exact manifest language assertion: passed.
-- packaging/msix/build-msix.ps1 -ValidateManifestOnly: passed; MakePri and MakeAppx created a temporary unsigned package using placeholder EXEs.
-- git diff --check: pending final commit review.
-- No Rust or full UI tests run; application code was not changed.
+- XML parsing and language list assertion: passed.
+- Existing manifest and identity validation: passed.
+- MakePri indexing and MakeAppx packaging: passed.
+- git diff --check: passed.
+- Full Rust tests not run; application code was not changed.
 
 ## Decisions (and why)
-- Kept MakePri /dq en-US: it sets the default qualifier for PRI indexing and does not replace the manifest supported-language list. The app has no separate localized PRI assets.
-- The manifest declaration and local package validation cannot establish Store recognition; that requires publishing/submitting a package containing this manifest.
+- Keep en-US first because Microsoft documents the first manifest Resource as the default language.
+- Do not modify MakePri configuration: /dq chooses the PRI default qualifier and does not replace the AppxManifest supported-language list.
 
 ## Blockers
-- None.
+- Store recognition is unverified until a package containing the changed manifest is submitted/published.
 
 ## Next actions
-1. Run final diff checks, commit and push, then open a PR targeting main.
+1. Await PR review. After merge, submit a new MSIX package for Store language recognition; no submission was made in this task.
