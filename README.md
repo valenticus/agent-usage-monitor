@@ -14,7 +14,11 @@ A small Windows tray app that shows remaining quota, reset countdowns and low-li
 ![Rust](https://img.shields.io/badge/Rust-Slint-15243D?style=flat-square)
 ![Languages](https://img.shields.io/badge/UI-UA%20·%20EN%20·%20PL%20·%20RU-15243D?style=flat-square)
 
-**[Download v0.2.0](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.2.0)** · [All releases](https://github.com/valenticus/agent-usage-monitor/releases) · [Report an issue](https://github.com/valenticus/agent-usage-monitor/issues)
+**[Download v0.2.0](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.2.0)** · [All releases](https://github.com/valenticus/agent-usage-monitor/releases) · [Microsoft Store](https://apps.microsoft.com/detail/9N20DHG8SSS1) · [Report an issue](https://github.com/valenticus/agent-usage-monitor/issues)
+
+<a href="https://get.microsoft.com/installer/download/9N20DHG8SSS1?referrer=appbadge">
+  <img src="https://get.microsoft.com/images/en-us%20dark.svg" alt="Download Agent Usage Monitor from Microsoft Store" width="200">
+</a>
 
 <img src="assets/hero.png" alt="Agent Usage Monitor: Settings in Light and Bluish Dark themes with the tray window">
 
@@ -91,7 +95,7 @@ The compact preview appears on hover; the full window opens on double-click or f
 
 ## Download and install
 
-Downloads are on **[GitHub Releases](https://github.com/valenticus/agent-usage-monitor/releases)**. Each release lists SHA-256 checksums for its files. Requirements: Windows 10 version 1809 or later, x64.
+Install via the **[Microsoft Store](https://apps.microsoft.com/detail/9N20DHG8SSS1)** or download the installer and portable ZIP from **[GitHub Releases](https://github.com/valenticus/agent-usage-monitor/releases)**. Each GitHub release lists SHA-256 checksums for its files. Requirements: Windows 10 version 1809 or later, x64.
 
 ### Windows installer (recommended)
 
