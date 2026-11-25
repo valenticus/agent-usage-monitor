@@ -59,8 +59,10 @@ pub struct Flyout {
     /// user interacts (then the normal 2-second leave rule applies). Hover
     /// events never shorten it.
     hold_until: Cell<Option<Instant>>,
-    /// First pointer movement over the tray icon while hidden.
+    /// First pointer movement over the tray icon while a preview is eligible.
     hover_since: Cell<Option<Instant>>,
+    /// Restore a background pinned presentation after its temporary preview.
+    restore_pinned_after_preview: Cell<bool>,
     /// Set while a context-menu refresh is running; the preview stays visible.
     refresh_started: Cell<Option<Instant>>,
     /// Last position of the pinned flyout (kept across close/open).
@@ -146,6 +148,58 @@ enum HoverAction {
     ShowCompact,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoverTimerAction {
+    Cancel,
+    Wait,
+    Dispatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewEndAction {
+    Hide,
+    RestorePinned,
+}
+
+fn next_hover_since(
+    pending_since: Option<Instant>,
+    candidate: bool,
+    now: Instant,
+) -> Option<Instant> {
+    candidate.then_some(pending_since.unwrap_or(now))
+}
+
+fn pointer_hover_candidate(mode: Mode, full_window_is_foreground: bool) -> bool {
+    match mode {
+        Mode::Hidden => true,
+        Mode::FullPinned => !full_window_is_foreground,
+        Mode::CompactTemporary => false,
+    }
+}
+
+fn hover_timer_action(
+    mode: Mode,
+    full_window_is_foreground: bool,
+    pointer_is_over_icon: bool,
+    elapsed: Duration,
+) -> HoverTimerAction {
+    if !pointer_hover_candidate(mode, full_window_is_foreground) || !pointer_is_over_icon {
+        HoverTimerAction::Cancel
+    } else if elapsed >= HOVER_DELAY {
+        HoverTimerAction::Dispatch
+    } else {
+        HoverTimerAction::Wait
+    }
+}
+
+fn preview_end_action(mode: Mode, restore_pinned: bool) -> Option<PreviewEndAction> {
+    (mode == Mode::CompactTemporary).then_some(if restore_pinned {
+        PreviewEndAction::RestorePinned
+    } else {
+        PreviewEndAction::Hide
+    })
+}
+
 fn hover_action(mode: Mode, full_window_is_foreground: bool) -> HoverAction {
     match mode {
         Mode::FullPinned if full_window_is_foreground => HoverAction::KeepFull,
@@ -166,6 +220,7 @@ impl Flyout {
             hide_deadline: Cell::new(None),
             hold_until: Cell::new(None),
             hover_since: Cell::new(None),
+            restore_pinned_after_preview: Cell::new(false),
             refresh_started: Cell::new(None),
             pinned_position: Cell::new(None),
             target: Cell::new(None),
@@ -253,15 +308,17 @@ impl Flyout {
         match hover_action(self.mode.get(), self.window_is_foreground()) {
             HoverAction::KeepFull => {}
             HoverAction::ShowCompact => {
+                self.restore_pinned_after_preview
+                    .set(self.mode.get() == Mode::FullPinned);
                 self.remember_pinned_position();
                 self.mode.set(Mode::CompactTemporary);
                 self.clear_timers();
-                self.present(true);
+                self.present(true, false);
             }
             HoverAction::KeepCompact => {
                 self.hide_deadline.set(None);
                 if self.hiding.get() {
-                    self.present(true);
+                    self.present(true, false);
                 }
             }
         }
@@ -303,29 +360,37 @@ impl Flyout {
     /// Pointer movement over the tray icon. The preview opens once the cursor
     /// has rested there for `HOVER_DELAY` (checked in `tick`).
     pub fn pointer_over_icon(&self) {
-        if self.mode.get() == Mode::Hidden && self.hover_since.get().is_none() {
-            self.hover_since.set(Some(Instant::now()));
-        }
+        let mode = self.mode.get();
+        let full_is_foreground = mode == Mode::FullPinned && self.window_is_foreground();
+        let candidate = pointer_hover_candidate(mode, full_is_foreground);
+        self.hover_since.set(next_hover_since(
+            self.hover_since.get(),
+            candidate,
+            Instant::now(),
+        ));
     }
 
     /// Double-click or menu "Open": the full flyout, pinned until closed.
     pub fn open_full(self: &Rc<Self>) {
+        self.restore_pinned_after_preview.set(false);
         self.mode.set(Mode::FullPinned);
         self.clear_timers();
-        self.present(false);
+        self.present(false, true);
     }
 
     /// Close button: hide to the tray (the application keeps running).
     pub fn close(self: &Rc<Self>) {
         self.remember_pinned_position();
+        self.restore_pinned_after_preview.set(false);
         self.mode.set(Mode::Hidden);
         self.clear_timers();
-        self.animate(false);
+        self.animate(false, false);
     }
 
     /// The window was closed by the system (e.g. Alt+F4).
     pub fn closed_externally(&self) {
         self.remember_pinned_position();
+        self.restore_pinned_after_preview.set(false);
         self.mode.set(Mode::Hidden);
         self.clear_timers();
         self.generation.set(self.generation.get() + 1);
@@ -345,7 +410,7 @@ impl Flyout {
         }
         if self.mode.get() == Mode::Hidden || self.hiding.get() {
             self.mode.set(Mode::CompactTemporary);
-            self.present(true);
+            self.present(true, false);
         }
         self.hide_deadline.set(None);
         if will_complete {
@@ -397,11 +462,18 @@ impl Flyout {
         self.sync_native_style(&window);
         let now = Instant::now();
         if let Some(since) = self.hover_since.get() {
-            if self.mode.get() != Mode::Hidden || !self.cursor_over_icon() {
-                self.hover_since.set(None);
-            } else if now.duration_since(since) >= HOVER_DELAY {
-                self.hover_since.set(None);
-                self.hover();
+            match hover_timer_action(
+                self.mode.get(),
+                self.mode.get() == Mode::FullPinned && self.window_is_foreground(),
+                self.cursor_over_icon(),
+                now.duration_since(since),
+            ) {
+                HoverTimerAction::Cancel => self.hover_since.set(None),
+                HoverTimerAction::Wait => {}
+                HoverTimerAction::Dispatch => {
+                    self.hover_since.set(None);
+                    self.hover();
+                }
             }
         }
         if self.mode.get() != Mode::CompactTemporary || self.hiding.get() {
@@ -445,9 +517,25 @@ impl Flyout {
     }
 
     fn hide_now(self: &Rc<Self>) {
-        self.mode.set(Mode::Hidden);
-        self.clear_timers();
-        self.animate(false);
+        match preview_end_action(
+            self.mode.get(),
+            self.restore_pinned_after_preview.replace(false),
+        ) {
+            Some(PreviewEndAction::RestorePinned) => {
+                self.mode.set(Mode::FullPinned);
+                self.clear_timers();
+                self.animation.stop();
+                self.generation.set(self.generation.get() + 1);
+                self.hiding.set(false);
+                self.present(false, false);
+            }
+            Some(PreviewEndAction::Hide) => {
+                self.mode.set(Mode::Hidden);
+                self.clear_timers();
+                self.animate(false, false);
+            }
+            None => {}
+        }
     }
 
     /// Debug-only review aid: compact preview that stays until closed by timeout.
@@ -478,20 +566,17 @@ impl Flyout {
 
     /// Shows a presentation. A visible window switches in place (no hide/show,
     /// so no flicker); a hidden one fades in.
-    fn present(self: &Rc<Self>, compact: bool) {
+    fn present(self: &Rc<Self>, compact: bool, activate: bool) {
         let Some(window) = self.window.upgrade() else {
             return;
         };
         let visible = window.window().is_visible() && !self.hiding.get();
         window.set_compact(compact);
-        // Before any show or activation: compact → non-activatable, full →
-        // activatable and out of the TOPMOST band. Each presentation gets a
-        // fresh write budget for the activation style.
+        // Each presentation gets a fresh write budget for activation style.
         self.no_activate_writes.set(0);
-        self.sync_native_style(&window);
         let (width, height) = Self::physical_size(&window);
         let scale = window.window().scale_factor();
-        let position = if !compact && !visible {
+        let position = if !compact {
             self.pinned_position
                 .get()
                 .and_then(|position| restore_position(position, width, height, scale))
@@ -515,19 +600,23 @@ impl Flyout {
             self.animation.stop();
             set_alpha(&window, 255);
             window.window().set_position(position);
-            // Compact → TOPMOST; switching to full drops TOPMOST before activation.
+            // Apply activation/Z-order styles only after applying the target
+            // geometry, so a pinned full-size window is never briefly raised
+            // TOPMOST during its compact transition.
             self.sync_native_style(&window);
-            if !compact {
+            if activate {
                 activate_window(&window);
             }
         } else {
-            self.animate(true);
+            // Install WS_EX_NOACTIVATE before the first ShowWindow call.
+            self.sync_native_style(&window);
+            self.animate(true, activate);
         }
     }
 
     /// Fade + 6 px slide: show 180 ms, hide 150 ms. Respects the Windows
     /// "Animation effects" setting (instant when animations are off).
-    fn animate(self: &Rc<Self>, showing: bool) {
+    fn animate(self: &Rc<Self>, showing: bool, activate: bool) {
         let Some(window) = self.window.upgrade() else {
             return;
         };
@@ -551,7 +640,7 @@ impl Flyout {
                 window.window().set_position(target);
                 let _ = window.show();
                 self.sync_native_style(&window);
-                if self.mode.get() == Mode::FullPinned {
+                if activate {
                     activate_window(&window);
                 }
                 set_alpha(&window, 255);
@@ -575,7 +664,7 @@ impl Flyout {
                 .set_position(slint::PhysicalPosition::new(target.x, target.y + offset));
             let _ = window.show();
             self.sync_native_style(&window);
-            if self.mode.get() == Mode::FullPinned {
+            if activate {
                 activate_window(&window);
             }
             set_alpha(&window, 0);
@@ -1095,9 +1184,11 @@ fn set_alpha(window: &MainWindow, alpha: u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HoverAction, MAX_NO_ACTIVATE_WRITES, Mode, NativeStyle, StyleAction, hover_action,
-        native_style, no_activate_action,
+        HOVER_DELAY, HoverAction, HoverTimerAction, MAX_NO_ACTIVATE_WRITES, Mode, NativeStyle,
+        PreviewEndAction, StyleAction, hover_action, hover_timer_action, native_style,
+        next_hover_since, no_activate_action, pointer_hover_candidate, preview_end_action,
     };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn no_activate_is_decided_from_the_live_style() {
@@ -1225,6 +1316,100 @@ mod tests {
             hover_action(Mode::FullPinned, false),
             HoverAction::ShowCompact
         );
+    }
+
+    #[test]
+    fn pointer_hover_scheduler_dispatches_for_inactive_full_and_cancels_for_active_full() {
+        let start = Instant::now();
+        assert!(pointer_hover_candidate(Mode::Hidden, false));
+        assert!(pointer_hover_candidate(Mode::FullPinned, false));
+        assert!(!pointer_hover_candidate(Mode::FullPinned, true));
+        assert!(!pointer_hover_candidate(Mode::CompactTemporary, false));
+
+        let pending = next_hover_since(None, true, start).expect("candidate starts timer");
+        assert_eq!(pending, start);
+        assert_eq!(
+            next_hover_since(Some(pending), true, start + Duration::from_millis(100)),
+            Some(start),
+            "repeated pointer events must not restart the hover delay"
+        );
+        assert_eq!(
+            hover_timer_action(
+                Mode::FullPinned,
+                false,
+                true,
+                HOVER_DELAY - Duration::from_millis(1)
+            ),
+            HoverTimerAction::Wait
+        );
+        assert_eq!(
+            hover_timer_action(Mode::FullPinned, false, true, HOVER_DELAY),
+            HoverTimerAction::Dispatch
+        );
+        assert_eq!(
+            hover_timer_action(Mode::FullPinned, true, true, HOVER_DELAY),
+            HoverTimerAction::Cancel,
+            "foreground full window must cancel pending compact dispatch"
+        );
+        assert_eq!(
+            hover_timer_action(Mode::FullPinned, false, false, HOVER_DELAY),
+            HoverTimerAction::Cancel,
+            "fast pointer departure must cancel pending dispatch"
+        );
+    }
+
+    #[test]
+    fn preview_lifecycle_hides_closed_preview_and_restores_or_activates_pinned_window() {
+        // Hidden -> hover -> dismiss: ordinary preview closes.
+        let mut mode = Mode::Hidden;
+        assert_eq!(hover_action(mode, false), HoverAction::ShowCompact);
+        mode = Mode::CompactTemporary;
+        assert_eq!(
+            preview_end_action(mode, false),
+            Some(PreviewEndAction::Hide)
+        );
+        mode = Mode::Hidden;
+        assert_eq!(mode, Mode::Hidden);
+
+        // Foreground full window remains pinned when the tray is hovered.
+        mode = Mode::FullPinned;
+        assert_eq!(hover_action(mode, true), HoverAction::KeepFull);
+        assert_eq!(mode, Mode::FullPinned);
+
+        // Background pinned window switches to compact, then restores full in
+        // place on expiry. Explicit open instead keeps full and activates it.
+        assert_eq!(hover_action(mode, false), HoverAction::ShowCompact);
+        let mut restore_pinned = mode == Mode::FullPinned;
+        mode = Mode::CompactTemporary;
+        assert!(restore_pinned);
+        assert_eq!(
+            preview_end_action(mode, restore_pinned),
+            Some(PreviewEndAction::RestorePinned)
+        );
+        mode = Mode::FullPinned;
+        restore_pinned = false;
+        assert_eq!(mode, Mode::FullPinned);
+        assert!(!restore_pinned);
+        assert!(!native_style(mode, true, false).topmost);
+
+        // A second background preview can be explicitly opened; it stays full
+        // and no later preview dismissal can hide it.
+        assert_eq!(hover_action(mode, false), HoverAction::ShowCompact);
+        restore_pinned = mode == Mode::FullPinned;
+        mode = Mode::CompactTemporary;
+        assert_eq!(mode, Mode::CompactTemporary);
+        assert!(restore_pinned);
+        mode = Mode::FullPinned; // open_full: explicit activation path
+        restore_pinned = false;
+        assert_eq!(mode, Mode::FullPinned);
+        assert!(!restore_pinned);
+        assert_eq!(preview_end_action(mode, restore_pinned), None);
+
+        // Explicit close clears restoration and hides the presentation.
+        mode = Mode::Hidden;
+        restore_pinned = false;
+        assert_eq!(mode, Mode::Hidden);
+        assert!(!restore_pinned);
     }
 
     #[test]
