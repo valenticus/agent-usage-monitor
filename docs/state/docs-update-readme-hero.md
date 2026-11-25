@@ -2,31 +2,32 @@
 
 ## Goal and constraints
 - Replace the README hero image with the user-supplied Downloads/hero.png byte-for-byte.
-- Keep the change on a docs-only branch; do not alter README text or other assets.
+- Keep this docs-only; no README text or other assets changed.
 
 ## Done
-- Replaced assets/hero.png with C:/Users/fetis/Downloads/hero.png.
-- SHA-256 match verified: 59CDB97BB2BD9D99DB577D94DDEA920ED066B710A580DB1D6B39456758BCF561.
+- Replaced assets/hero.png with the supplied file, unchanged. SHA-256: 59CDB97BB2BD9D99DB577D94DDEA920ED066B710A580DB1D6B39456758BCF561.
 - git diff --check passed.
+- Commit 5ad0497ad5d32a55466f8412d2a24e7e0b8738a9 pushed.
+- PR https://github.com/valenticus/agent-usage-monitor/pull/11 opened against main; not merged.
 
 ## Git state
 - Branch: docs/update-readme-hero
-- Base HEAD: 9059caf2e1a4f9928555a1b2d99665d1bcfc9757 (updated main/origin/main after PR #9 merged).
+- HEAD before this state update: 5ad0497ad5d32a55466f8412d2a24e7e0b8738a9
 
 ## Changed files
 - assets/hero.png
 - docs/state/docs-update-readme-hero.md
 
 ## Checks
-- Source/asset SHA-256 equality: passed.
+- Source and destination SHA-256 equality: passed.
 - git diff --check: passed.
 
 ## Decisions (and why)
-- Used the supplied file as-is and retained assets/hero.png so the README link stays unchanged.
-- PR #9 was already merged, so this follow-up uses a fresh branch and PR.
+- Kept assets/hero.png so the README link remains unchanged.
+- PR #9 had already merged, so this update is in a new branch and PR.
 
 ## Blockers
 - None.
 
 ## Next actions
-1. Commit and push this replacement; open a PR targeting main.
+1. Await PR review; do not merge without the user request.
