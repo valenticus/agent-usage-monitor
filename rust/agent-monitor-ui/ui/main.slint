@@ -1440,6 +1440,9 @@ export component SettingsWindow inherits Window {
     out property <length> general-page-required-height: general-page.preferred-height;
     out property <length> notifications-page-required-height: notifications-page.preferred-height;
     out property <length> about-page-required-height: about-page.preferred-height;
+    out property <length> about-update-button-gap: update-actions.absolute-position.y
+        - update-distribution-label.absolute-position.y
+        - update-distribution-label.height;
     out property <length> settings-content-width: content.width;
     out property <length> required-settings-height: max(max(general-page.preferred-height, notifications-page.preferred-height), about-page.preferred-height);
     out property <length> active-page-required-height: root.selected-tab == 0 ? general-page.preferred-height : (root.selected-tab == 1 ? notifications-page.preferred-height : about-page.preferred-height);
@@ -2005,7 +2008,7 @@ export component SettingsWindow inherits Window {
                     }
                 }
                 Rectangle { height: 16px; }
-                Text {
+                update-distribution-label := Text {
                     text: root.update-distribution-label;
                     font-size: 12px;
                     color: Theme.text-muted;
@@ -2027,11 +2030,11 @@ export component SettingsWindow inherits Window {
                     }
                 }
                 Rectangle { height: 12px; }
-                VerticalLayout {
+                update-actions := VerticalLayout {
                     HorizontalLayout {
                         height: 32px;
                         spacing: 8px;
-                        if root.update-check-available: SettingsButton {
+                        if root.update-check-available: update-check-button := SettingsButton {
                             text: root.update-check-label;
                             enabled: !root.update-checking;
                             clicked => { root.check-for-updates(); }

@@ -45,10 +45,10 @@
 - Final validation review: an initial full workspace run exposed one stale assertion in `slint_keeps_inactive_settings_pages_measurable_at_their_actual_widths` (it expected the natural About requirement to stay fixed when status text appears). Updated it to assert that About's scrollable requirement grows while the already-open native window remains unchanged. The next complete `cargo test --locked --workspace -- --test-threads=2` passed: Core 43, bridge unit 3, bridge process 1, UI 143, doc tests 0.
 - After that test fix: `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, Windows debug `cargo check --locked --workspace --target x86_64-pc-windows-msvc`, and Windows Release `cargo check --locked --workspace --release --target x86_64-pc-windows-msvc` passed. Release compile excludes the debug QA parser/preview application; the runtime package identity still determines `store-build`.
 - The 72-combination matrix does not exercise `Checking`, `Current`, `Timeout`, or `Distribution::Unknown`; unknown distribution fail-closed behavior is covered by updater/distribution tests elsewhere, not this About matrix. These remain untested About-state combinations. Full manual theme/tab interaction and physical constrained-work-area, multi-monitor and alternate-DPI QA also remain open; only one 1920×1080/96 DPI monitor was physically measured.
-- Existing PR #7 CI was green before this fix update. The new fix commit's CI has not run yet; poll Actions after pushing.
+- PR #7 remains open and unmerged. Commit `a9e8cc3f37fb638cf604a2292f03d5f3ca2a6512` is pushed; both GitHub Actions Windows checks passed.
 
 ## Constraints
-- Do not merge PR #7, commit or push local QA-preparation changes, install AUM, or modify release/Store artifacts.
+- Do not merge PR #7, install AUM, or modify release/Store artifacts. Any approved QA launch must use the isolated build/configuration only.
 - Preserve `feat/v0.3.0` and all other worktrees.
 
 ## Final visual polish (2026-11-25)
@@ -56,7 +56,15 @@
 - Optically raised the General / Claude statusLine Copy label by 1 logical px using 2 px of bottom inner padding; the button's fixed height and horizontal padding remain unchanged.
 - Added a 12 logical px spacer before the About update action row, after the conditional update status, avoiding the earlier oversized gap.
 - `cargo fmt --all --check`, `cargo test --locked -p agent-usage-monitor-ui -- --test-threads=2` (143 passed), strict workspace Clippy, Windows-target workspace check, and `git diff --check` passed. No physical UI/DPI QA was repeated for these small changes.
-- The visual polish is committed locally as `fix(settings): polish final layout details`; pending: push the existing PR branch and check GitHub Actions. PR #7 must remain unmerged.
+- The visual polish is committed and pushed as `fix(settings): polish final layout details`; both Windows CI checks passed. PR #7 remains unmerged.
+
+## Final About spacing QA (2026-11-25)
+- Root cause: the isolated QA executable had a 2026-11-24 build timestamp, before the 2026-11-25 commit that added the 12 px About spacer. The previous source at `717b533` had zero spacing between the Distribution text and action row; the new source measures 12.00 logical px. The discrepancy was a stale QA executable, not a collapsed Slint spacer.
+- Added `about-update-button-gap`, computed from Slint `absolute-position` and text height. The Slint 1.19 matrix asserts exactly 12.00 logical px in Idle and at least 12 px when status text is shown, across UA/EN/PL/RU and Portable/Installer. Store has no GitHub update action.
+- Fixed debug QA display wiring: startup initialization previously overwrote a simulated Store/About distribution with the actual unpackaged Portable distribution. `about_display_distribution` now applies a preview only to isolated debug display state; updater behavior continues to use actual runtime package identity. Added a regression test for isolated-only preview selection.
+- Rebuilt the isolated debug executable on 2026-11-25 and captured actual Windows About windows for all 12 language/distribution combinations. Native sizes were 736×777 px for Portable/Installer and 736×801 px for Store on the available 1920×1080/96-DPI display. Store screenshots show the Store notice and no GitHub check/release/automatic-check controls; Installer and Portable show their correct labels and controls. QA settings SHA-256 remained `193E868988A501F5E34812E91332AC3A170A9C07CD0B0F2FE8DC8832C330F4D0`; all QA processes were stopped. Installed v0.2.0 remained running at its WindowsApps path (PID 1588).
+- Validation: `cargo fmt --all --check`, full `cargo test --locked --workspace -- --test-threads=2` (43 Core, 3 bridge unit, 1 bridge process, 144 UI; 191 passed), strict Clippy, Windows debug and release target checks, isolated debug app build, and `git diff --check` passed.
+- Final QA wiring/geometry regression is committed locally; pending: push and confirm GitHub Actions. PR #7 stays unmerged.
 
 ## Next
-- Remaining QA: exercise About `Checking`, `Current`, `Timeout` and unknown-distribution presentation if those states are added to the matrix; perform manual tab/scroll, theme, resize/reopen, constrained work-area, multi-monitor and alternate-DPI checks. QA preview processes are stopped. The visual polish commit is local; push and CI check remain pending. PR #7 remains unmerged.
+- Remaining manual QA: verify constrained work areas and alternate DPI/multi-monitor behavior on physical hardware. QA preview processes are stopped; push and CI confirmation for the final About QA wiring/geometry regression remain pending. PR #7 remains unmerged.

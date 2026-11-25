@@ -111,6 +111,21 @@ impl AboutPreview {
     }
 }
 
+#[cfg(any(debug_assertions, test))]
+fn about_display_distribution(
+    production_distribution: Distribution,
+    qa_isolated: bool,
+    preview: Option<AboutPreview>,
+) -> Distribution {
+    if qa_isolated {
+        preview
+            .map(|preview| preview.distribution)
+            .unwrap_or(production_distribution)
+    } else {
+        production_distribution
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PhysicalWorkArea {
     left: i32,
@@ -493,6 +508,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let update_state = Arc::new(Mutex::new(UiState::default()));
     let update_checking = Arc::new(AtomicBool::new(false));
     let update_distribution = Distribution::current();
+    #[cfg(debug_assertions)]
+    let update_display_distribution = about_display_distribution(
+        update_distribution,
+        qa_isolated,
+        QA_ABOUT_PREVIEW.lock().ok().and_then(|preview| *preview),
+    );
+    #[cfg(not(debug_assertions))]
+    let update_display_distribution = update_distribution;
 
     let (settings_sender, settings_receiver) = watch::channel(lock_settings(&config));
     window.on_open_settings({
@@ -824,7 +847,8 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_window.on_open_repository(open_repository);
     settings_window.on_open_issues(open_issues);
     settings_window.set_update_distribution_label(
-        update_checker::distribution_label(update_distribution, lock_locale(&locale)).into(),
+        update_checker::distribution_label(update_display_distribution, lock_locale(&locale))
+            .into(),
     );
     settings_window.set_update_check_label(lock_locale(&locale).settings().update_check.into());
     settings_window.set_update_release_label(lock_locale(&locale).settings().update_release.into());
@@ -834,9 +858,10 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_window.set_automatic_update_checks_enabled(
         lock_settings(&config).automatic_update_checks_enabled,
     );
-    settings_window.set_update_check_available(update_distribution.can_offer_github_update());
-    if update_distribution == Distribution::MicrosoftStore
-        || update_distribution == Distribution::Unknown
+    settings_window
+        .set_update_check_available(update_display_distribution.can_offer_github_update());
+    if update_display_distribution == Distribution::MicrosoftStore
+        || update_display_distribution == Distribution::Unknown
     {
         settings_window.set_update_check_label(labels.update_store.into());
     }
@@ -2253,9 +2278,11 @@ fn update_settings_window(
         None
     };
     #[cfg(debug_assertions)]
-    let distribution = preview
-        .map(|preview| preview.distribution)
-        .unwrap_or(production_distribution);
+    let distribution = about_display_distribution(
+        production_distribution,
+        QA_ISOLATED.load(Ordering::Acquire),
+        preview,
+    );
     #[cfg(not(debug_assertions))]
     let distribution = production_distribution;
     window.set_codex_enabled(settings.codex_enabled);
@@ -3297,9 +3324,32 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AboutPreviewStatus, Distribution, PhysicalWorkArea, SettingsScreenSignature, UpdateStatus,
-        apply_about_preview_status, configure_about_update_ui, settings_geometry,
+        AboutPreview, AboutPreviewStatus, Distribution, PhysicalWorkArea, SettingsScreenSignature,
+        UpdateStatus, about_display_distribution, apply_about_preview_status,
+        configure_about_update_ui, settings_geometry,
     };
+
+    #[test]
+    fn about_distribution_preview_only_overrides_isolated_display_state() {
+        let production = Distribution::GitHubPortable;
+        let store_preview = AboutPreview {
+            distribution: Distribution::MicrosoftStore,
+            status: AboutPreviewStatus::Idle,
+        };
+
+        assert_eq!(
+            about_display_distribution(production, true, Some(store_preview)),
+            Distribution::MicrosoftStore
+        );
+        assert_eq!(
+            about_display_distribution(production, true, None),
+            production
+        );
+        assert_eq!(
+            about_display_distribution(production, false, Some(store_preview)),
+            production
+        );
+    }
 
     #[test]
     fn normal_settings_content_fits_below_a_1080p_work_area() {
@@ -3384,6 +3434,7 @@ mod tests {
                     &adapter::UiSnapshot::unavailable(),
                     now_unix(),
                 );
+                window.set_selected_tab(2);
                 let store = distribution == Distribution::MicrosoftStore;
                 let mut expected_window_size = None;
                 let mut measurements = Vec::new();
@@ -3392,6 +3443,25 @@ mod tests {
                     configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
                     if !store {
                         apply_about_preview_status(&window, locale, status);
+                    }
+                    if store {
+                        assert!(!window.get_update_check_available());
+                    } else {
+                        let gap = window.get_about_update_button_gap();
+                        if matches!(status, AboutPreviewStatus::Idle) {
+                            println!(
+                                "{locale:?}/{distribution:?} idle label-to-button gap: {gap:.2} logical px"
+                            );
+                            assert!(
+                                (gap - 12.0).abs() < 0.1,
+                                "idle label-to-button gap should be 12 logical px for {locale:?}/{distribution:?}, got {gap:.2}"
+                            );
+                        } else {
+                            assert!(
+                                gap >= 12.0,
+                                "status must preserve at least a 12 logical px gap before the button for {locale:?}/{distribution:?}/{status:?}, got {gap:.2}"
+                            );
+                        }
                     }
                     assert_eq!(
                         window.get_update_check_available(),
