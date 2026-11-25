@@ -51,5 +51,12 @@
 - Do not merge PR #7, commit or push local QA-preparation changes, install AUM, or modify release/Store artifacts.
 - Preserve `feat/v0.3.0` and all other worktrees.
 
+## Final visual polish (2026-11-25)
+- Kept the sidebar version visible on About as well as General and Notifications; sidebar geometry is unchanged.
+- Optically raised the General / Claude statusLine Copy label by 1 logical px using 2 px of bottom inner padding; the button's fixed height and horizontal padding remain unchanged.
+- Added a 12 logical px spacer before the About update action row, after the conditional update status, avoiding the earlier oversized gap.
+- `cargo fmt --all --check`, `cargo test --locked -p agent-usage-monitor-ui -- --test-threads=2` (143 passed), strict workspace Clippy, Windows-target workspace check, and `git diff --check` passed. No physical UI/DPI QA was repeated for these small changes.
+- The visual polish is committed locally as `fix(settings): polish final layout details`; pending: push the existing PR branch and check GitHub Actions. PR #7 must remain unmerged.
+
 ## Next
-- Remaining QA: exercise About `Checking`, `Current`, `Timeout` and unknown-distribution presentation if those states are added to the matrix; perform manual tab/scroll, theme, resize/reopen, constrained work-area, multi-monitor and alternate-DPI checks. QA preview processes are stopped. At this point no fix commit or push has been made; PR #7 remains unmerged.
+- Remaining QA: exercise About `Checking`, `Current`, `Timeout` and unknown-distribution presentation if those states are added to the matrix; perform manual tab/scroll, theme, resize/reopen, constrained work-area, multi-monitor and alternate-DPI checks. QA preview processes are stopped. The visual polish commit is local; push and CI check remain pending. PR #7 remains unmerged.

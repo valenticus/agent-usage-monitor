@@ -368,6 +368,7 @@ component SettingsButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> external: false;
     in property <bool> small: false;
+    in property <length> label-optical-padding-bottom: 0px;
     callback clicked();
     height: root.small ? 24px : 32px;
     border-radius: 6px;
@@ -383,6 +384,7 @@ component SettingsButton inherits Rectangle {
     HorizontalLayout {
         padding-left: root.small ? 12px : 14px;
         padding-right: root.small ? 12px : 14px;
+        padding-bottom: root.label-optical-padding-bottom;
         spacing: 10px;
         alignment: center;
         Text {
@@ -1573,8 +1575,6 @@ export component SettingsWindow inherits Window {
         y: root.height - 40px;
         width: 160px;
         height: 24px;
-        // About already shows the version chip beside the product name.
-        visible: root.selected-tab != 2;
         text: root.app-version;
         color: Theme.text-muted;
         font-size: 13px;
@@ -1741,6 +1741,7 @@ export component SettingsWindow inherits Window {
                             error: root.statusline-error;
                             if root.statusline-can-copy: SettingsButton {
                                 small: true;
+                                label-optical-padding-bottom: 2px;
                                 text: root.statusline-copy-label;
                                 clicked => { root.copy-statusline-setting(); }
                             }
@@ -2025,6 +2026,7 @@ export component SettingsWindow inherits Window {
                         wrap: word-wrap;
                     }
                 }
+                Rectangle { height: 12px; }
                 VerticalLayout {
                     HorizontalLayout {
                         height: 32px;
