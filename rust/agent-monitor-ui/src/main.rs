@@ -2662,12 +2662,7 @@ fn apply_about_preview_status(
 ) {
     let labels = locale.settings();
     let (status, available, release_visible, checking) = match preview_status {
-        AboutPreviewStatus::Idle => (
-            format!("{} v{}", labels.update_installed, env!("CARGO_PKG_VERSION")),
-            false,
-            false,
-            false,
-        ),
+        AboutPreviewStatus::Idle => (String::new(), false, false, false),
         AboutPreviewStatus::Checking => (labels.update_checking.into(), false, false, true),
         AboutPreviewStatus::Available => (
             format!(
@@ -2832,9 +2827,7 @@ fn set_update_status_text(
 ) {
     use slint::SharedString;
     let text: SharedString = match status {
-        UpdateStatus::Idle => {
-            format!("{} v{}", labels.update_installed, env!("CARGO_PKG_VERSION")).into()
-        }
+        UpdateStatus::Idle => "".into(),
         UpdateStatus::Checking => labels.update_checking.into(),
         UpdateStatus::Available { current, latest } => {
             format!("{}: v{} → v{}", labels.update_available, current, latest).into()
@@ -3557,8 +3550,8 @@ mod tests {
                 let store = distribution == Distribution::MicrosoftStore;
                 let mut expected_window_size = None;
                 let mut measurements = Vec::new();
-                let mut expected_about_height = None;
                 let mut expected_button_gap = None;
+                let mut expected_required_height = None;
 
                 for status in statuses {
                     configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
@@ -3570,8 +3563,8 @@ mod tests {
                     } else {
                         let gap = window.get_about_update_button_gap();
                         assert!(
-                            (gap - 40.0).abs() < 0.1,
-                            "status slot and button gap should total 40 logical px for {locale:?}/{distribution:?}/{status:?}, got {gap:.2}"
+                            (gap - 12.0).abs() < 0.1,
+                            "idle spacing from the distribution label to the update button should remain 12 logical px for {locale:?}/{distribution:?}/{status:?}, got {gap:.2}"
                         );
                         if let Some(expected) = expected_button_gap {
                             assert_eq!(gap, expected, "button position changed across statuses");
@@ -3609,9 +3602,10 @@ mod tests {
                     if store {
                         assert_eq!(window.get_update_status().as_str(), labels.update_store);
                     } else if matches!(status, AboutPreviewStatus::Idle) {
+                        assert!(window.get_update_status().is_empty());
                         assert_eq!(
-                            window.get_update_status().as_str(),
-                            format!("{} v{}", labels.update_installed, env!("CARGO_PKG_VERSION"))
+                            window.get_app_version().as_str(),
+                            format!("v{}", env!("CARGO_PKG_VERSION"))
                         );
                     } else if matches!(status, AboutPreviewStatus::Checking) {
                         assert_eq!(window.get_update_status().as_str(), labels.update_checking);
@@ -3639,20 +3633,34 @@ mod tests {
                     let required = window.get_required_settings_height();
                     let about_height = window.get_about_page_required_height();
                     measurements.push((status, about_height, required));
-                    if let Some(expected) = expected_about_height {
+                    if let Some(expected) = expected_required_height {
                         assert_eq!(
-                            about_height, expected,
-                            "About height changed across status transitions for {distribution:?}/{locale:?}/{status:?}"
+                            required, expected,
+                            "window sizing basis changed across status transitions for {distribution:?}/{locale:?}/{status:?}"
                         );
                     } else {
-                        expected_about_height = Some(about_height);
+                        expected_required_height = Some(required);
+                    }
+                    let status_height = window.get_update_status_slot_height();
+                    let text_height = window.get_update_status_text_height();
+                    if window.get_update_status().is_empty() {
+                        assert_eq!(status_height, 0.0, "idle status row should collapse");
+                    } else {
+                        assert!(status_height > 0.0);
+                        assert!(
+                            (status_height - text_height).abs() < 0.1,
+                            "the status row must contain the complete wrapped text without clipping for {distribution:?}/{locale:?}/{status:?}: row={status_height:.2}, text={text_height:.2}"
+                        );
+                    }
+                    if matches!(status, AboutPreviewStatus::Long) && !store {
+                        assert!(status_height > 32.0, "long status should grow naturally");
                     }
                     assert_eq!(
                         required,
                         window
                             .get_general_page_required_height()
                             .max(window.get_notifications_page_required_height())
-                            .max(window.get_about_page_required_height())
+                            .max(window.get_about_page_window_required_height())
                     );
                     if expected_window_size.is_none() {
                         window
@@ -3668,10 +3676,52 @@ mod tests {
                         window.set_theme_kind(theme_kind);
                         window.invoke_apply_theme_palette();
                         assert_eq!(window.get_about_page_required_height(), about_height);
-                        assert_eq!(window.get_about_update_button_gap(), 40.0);
+                        assert_eq!(window.get_about_update_button_gap(), 12.0);
                     }
                 }
                 println!("{locale:?}/{distribution:?}: {measurements:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn localized_update_status_wraps_fully_on_narrow_about_content() {
+        i_slint_backend_testing::init_no_event_loop();
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let window = SettingsWindow::new().unwrap();
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(420.0, 360.0));
+            update_settings_window(
+                &window,
+                &AppSettings::default(),
+                locale,
+                false,
+                &adapter::UiSnapshot::unavailable(),
+                now_unix(),
+            );
+            window.invoke_select_settings_tab(2);
+            let idle_height = window.get_about_page_required_height();
+            let native_size = window.window().size();
+            let labels = locale.settings();
+
+            for message in [
+                labels.update_offline,
+                labels.update_http,
+                labels.update_invalid,
+                labels.update_timeout,
+            ] {
+                window.set_update_status(message.into());
+                let slot_height = window.get_update_status_slot_height();
+                let text_height = window.get_update_status_text_height();
+                assert!(slot_height > 0.0, "{locale:?}: status must remain visible");
+                assert!(
+                    (slot_height - text_height).abs() < 0.1,
+                    "{locale:?}: wrapped status text must fit its row without clipping"
+                );
+                assert_eq!(window.get_about_update_button_gap(), 12.0);
+                assert_eq!(window.window().size(), native_size);
+                assert!(window.get_about_page_required_height() >= idle_height);
             }
         }
     }
@@ -3767,21 +3817,40 @@ mod tests {
         let required_after_content_change = window.get_required_settings_height();
         assert_eq!(window.window().size(), manually_resized_size);
 
-        // A newly visible status changes only the fixed update-status slot;
-        // it cannot change the About page's scroll extent or resize the window.
-        window.set_update_status("update available: version 0.3.1".into());
+        // Status appears below the update action, expands the scroll extent,
+        // and leaves both the action position and native window size intact.
+        window.set_update_status(
+            ("update available: ".to_owned() + &"localized release details ".repeat(10)).into(),
+        );
         window.set_update_available(true);
         window.set_update_release_visible(true);
         assert_eq!(window.window().size(), manually_resized_size);
         let required_after_status = window.get_required_settings_height();
         assert_eq!(required_after_status, required_after_content_change);
-        assert_eq!(window.get_about_update_button_gap(), 40.0);
+        assert_eq!(window.get_about_update_button_gap(), 12.0);
+        assert_eq!(
+            window.get_update_status_slot_height(),
+            window.get_update_status_text_height()
+        );
+        window.invoke_select_settings_tab(2);
+        assert_eq!(window.window().size(), manually_resized_size);
+        window.set_settings_window_height(constrained_viewport);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(720.0, constrained_viewport));
+        assert!(window.get_active_page_required_height() > constrained_viewport);
+        window.invoke_scroll_settings_to_bottom();
+        assert!(window.get_settings_scroll_y() < 0.0);
+        window.set_settings_window_height(manually_resized_size.height as f32);
+        window
+            .window()
+            .set_size(manually_resized_size.to_logical(1.0));
         assert_eq!(
             required_after_status,
             window
                 .get_general_page_required_height()
                 .max(window.get_notifications_page_required_height())
-                .max(window.get_about_page_required_height())
+                .max(window.get_about_page_window_required_height())
         );
 
         // N2: the native size survives a DPI change when it fits the new work

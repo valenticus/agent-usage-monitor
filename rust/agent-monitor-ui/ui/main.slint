@@ -1440,11 +1440,16 @@ export component SettingsWindow inherits Window {
     out property <length> general-page-required-height: general-page.preferred-height;
     out property <length> notifications-page-required-height: notifications-page.preferred-height;
     out property <length> about-page-required-height: about-page.preferred-height;
+    out property <length> about-page-window-required-height: about-page.preferred-height
+        - update-status-container.height
+        - (root.update-status == "" ? 0px : 8px);
     out property <length> about-update-button-gap: update-actions.absolute-position.y
         - update-distribution-label.absolute-position.y
         - update-distribution-label.height;
+    out property <length> update-status-slot-height: update-status-container.height;
+    out property <length> update-status-text-height: update-status-label.preferred-height;
     out property <length> settings-content-width: content.width;
-    out property <length> required-settings-height: max(max(general-page.preferred-height, notifications-page.preferred-height), about-page.preferred-height);
+    out property <length> required-settings-height: max(max(general-page.preferred-height, notifications-page.preferred-height), about-page-window-required-height);
     out property <length> active-page-required-height: root.selected-tab == 0 ? general-page.preferred-height : (root.selected-tab == 1 ? notifications-page.preferred-height : about-page.preferred-height);
     out property <length> settings-scroll-y: content.content-y;
     out property <length> settings-scroll-content-height: content.content-height;
@@ -2014,21 +2019,7 @@ export component SettingsWindow inherits Window {
                     color: Theme.text-muted;
                     wrap: word-wrap;
                 }
-                Rectangle {
-                    // Keep the status slot fixed so changing its text never
-                    // changes About's measured height or the action position.
-                    height: 32px;
-                    update-status-label := Text {
-                        width: parent.width;
-                        height: parent.height;
-                        text: root.update-status;
-                        font-size: 13px;
-                        color: root.update-available ? Theme.accent : Theme.text-secondary;
-                        vertical-alignment: center;
-                        wrap: word-wrap;
-                    }
-                }
-                Rectangle { height: 8px; }
+                Rectangle { height: 12px; }
                 update-actions := VerticalLayout {
                     HorizontalLayout {
                         height: 32px;
@@ -2045,6 +2036,21 @@ export component SettingsWindow inherits Window {
                         }
                     }
                     Rectangle { height: 8px; }
+                    update-status-container := Rectangle {
+                        width: parent.width;
+                        // Idle version information is already shown in the
+                        // product header's version chip. Collapse only this
+                        // status row while idle; the update button stays above.
+                        height: root.update-status == "" ? 0px : update-status-label.preferred-height;
+                        update-status-label := Text {
+                            width: parent.width;
+                            text: root.update-status;
+                            font-size: 13px;
+                            color: root.update-available ? Theme.accent : Theme.text-secondary;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Rectangle { height: root.update-status == "" ? 0px : 8px; }
                     if !root.store-build && root.update-check-available: Card {
                         SettingsRow {
                             title: root.update-auto-label;
