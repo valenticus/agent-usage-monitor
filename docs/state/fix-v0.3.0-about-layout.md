@@ -14,14 +14,17 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - The single result text now appears immediately below the update button row. It uses Slint's natural wrapped preferred height with no cap; the row and its 8 px trailing gap grow within the Flickable, so complete localized messages remain readable without moving the update buttons.
 - Settings sizing subtracts the dynamic status row and its 8 px trailing gap from the About page's window-sizing contribution. Thus status changes and reopening in a saved result state do not increase the common Settings window height; the expanded About content remains scrollable.
 - Expanded Slint layout coverage for repeated Idle/Checking/Current/Available/Error transitions (including offline, HTTP, invalid metadata and timeout), all four locales, three themes, narrow content, stable button spacing and tab switching.
+- Isolated GUI QA hardening: `--qa-isolated --empty` uses the distinct QA mutex, skips autostart reconciliation and starts no live provider worker. QA mode now blocks automatic/manual update checks and external About links. The explicit `idle` preview value is accepted.
+- Manual QA commands will give each status a fresh temporary `%APPDATA%`, keeping the installed AUM's settings out of the preview process and directing any setting writes to the temporary QA folder.
 
 ## Git state
 <!-- HEAD, branch, `git status --short`, `git diff --stat` as captured -->
 - Branch: `fix/v0.3.0-about-layout`, created from synchronized `main` (`8648085`).
 - Base before compactness revision: `bf00245` (`Record About layout fix PR state`).
 - Compactness revision commit: `15d3d49` (`Keep About update status compact and readable`), pushed to PR #14.
-- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged.
-- HEAD before this state-note update: `15d3d49`; working tree was clean after push.
+- QA-hardening base: `697c22d`; PR #14 was open and its Windows CI passed at that head.
+- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. QA-hardening change is pending CI.
+- No isolated executable has been built or launched yet.
 
 ## Changed files
 - `rust/agent-monitor-ui/ui/main.slint`
@@ -32,7 +35,8 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 ## Checks
 <!-- commands run with results; not-run or stale checks named as such -->
 - `cargo fmt --all --check` — passed.
-- `cargo test --locked --workspace` — passed (45 Core, 3 bridge, 1 process integration, 153 UI; 202 tests total; doc tests passed).
+- `cargo test --locked --workspace` — passed (45 Core, 3 bridge, 1 process integration, 154 UI; 203 tests total; doc tests passed).
+- `cargo test --locked --package agent-usage-monitor-ui --bin agent-usage-monitor isolated_qa_blocks_update_network_actions -- --nocapture` — passed.
 - `cargo test --locked --release --workspace` — passed (45 Core, 3 bridge, 1 process integration, 153 UI; 202 tests total; doc tests passed). Release test build reports three existing dead-code warnings in the QA preview code.
 - Compactness focus tests — passed: status transition/layout matrix; localized failures at 420×360 logical px; constrained-scroll About behavior.
 - `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
@@ -40,13 +44,16 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - `cargo check --locked --workspace --release --target x86_64-pc-windows-msvc` — passed.
 - `git diff --check` — passed.
 - Manual GUI verification was not performed; the installed RC and GUI were left untouched. Headless Slint tests are not visual confirmation.
+- Await CI on the QA-hardening commit, then build from that exact head into a fresh temporary target directory and provide path, SHA-256 and status-preview commands without launching it.
 
 ## Decisions (and why)
 - Idle reuses the existing installed-version chip. Result text goes below the update buttons and takes its natural wrapped height, because a fixed slot clips long translations while moving the row below the buttons preserves their position.
 - The current idle spacing before the update actions remains 12 logical px; result copy gets an 8 logical px trailing gap. Status growth is excluded from the window-sizing basis and handled by the existing Flickable.
+- The isolated manual-QA binary must be a debug build because preview arguments are debug-only. Its build target and each preview's `%APPDATA%` will be separate temporary paths; the executable will remain unlaunched.
 
 ## Blockers
 - None known.
 
 ## Next actions
-1. Await review of PR #14; do not merge automatically.
+1. Wait for CI on the QA-hardening change.
+2. Build from the exact passing PR head, calculate SHA-256 and provide preview commands; do not launch the executable.

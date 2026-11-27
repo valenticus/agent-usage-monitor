@@ -103,6 +103,7 @@ impl AboutPreview {
             .iter()
             .find_map(|arg| arg.strip_prefix("--qa-about-status="))
         {
+            Some("idle") => AboutPreviewStatus::Idle,
             Some("available") => AboutPreviewStatus::Available,
             Some("checking") => AboutPreviewStatus::Checking,
             Some("current") => AboutPreviewStatus::Current,
@@ -134,6 +135,10 @@ fn about_display_distribution(
     } else {
         production_distribution
     }
+}
+
+fn update_checks_allowed(qa_isolated: bool, distribution: Distribution) -> bool {
+    !qa_isolated && distribution.can_offer_github_update()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -866,8 +871,16 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
-    settings_window.on_open_repository(open_repository);
-    settings_window.on_open_issues(open_issues);
+    settings_window.on_open_repository(move || {
+        if !qa_isolated {
+            open_repository();
+        }
+    });
+    settings_window.on_open_issues(move || {
+        if !qa_isolated {
+            open_issues();
+        }
+    });
     settings_window.set_update_distribution_label(
         update_checker::distribution_label(update_display_distribution, lock_locale(&locale))
             .into(),
@@ -890,6 +903,9 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_window.on_open_update_release({
         let state = update_state.clone();
         move || {
+            if qa_isolated {
+                return;
+            }
             if let Some(url) = state
                 .lock()
                 .ok()
@@ -926,7 +942,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manual_settings_path = settings_path.clone();
         let manual_settings_sender = settings_sender.clone();
         move || {
-            if distribution.can_offer_github_update() {
+            if update_checks_allowed(qa_isolated, distribution) {
                 request_update_check(
                     panel.clone(),
                     state.clone(),
@@ -943,7 +959,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let update_timer = slint::Timer::default();
-    if update_distribution.can_offer_github_update() && !demo_mode {
+    if update_checks_allowed(qa_isolated, update_distribution) && !demo_mode {
         let panel = settings_window.as_weak();
         let state = update_state.clone();
         let in_flight = update_checking.clone();
@@ -2707,7 +2723,9 @@ fn request_update_check(
     locale: SharedLocale,
     persistence: Option<(SharedSettings, PathBuf, watch::Sender<AppSettings>)>,
 ) {
-    if !distribution.can_offer_github_update() || in_flight.swap(true, Ordering::AcqRel) {
+    if !update_checks_allowed(QA_ISOLATED.load(Ordering::Acquire), distribution)
+        || in_flight.swap(true, Ordering::AcqRel)
+    {
         return;
     }
     if let Ok(mut state) = state.lock() {
@@ -3423,7 +3441,7 @@ mod tests {
     use super::{
         AboutPreview, AboutPreviewStatus, Distribution, PhysicalWorkArea, SettingsScreenSignature,
         UpdateStatus, about_display_distribution, apply_about_preview_status,
-        configure_about_update_ui, settings_geometry,
+        configure_about_update_ui, settings_geometry, update_checks_allowed,
     };
 
     #[test]
@@ -3446,6 +3464,21 @@ mod tests {
             about_display_distribution(production, false, Some(store_preview)),
             production
         );
+    }
+
+    #[test]
+    fn isolated_qa_blocks_update_network_actions() {
+        assert!(!update_checks_allowed(true, Distribution::GitHubPortable));
+        assert!(update_checks_allowed(false, Distribution::GitHubPortable));
+        assert!(!update_checks_allowed(false, Distribution::MicrosoftStore));
+
+        let preview = AboutPreview::from_args(&[
+            "aum".into(),
+            "--qa-about-distribution=portable".into(),
+            "--qa-about-status=idle".into(),
+        ])
+        .unwrap();
+        assert!(matches!(preview.status, AboutPreviewStatus::Idle));
     }
 
     #[test]
