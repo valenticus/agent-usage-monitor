@@ -1434,6 +1434,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // (ComponentHandle::run() would show the flyout).
     let settings_layout_timer = {
         let panel = settings_window.as_weak();
+        #[cfg(all(windows, debug_assertions))]
+        let qa_geometry = qa_isolated && args.iter().any(|arg| arg == "--qa-geometry");
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -1442,6 +1444,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(panel) = panel.upgrade() {
                     if panel.window().is_visible() {
                         refresh_settings_layout_if_screen_changed(&panel);
+                        #[cfg(all(windows, debug_assertions))]
+                        if qa_geometry {
+                            log_settings_native_geometry(&panel);
+                        }
                     }
                 }
             },
@@ -1456,6 +1462,74 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = worker.join();
     }
     result
+}
+
+/// Debug-only QA trace that separates the native HWND rectangles from Slint's
+/// logical client/Flickable measurements. It runs only for an explicitly
+/// isolated preview process.
+#[cfg(all(windows, debug_assertions))]
+fn log_settings_native_geometry(window: &SettingsWindow) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+
+    let handle = window.window().window_handle();
+    let Ok(handle) = handle.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as _;
+    let mut client = RECT::default();
+    let mut outer = RECT::default();
+    let (client_ok, outer_ok) = unsafe {
+        (
+            GetClientRect(hwnd, &mut client) != 0,
+            GetWindowRect(hwnd, &mut outer) != 0,
+        )
+    };
+    let scale = window.window().scale_factor().max(0.5);
+    let logical_window = window.window().size().to_logical(scale);
+    eprintln!(
+        "QA_GEOMETRY tab={} scale={scale:.4} slint_logical={:.2}x{:.2} native_client={}x{} client_delta_logical_h={:.2} native_outer={}x{} flickable_viewport={:.2} content={:.2} scroll_extent={:.2} content_y={:.2} page_required={:.2} about_required={:.2} button_y={:.2} footer_bottom={:.2}",
+        window.get_selected_tab(),
+        logical_window.width,
+        logical_window.height,
+        if client_ok {
+            client.right - client.left
+        } else {
+            -1
+        },
+        if client_ok {
+            client.bottom - client.top
+        } else {
+            -1
+        },
+        if client_ok {
+            (client.bottom - client.top) as f32 / scale - logical_window.height
+        } else {
+            f32::NAN
+        },
+        if outer_ok {
+            outer.right - outer.left
+        } else {
+            -1
+        },
+        if outer_ok {
+            outer.bottom - outer.top
+        } else {
+            -1
+        },
+        window.get_settings_scroll_viewport_height(),
+        window.get_settings_scroll_content_height(),
+        window.get_settings_scroll_max_extent(),
+        window.get_settings_scroll_y(),
+        window.get_active_page_required_height(),
+        window.get_about_page_required_height(),
+        window.get_settings_about_update_actions_y(),
+        window.get_settings_about_footer_bottom(),
+    );
 }
 
 /// Threshold legend in the same left-to-right order as the scale:
@@ -3744,6 +3818,7 @@ mod tests {
                             .max(window.get_about_page_window_required_height())
                     );
                     if expected_window_size.is_none() {
+                        window.set_settings_window_height(required);
                         window
                             .window()
                             .set_size(slint::LogicalSize::new(720.0, required));
@@ -3759,6 +3834,15 @@ mod tests {
                         let button_y = window.get_settings_about_update_actions_y();
                         let status_y = window.get_settings_about_status_y();
                         let footer_bottom = window.get_settings_about_footer_bottom();
+                        let logical_window_height = window
+                            .window()
+                            .size()
+                            .to_logical(window.window().scale_factor().max(0.5))
+                            .height;
+                        assert!(
+                            (viewport - logical_window_height).abs() < 0.1,
+                            "Flickable viewport must match the Slint logical client height: viewport={viewport:.2}, logical_window={logical_window_height:.2}"
+                        );
                         let status_expansion = window.get_settings_about_status_layout_expansion();
                         let reclaimed = window.get_settings_about_status_space_reclaimed();
                         assert_eq!(reclaimed, status_expansion.min(26.0));

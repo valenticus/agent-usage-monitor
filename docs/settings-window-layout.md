@@ -80,6 +80,17 @@ including a taskbar-reduced work area and a monitor with negative horizontal
 coordinates. The current change still needs manual Windows GUI review, including
 actual work-area clamping and 150% DPI where available.
 
+The isolated debug preview accepts `--qa-geometry` with
+`--qa-isolated --empty`. Every 500 ms while Settings is visible it reports the
+native Win32 outer and client rectangle sizes in physical pixels, the Slint
+window size converted to logical pixels using the active scale factor, the
+Flickable viewport/content/scroll extent/content-y, active page preferred
+height, About preferred height, and the update-button/footer positions. This
+distinguishes native frame/client sizing from Slint's logical layout and makes
+it possible to correlate an attempted user scroll with the actual extent.
+These measurements must be collected from the affected Windows display; the
+headless backend does not reproduce the reported native overflow.
+
 The status regression exercises Portable, Installer, and Store layouts across
 all four locales, all three themes, repeated Idle/Checking/Current/Available/
 Offline/HTTP/Invalid/Timeout transitions, and long text. It asserts identical

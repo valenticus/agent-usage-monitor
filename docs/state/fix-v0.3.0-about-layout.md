@@ -9,6 +9,9 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 
 ## Done
 <!-- each item: verified fact (with evidence) or assumption -->
+- Final geometry investigation on exact prior PR head `0a4b5f4a54551c4a858aff09019e6c0cb4758da2`: headless Slint measurements show a 720×738 logical window/client, 738 px Flickable viewport and About preferred height, zero scroll range, and `content-y` 0 before/after attempted bottom scrolling. This does not reproduce the user's native Windows overflow, so the native root cause remains unestablished and no layout/padding adjustment is justified.
+- Added debug-only `--qa-geometry` diagnostics for isolated previews. While Settings is visible, it samples native Win32 outer/client rectangles, scale, Slint logical window dimensions, Flickable viewport/content/extent/content-y, active/About preferred heights, and button/footer positions every 500 ms. The trace can correlate measurements with a manual scroll attempt.
+- Strengthened the geometry matrix to set the same Settings sizing property used by production and assert the Flickable viewport matches the Slint logical client height before checking zero range and scroll behavior.
 - Confirmed the user's manual GUI finding with the Slint testing backend: at 720 logical px, About grows from 738 px idle to 764 px with a normal one-line status, while common sizing stayed at 738 px. Flickable range was 26 px and content-y moved 0 to -26 px; the copyright was below the viewport. General (641 px) and Notifications (606–623 px) had zero range.
 - Final compactness review: idle uses the existing neutral version chip in the product header; the status row collapses to 0 px, preserving the original 12 px distribution-label-to-button spacing.
 - The single result text now appears immediately below the update button row. It uses Slint's natural wrapped preferred height with no cap; the row and its 8 px trailing gap grow within the Flickable, so complete localized messages remain readable without moving the update buttons.
@@ -24,8 +27,8 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - Branch: `fix/v0.3.0-about-layout`, created from synchronized `main` (`8648085`).
 - Base before compactness revision: `bf00245` (`Record About layout fix PR state`).
 - Compactness revision commit: `15d3d49` (`Keep About update status compact and readable`), pushed to PR #14.
-- Current PR base: `fe7541d` (`Harden isolated About QA preview`), clean and synced before this correction.
-- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. This layout correction is in progress and not yet pushed.
+- Current PR head at start of geometry investigation: `0a4b5f4a54551c4a858aff09019e6c0cb4758da2` (`Fit About statuses without scroll`), clean and synced before this correction.
+- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. Geometry diagnostics and test changes are in progress and not yet pushed.
 - No installed AUM instance or GUI executable has been launched or manipulated.
 
 ## Changed files
@@ -48,7 +51,15 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - `cargo check --locked --workspace --target x86_64-pc-windows-msvc` — passed; the final subsequent edit was confined to the test module.
 - `cargo check --locked --workspace --release --target x86_64-pc-windows-msvc` — passed; the final subsequent edit was confined to the test module.
 - `cargo fmt --all --check` and `git diff --check` — passed.
-- Windows CI and an isolated executable for this correction — pending push/CI.
+- Focused geometry matrix — passed after adding the sizing-property/client-viewport consistency assertion; headless range remains exactly zero for normal states, while long content retains measured scrolling.
+- Windows-native geometry remains unmeasured. `--qa-geometry` is intended to collect it during manual isolated previews; no GUI executable was launched.
+- `cargo fmt --all --check` — passed.
+- `cargo test --locked --workspace` — passed: 45 Core + 3 bridge + 1 bridge-process + 155 UI tests; doc tests passed.
+- `cargo test --locked --release --workspace` — passed on retry with the same counts. The first full run transiently failed `cancellation_kills_child_and_returns_cancelled_error` because its mock child did not start; the focused rerun and complete retry passed. The release test build emits the existing debug-preview static dead-code warning.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
+- `cargo check --locked --workspace --target x86_64-pc-windows-msvc` and release variant — passed.
+- `git diff --check` — passed.
+- Windows PR CI and an isolated executable for this diagnostic correction — pending push/CI.
 - Manual GUI verification was not performed; the installed RC and GUI were left untouched. Headless Slint tests are not visual confirmation.
 - After push, wait for Windows CI on the final head, then build from that exact passing head without launching it.
 
@@ -61,6 +72,6 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - None known.
 
 ## Next actions
-1. Complete all requested validations.
-2. Commit and push this correction to existing PR #14, then wait for CI on the exact new head.
-3. Build from the exact passing PR head and provide the executable path, hash, and safe preview commands without launching it.
+1. Commit and push the diagnostic/test correction to existing PR #14, then wait for CI on the exact new head.
+3. Build from the exact passing PR head and provide the executable path, hash, and isolated geometry/status preview commands without launching it.
+4. Use native measurements returned from manual QA to establish the Windows-specific root cause before proposing any layout correction.
