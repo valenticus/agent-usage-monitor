@@ -16,9 +16,14 @@ page preferred heights, choose their maximum, apply the work-area cap, and
 show the window at the final size. Thus the work area is an upper bound, not
 the desired height. Manual native resizing remains available and is retained
 in memory when Settings closes; reopening respects that size when it fits the
-work area, otherwise the existing work-area clamp applies. Tab changes,
-settings changes, language changes, and live status updates do not resize the
-open window. The About page uses one shared layout for Portable, Installer,
+work area, otherwise the existing work-area clamp applies. Because native
+font/text metrics can settle after the hidden-window measurement, Windows
+performs one additional common-page measurement 150 ms after first show. It
+applies that measured height only if no size had been retained and the user has
+not resized the window in the meantime. The same work-area clamp is applied.
+Reopens with a retained manual size keep that size. Tab changes, settings
+changes, language changes, and live status updates do not resize the open
+window. The About page uses one shared layout for Portable, Installer,
 and Store. The idle status row collapses completely, retaining the 12 logical
 px gap before the update controls. A present status uses its natural wrapped
 height and the existing 8 px trailing gap.
@@ -85,7 +90,9 @@ The isolated debug preview accepts `--qa-geometry` with
 native Win32 outer and client rectangle sizes in physical pixels, the Slint
 window size converted to logical pixels using the active scale factor, the
 Flickable viewport/content/scroll extent/content-y, active page preferred
-height, About preferred height, and the update-button/footer positions. This
+and shared required heights, About component heights/positions, dynamic status
+height/reclaimed spacing, and update-button/footer positions. Before and after
+the first-show native remeasurement it emits a labeled geometry sample. This
 distinguishes native frame/client sizing from Slint's logical layout and makes
 it possible to correlate an attempted user scroll with the actual extent.
 These measurements must be collected from the affected Windows display; the

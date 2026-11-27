@@ -53,6 +53,8 @@ static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
 static QA_ISOLATED: AtomicBool = AtomicBool::new(false);
 #[cfg(any(debug_assertions, test))]
 static QA_ABOUT_PREVIEW: std::sync::Mutex<Option<AboutPreview>> = std::sync::Mutex::new(None);
+#[cfg(debug_assertions)]
+static QA_GEOMETRY: AtomicBool = AtomicBool::new(false);
 static SETTINGS_OPEN_PENDING: AtomicBool = AtomicBool::new(false);
 static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus::Idle);
 static SETTINGS_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -367,6 +369,11 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(not(debug_assertions))]
     let qa_isolated = false;
     QA_ISOLATED.store(qa_isolated, Ordering::Release);
+    #[cfg(debug_assertions)]
+    QA_GEOMETRY.store(
+        qa_isolated && args.iter().any(|arg| arg == "--qa-geometry"),
+        Ordering::Release,
+    );
 
     #[cfg(windows)]
     let _instance_guard = match SingleInstance::acquire(qa_isolated) {
@@ -1434,8 +1441,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // (ComponentHandle::run() would show the flyout).
     let settings_layout_timer = {
         let panel = settings_window.as_weak();
-        #[cfg(all(windows, debug_assertions))]
-        let qa_geometry = qa_isolated && args.iter().any(|arg| arg == "--qa-geometry");
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -1445,7 +1450,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     if panel.window().is_visible() {
                         refresh_settings_layout_if_screen_changed(&panel);
                         #[cfg(all(windows, debug_assertions))]
-                        if qa_geometry {
+                        if QA_GEOMETRY.load(Ordering::Acquire) {
                             log_settings_native_geometry(&panel);
                         }
                     }
@@ -1492,7 +1497,7 @@ fn log_settings_native_geometry(window: &SettingsWindow) {
     let scale = window.window().scale_factor().max(0.5);
     let logical_window = window.window().size().to_logical(scale);
     eprintln!(
-        "QA_GEOMETRY tab={} scale={scale:.4} slint_logical={:.2}x{:.2} native_client={}x{} client_delta_logical_h={:.2} native_outer={}x{} flickable_viewport={:.2} content={:.2} scroll_extent={:.2} content_y={:.2} page_required={:.2} about_required={:.2} button_y={:.2} footer_bottom={:.2}",
+        "QA_GEOMETRY tab={} scale={scale:.4} slint_logical={:.2}x{:.2} native_client={}x{} client_delta_logical_h={:.2} native_outer={}x{} flickable_viewport={:.2} content={:.2} scroll_extent={:.2} content_y={:.2} required={} page_required={:.2} general={:.2} notifications={:.2} about_preferred={:.2} about_window_required={:.2} about_paddings={:.1}/{:.1} button_y={:.2} status_y={:.2} status_text_h={:.2} status_expansion={:.2} reclaimed={:.2} hero_h={:.2} features_y_h={:.2}/{:.2} feature_rows={:.2}/{:.2}/{:.2} connections_title_h={:.2} connections_y_h={:.2}/{:.2} connection_rows={:.2}/{:.2} distribution_h={:.2} links_h={:.2} legal_y_h={:.2}/{:.2} copyright_h={:.2} footer_bottom={:.2}",
         window.get_selected_tab(),
         logical_window.width,
         logical_window.height,
@@ -1525,9 +1530,35 @@ fn log_settings_native_geometry(window: &SettingsWindow) {
         window.get_settings_scroll_content_height(),
         window.get_settings_scroll_max_extent(),
         window.get_settings_scroll_y(),
+        window.get_required_settings_height(),
         window.get_active_page_required_height(),
+        window.get_general_page_required_height(),
+        window.get_notifications_page_required_height(),
         window.get_about_page_required_height(),
+        window.get_about_page_window_required_height(),
+        window.get_settings_about_top_padding(),
+        window.get_settings_about_bottom_padding(),
         window.get_settings_about_update_actions_y(),
+        window.get_settings_about_status_y(),
+        window.get_settings_about_status_text_height(),
+        window.get_settings_about_status_layout_expansion(),
+        window.get_settings_about_status_space_reclaimed(),
+        window.get_settings_about_hero_height(),
+        window.get_settings_about_features_y(),
+        window.get_settings_about_features_height(),
+        window.get_settings_about_feature_tray_height(),
+        window.get_settings_about_feature_local_height(),
+        window.get_settings_about_feature_agents_height(),
+        window.get_settings_about_connections_title_height(),
+        window.get_settings_about_connections_y(),
+        window.get_settings_about_connections_height(),
+        window.get_settings_about_codex_row_height(),
+        window.get_settings_about_claude_row_height(),
+        window.get_settings_about_distribution_height(),
+        window.get_settings_about_links_height(),
+        window.get_settings_about_legal_note_y(),
+        window.get_settings_about_legal_note_height(),
+        window.get_settings_about_copyright_height(),
         window.get_settings_about_footer_bottom(),
     );
 }
@@ -3104,6 +3135,13 @@ fn show_settings_centered(window: &SettingsWindow) {
 
 fn show_settings_measured(window: &SettingsWindow) {
     recalculate_settings_layout(window, true, true);
+    #[cfg(windows)]
+    let first_open_without_retained_size = retained_settings_window_size().is_none();
+    #[cfg(windows)]
+    let initial_logical_size = window
+        .window()
+        .size()
+        .to_logical(window.window().scale_factor().max(0.5));
     let _ = window.show();
     activate_window(window.window());
     let mode = match window.get_theme_kind() {
@@ -3114,18 +3152,54 @@ fn show_settings_measured(window: &SettingsWindow) {
     if !theme::apply_title_bar(window.window(), mode) {
         retry_title_bar(window.as_weak(), mode, 20);
     }
-    // The window can receive its final per-monitor DPI after it becomes
-    // visible. Recheck once, without resetting a size that still fits.
+    // Native text metrics can settle only after the window is shown. On a
+    // first open, remeasure once and apply the common page height if the user
+    // has not resized the window. A retained/manual size remains authoritative.
     #[cfg(windows)]
     let weak = window.as_weak();
     #[cfg(windows)]
     slint::Timer::single_shot(Duration::from_millis(150), move || {
-        if let Some(window) = weak.upgrade()
-            && !settings_user_is_dragging_or_resizing()
-        {
-            recalculate_settings_layout(&window, false, true);
+        if let Some(window) = weak.upgrade() {
+            let scale = window.window().scale_factor().max(0.5);
+            let current = window.window().size().to_logical(scale);
+            let still_at_initial_size = native_first_show_remeasure_allowed(
+                first_open_without_retained_size
+                    && retained_settings_window_size().is_none()
+                    && window.window().is_visible(),
+                (initial_logical_size.width, initial_logical_size.height),
+                (current.width, current.height),
+                settings_user_is_dragging_or_resizing(),
+            );
+            if still_at_initial_size {
+                #[cfg(debug_assertions)]
+                if QA_GEOMETRY.load(Ordering::Acquire) {
+                    eprintln!("QA_GEOMETRY_PHASE=post_show_before_native_fit");
+                    log_settings_native_geometry(&window);
+                }
+                recalculate_settings_layout(&window, true, false);
+                #[cfg(debug_assertions)]
+                if QA_GEOMETRY.load(Ordering::Acquire) {
+                    eprintln!("QA_GEOMETRY_PHASE=post_show_after_native_fit");
+                    log_settings_native_geometry(&window);
+                }
+            } else {
+                recalculate_settings_layout(&window, false, true);
+            }
         }
     });
+}
+
+#[cfg(any(windows, test))]
+fn native_first_show_remeasure_allowed(
+    first_open_without_retained_size: bool,
+    initial_size: (f32, f32),
+    current_size: (f32, f32),
+    user_is_resizing: bool,
+) -> bool {
+    first_open_without_retained_size
+        && !user_is_resizing
+        && (current_size.0 - initial_size.0).abs() <= 0.5
+        && (current_size.1 - initial_size.1).abs() <= 0.5
 }
 
 /// Requests ordinary foreground activation for a window opened by an explicit
@@ -3600,6 +3674,29 @@ mod tests {
     }
 
     #[test]
+    fn native_first_show_remeasure_respects_retained_and_user_resized_sizes() {
+        let initial = (720.0, 738.0);
+        assert!(native_first_show_remeasure_allowed(
+            true,
+            initial,
+            (720.0, 738.0),
+            false,
+        ));
+        assert!(!native_first_show_remeasure_allowed(
+            false, initial, initial, false,
+        ));
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            initial,
+            (720.0, 748.0),
+            false,
+        ));
+        assert!(!native_first_show_remeasure_allowed(
+            true, initial, initial, true,
+        ));
+    }
+
+    #[test]
     fn normal_settings_content_fits_below_a_1080p_work_area() {
         i_slint_backend_testing::init_no_event_loop();
         for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
@@ -3649,6 +3746,46 @@ mod tests {
                 geometry.height < 0.8 * 1032.0,
                 "normal {locale:?} content should not nearly fill the 1080p work area: {geometry:?}"
             );
+        }
+    }
+
+    #[test]
+    fn second_common_measurement_fits_content_that_grows_after_initial_layout() {
+        i_slint_backend_testing::init_no_event_loop();
+        let window = SettingsWindow::new().unwrap();
+        update_settings_window(
+            &window,
+            &AppSettings::default(),
+            Locale::En,
+            false,
+            &adapter::UiSnapshot::unavailable(),
+            now_unix(),
+        );
+        prepare_settings_content_measurement(&window);
+        let first_measurement = window.get_required_settings_height();
+        window.set_settings_window_height(first_measurement);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(720.0, first_measurement));
+
+        // Model text metrics settling after the first measurement: the About
+        // legal note wraps to additional lines only after its final text lands.
+        window.set_legal_note("native text reflow ".repeat(18).into());
+        let settled_required = window.get_required_settings_height();
+        assert!(settled_required > first_measurement);
+        let (width, common_height) = settings_open_size(720.0, settled_required, None);
+        window.set_settings_window_height(common_height);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(width, common_height));
+        let final_size = window.window().size();
+
+        for tab in 0..3 {
+            window.invoke_select_settings_tab(tab);
+            assert_eq!(window.window().size(), final_size);
+            assert_eq!(window.get_settings_scroll_max_extent(), 0.0);
+            window.invoke_scroll_settings_to_bottom();
+            assert_eq!(window.get_settings_scroll_y(), 0.0);
         }
     }
 

@@ -1462,6 +1462,23 @@ export component SettingsWindow inherits Window {
     out property <length> settings-about-status-y: update-status-container.absolute-position.y;
     out property <length> settings-about-footer-y: copyright-label.absolute-position.y;
     out property <length> settings-about-footer-bottom: copyright-label.absolute-position.y + copyright-label.height;
+    out property <length> settings-about-hero-height: about-hero.height;
+    out property <length> settings-about-features-height: about-features.preferred-height;
+    out property <length> settings-about-feature-tray-height: about-feature-tray.preferred-height;
+    out property <length> settings-about-feature-local-height: about-feature-local.preferred-height;
+    out property <length> settings-about-feature-agents-height: about-feature-agents.preferred-height;
+    out property <length> settings-about-connections-title-height: about-connections-title.preferred-height;
+    out property <length> settings-about-connections-height: about-connections.preferred-height;
+    out property <length> settings-about-codex-row-height: about-codex-row.preferred-height;
+    out property <length> settings-about-claude-row-height: about-claude-row.preferred-height;
+    out property <length> settings-about-distribution-height: update-distribution-label.preferred-height;
+    out property <length> settings-about-status-text-height: update-status-label.preferred-height;
+    out property <length> settings-about-links-height: about-links.height;
+    out property <length> settings-about-legal-note-height: legal-note-label.preferred-height;
+    out property <length> settings-about-copyright-height: copyright-label.preferred-height;
+    out property <length> settings-about-legal-note-y: legal-note-label.absolute-position.y;
+    out property <length> settings-about-connections-y: about-connections.absolute-position.y;
+    out property <length> settings-about-features-y: about-features.absolute-position.y;
     out property <length> settings-about-top-padding: about-page.padding-top;
     out property <length> settings-about-bottom-padding: about-page.padding-bottom;
     out property <length> settings-about-status-layout-expansion: update-status-container.height
@@ -1962,7 +1979,7 @@ export component SettingsWindow inherits Window {
             VerticalLayout {
                 spacing: 0px;
                 Rectangle { height: 10px; }
-                HorizontalLayout {
+                about-hero := HorizontalLayout {
                     height: 64px;
                     spacing: 17px;
                     AumMark { size: 64px; }
@@ -1996,30 +2013,30 @@ export component SettingsWindow inherits Window {
                     }
                 }
                 Rectangle { height: 16px; }
-                Card {
+                about-features := Card {
                     VerticalLayout {
-                        FeatureRow {
+                        about-feature-tray := FeatureRow {
                             icon: Icons.refresh;
                             text: root.about-feature-tray;
                         }
                         Divider { }
-                        FeatureRow {
+                        about-feature-local := FeatureRow {
                             icon: Icons.lock;
                             text: root.about-feature-local;
                         }
                         Divider { }
-                        FeatureRow {
+                        about-feature-agents := FeatureRow {
                             icon: Icons.shield;
                             text: root.about-feature-agents;
                         }
                     }
                 }
                 Rectangle { height: 16px; }
-                SectionLabel { text: root.connections-label; }
+                about-connections-title := SectionLabel { text: root.connections-label; }
                 Rectangle { height: 4px; }
-                Card {
+                about-connections := Card {
                     VerticalLayout {
-                        SettingsRow {
+                        about-codex-row := SettingsRow {
                             title: "Codex";
                             description: root.codex-source;
                             StatusChip {
@@ -2028,7 +2045,7 @@ export component SettingsWindow inherits Window {
                             }
                         }
                         Divider { }
-                        SettingsRow {
+                        about-claude-row := SettingsRow {
                             title: "Claude";
                             description: root.claude-source;
                             StatusChip {
@@ -2092,7 +2109,7 @@ export component SettingsWindow inherits Window {
                     height: root.settings-about-gap-after-update-actions;
                 }
                 // Two equal-width actions spanning the content column, 12 px apart.
-                Rectangle {
+                about-links := Rectangle {
                     height: 32px;
                     SettingsButton {
                         x: 0px;
@@ -2114,7 +2131,7 @@ export component SettingsWindow inherits Window {
                 }
                 HorizontalLayout {
                     alignment: center;
-                    Text {
+                    legal-note-label := Text {
                         max-width: 420px;
                         text: root.legal-note;
                         font-size: 12px;

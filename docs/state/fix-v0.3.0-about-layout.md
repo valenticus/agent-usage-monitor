@@ -9,6 +9,11 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 
 ## Done
 <!-- each item: verified fact (with evidence) or assumption -->
+- Latest native report (user-provided, before this correction): scale 1.0; native client, Slint logical window, and Flickable viewport are all 738 px; About content/preferred height is 748 px; scroll extent 10 px; button y 465→455 during scroll. General is 677 px and Notifications 606 px. This rules out outer-frame/DPI conversion as the cause.
+- Root sizing mechanism identified in code: the initial common-height measurement runs while the Winit window is hidden. The Windows post-show callback previously recalculated with `use_common_size=false`, which preserves current dimensions and updates bounds only; it therefore discarded any larger preferred height after native text/font layout settled. This explains how common height could remain 738 while visible About measured 748. The particular child contributing the 10 px cannot be uniquely inferred from aggregate measurements; new row-level diagnostics expose native heights/positions for that measurement.
+- Changed first-show Windows behavior to remeasure and apply the common tab height once after native layout settles (150 ms), only if no retained size exists and the user has not resized. The existing work-area and DPI geometry clamp still governs the applied size. Retained/manual sizing is preserved.
+- Added a regression test that models content growing between hidden and settled measurements, checks the second common measurement, all three tab dimensions, actual Flickable extent, and attempted scrolling. Added a guard test for retained/resized windows. Extended debug-only `--qa-geometry` native diagnostics to report per-element About heights/positions and before/after fit phases.
+- Native post-fix GUI measurements have not been collected. The code-path correction and headless late-reflow regression are verified; do not describe this as native visual PASS or assert post-fix native scroll extent without manual measurement.
 - Final geometry investigation on exact prior PR head `0a4b5f4a54551c4a858aff09019e6c0cb4758da2`: headless Slint measurements show a 720×738 logical window/client, 738 px Flickable viewport and About preferred height, zero scroll range, and `content-y` 0 before/after attempted bottom scrolling. This does not reproduce the user's native Windows overflow, so the native root cause remains unestablished and no layout/padding adjustment is justified.
 - Added debug-only `--qa-geometry` diagnostics for isolated previews. While Settings is visible, it samples native Win32 outer/client rectangles, scale, Slint logical window dimensions, Flickable viewport/content/extent/content-y, active/About preferred heights, and button/footer positions every 500 ms. The trace can correlate measurements with a manual scroll attempt.
 - Strengthened the geometry matrix to set the same Settings sizing property used by production and assert the Flickable viewport matches the Slint logical client height before checking zero range and scroll behavior.
@@ -28,7 +33,7 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - Base before compactness revision: `bf00245` (`Record About layout fix PR state`).
 - Compactness revision commit: `15d3d49` (`Keep About update status compact and readable`), pushed to PR #14.
 - Current PR head at start of geometry investigation: `0a4b5f4a54551c4a858aff09019e6c0cb4758da2` (`Fit About statuses without scroll`), clean and synced before this correction.
-- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. Geometry diagnostics and test changes are in progress and not yet pushed.
+- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. Latest geometry correction is in progress and not yet pushed.
 - No installed AUM instance or GUI executable has been launched or manipulated.
 
 ## Changed files
@@ -52,7 +57,7 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - `cargo check --locked --workspace --release --target x86_64-pc-windows-msvc` — passed; the final subsequent edit was confined to the test module.
 - `cargo fmt --all --check` and `git diff --check` — passed.
 - Focused geometry matrix — passed after adding the sizing-property/client-viewport consistency assertion; headless range remains exactly zero for normal states, while long content retains measured scrolling.
-- Windows-native geometry remains unmeasured. `--qa-geometry` is intended to collect it during manual isolated previews; no GUI executable was launched.
+- Windows-native geometry after the correction remains unmeasured. `--qa-geometry` now includes the component measurements needed to localize native text/layout contribution; no GUI executable was launched.
 - `cargo fmt --all --check` — passed.
 - `cargo test --locked --workspace` — passed: 45 Core + 3 bridge + 1 bridge-process + 155 UI tests; doc tests passed.
 - `cargo test --locked --release --workspace` — passed on retry with the same counts. The first full run transiently failed `cancellation_kills_child_and_returns_cancelled_error` because its mock child did not start; the focused rerun and complete retry passed. The release test build emits the existing debug-preview static dead-code warning.
@@ -63,7 +68,7 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - Isolated Windows MSVC debug executable from that PR head — built offline, not launched: `%TEMP%\AUM-PR14-QA-c046723-build\x86_64-pc-windows-msvc\debug\agent-usage-monitor.exe`, SHA256 `CC9E43F67C9BC3ABD25355095AF6098821591556C8D1C8102DF393875967EE47`.
 - PR #14 remains open and unmerged. Native GUI root cause and visual verification are pending manual measurements from the affected Windows display.
 - Manual GUI verification was not performed; the installed RC and GUI were left untouched. Headless Slint tests are not visual confirmation.
-- After push, wait for Windows CI on the final head, then build from that exact passing head without launching it.
+- Push the reviewed correction, wait for Windows CI on the exact final head, then build an isolated debug executable from that passing head without launching it. Give the user the executable path/hash and request manual geometry collection; keep PR #14 open.
 
 ## Decisions (and why)
 - Idle reuses the existing installed-version chip. Result text goes below the update buttons and takes its natural wrapped height, because a fixed slot clips long translations while moving the row below the buttons preserves their position.
