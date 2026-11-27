@@ -20,7 +20,8 @@ pub use claude_pipe::{
 };
 pub use claude_status_line::ClaudeStatusLineSnapshot;
 pub use claude_usage::{
-    ClaudeUsageSnapshot, ClaudeUsageSource, ClaudeUsageWindow, parse_claude_cli_usage,
+    ClaudeCliOutputError, ClaudeUsageSnapshot, ClaudeUsageSource, ClaudeUsageWindow,
+    parse_claude_cli_usage, parse_claude_cli_usage_diagnostic,
 };
 pub use codex::{CodexAppServerClient, CodexClientConfig, CodexRateLimitProvider};
 pub use models::{

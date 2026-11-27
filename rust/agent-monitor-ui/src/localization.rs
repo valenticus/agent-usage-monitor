@@ -1,3 +1,4 @@
+use crate::claude_refresher::ClaudeRefreshFailure;
 use crate::settings::Language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,151 @@ impl Locale {
             Language::Polish => Self::Pl,
             Language::English => Self::En,
             Language::Russian => Self::Ru,
+        }
+    }
+
+    pub fn claude_refresh_failure(
+        self,
+        failure: ClaudeRefreshFailure,
+    ) -> Option<(&'static str, &'static str)> {
+        let copy = match (self, failure) {
+            (Self::Uk, ClaudeRefreshFailure::SpawnFailure) => (
+                "Не вдалося запустити Claude CLI",
+                "AUM не зміг запустити процес Claude CLI.",
+            ),
+            (Self::Uk, ClaudeRefreshFailure::NonzeroExit) => (
+                "Claude CLI завершився з помилкою",
+                "Claude CLI повернув ненульовий код завершення.",
+            ),
+            (Self::Uk, ClaudeRefreshFailure::Timeout) => (
+                "Час очікування Claude CLI минув",
+                "Claude CLI не завершив роботу за 90 секунд.",
+            ),
+            (Self::Uk, ClaudeRefreshFailure::EmptyOutput) => (
+                "Claude CLI повернув порожню відповідь",
+                "Процес Claude CLI завершився без виводу.",
+            ),
+            (Self::Uk, ClaudeRefreshFailure::UnrecognizedFormat) => (
+                "Формат Claude CLI не розпізнано",
+                "Вивід не містив відомих AUM рядків квот.",
+            ),
+            (Self::Uk, ClaudeRefreshFailure::NoQuotaValues) => (
+                "У виводі Claude CLI немає даних квот",
+                "Рядок квот розпізнано, але придатного значення немає.",
+            ),
+            (Self::Uk, ClaudeRefreshFailure::ProcessIoFailure) => (
+                "Не вдалося прочитати вивід Claude CLI",
+                "AUM не зміг прочитати вивід процесу Claude CLI.",
+            ),
+            (Self::En, ClaudeRefreshFailure::SpawnFailure) => (
+                "Could not start Claude CLI",
+                "AUM could not start the Claude CLI process.",
+            ),
+            (Self::En, ClaudeRefreshFailure::NonzeroExit) => (
+                "Claude CLI exited with an error",
+                "Claude CLI returned a nonzero exit status.",
+            ),
+            (Self::En, ClaudeRefreshFailure::Timeout) => (
+                "Claude CLI timed out",
+                "Claude CLI did not finish within 90 seconds.",
+            ),
+            (Self::En, ClaudeRefreshFailure::EmptyOutput) => (
+                "Claude CLI returned no output",
+                "The Claude CLI process completed without output.",
+            ),
+            (Self::En, ClaudeRefreshFailure::UnrecognizedFormat) => (
+                "Claude CLI output format not recognized",
+                "The output did not contain quota lines recognized by AUM.",
+            ),
+            (Self::En, ClaudeRefreshFailure::NoQuotaValues) => (
+                "Claude quota values are missing",
+                "A quota line was recognized, but it contained no usable value.",
+            ),
+            (Self::En, ClaudeRefreshFailure::ProcessIoFailure) => (
+                "Could not read Claude CLI output",
+                "AUM could not read the Claude CLI process output.",
+            ),
+            (Self::Pl, ClaudeRefreshFailure::SpawnFailure) => (
+                "Nie udało się uruchomić Claude CLI",
+                "AUM nie mógł uruchomić procesu Claude CLI.",
+            ),
+            (Self::Pl, ClaudeRefreshFailure::NonzeroExit) => (
+                "Claude CLI zakończył się błędem",
+                "Claude CLI zwrócił niezerowy kod zakończenia.",
+            ),
+            (Self::Pl, ClaudeRefreshFailure::Timeout) => (
+                "Upłynął limit czasu Claude CLI",
+                "Claude CLI nie zakończył pracy w ciągu 90 sekund.",
+            ),
+            (Self::Pl, ClaudeRefreshFailure::EmptyOutput) => (
+                "Claude CLI zwrócił pustą odpowiedź",
+                "Proces Claude CLI zakończył się bez danych wyjściowych.",
+            ),
+            (Self::Pl, ClaudeRefreshFailure::UnrecognizedFormat) => (
+                "Nie rozpoznano formatu Claude CLI",
+                "Dane wyjściowe nie zawierały wierszy limitów rozpoznawanych przez AUM.",
+            ),
+            (Self::Pl, ClaudeRefreshFailure::NoQuotaValues) => (
+                "Brak wartości limitów Claude",
+                "Rozpoznano wiersz limitu, ale nie zawierał użytecznej wartości.",
+            ),
+            (Self::Pl, ClaudeRefreshFailure::ProcessIoFailure) => (
+                "Nie udało się odczytać danych Claude CLI",
+                "AUM nie mógł odczytać danych wyjściowych procesu Claude CLI.",
+            ),
+            (Self::Ru, ClaudeRefreshFailure::SpawnFailure) => (
+                "Не удалось запустить Claude CLI",
+                "AUM не удалось запустить процесс Claude CLI.",
+            ),
+            (Self::Ru, ClaudeRefreshFailure::NonzeroExit) => (
+                "Claude CLI завершился с ошибкой",
+                "Claude CLI вернул ненулевой код завершения.",
+            ),
+            (Self::Ru, ClaudeRefreshFailure::Timeout) => (
+                "Истекло время ожидания Claude CLI",
+                "Claude CLI не завершил работу за 90 секунд.",
+            ),
+            (Self::Ru, ClaudeRefreshFailure::EmptyOutput) => (
+                "Claude CLI вернул пустой ответ",
+                "Процесс Claude CLI завершился без вывода.",
+            ),
+            (Self::Ru, ClaudeRefreshFailure::UnrecognizedFormat) => (
+                "Формат Claude CLI не распознан",
+                "В выводе нет строк лимитов, распознаваемых AUM.",
+            ),
+            (Self::Ru, ClaudeRefreshFailure::NoQuotaValues) => (
+                "В выводе Claude CLI нет значений лимитов",
+                "Строка лимита распознана, но пригодного значения нет.",
+            ),
+            (Self::Ru, ClaudeRefreshFailure::ProcessIoFailure) => (
+                "Не удалось прочитать вывод Claude CLI",
+                "AUM не удалось прочитать вывод процесса Claude CLI.",
+            ),
+            (_, ClaudeRefreshFailure::CliMissing | ClaudeRefreshFailure::Cancelled) => {
+                return None;
+            }
+        };
+        Some(copy)
+    }
+
+    pub fn claude_bridge_error(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Uk => (
+                "Помилка мосту рядка стану",
+                "AUM не отримав оновлення від рядка стану Claude Code.",
+            ),
+            Self::En => (
+                "Status line bridge error",
+                "AUM could not receive an update from the Claude Code status line.",
+            ),
+            Self::Pl => (
+                "Błąd mostu paska stanu",
+                "AUM nie otrzymał aktualizacji z paska stanu Claude Code.",
+            ),
+            Self::Ru => (
+                "Ошибка моста строки состояния",
+                "AUM не получил обновление из строки состояния Claude Code.",
+            ),
         }
     }
 

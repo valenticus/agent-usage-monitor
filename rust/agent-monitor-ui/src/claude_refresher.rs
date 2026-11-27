@@ -5,7 +5,9 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 use crate::ManualRefreshRequest;
-use agent_usage_monitor_core::{ClaudeUsageSnapshot, parse_claude_cli_usage};
+use agent_usage_monitor_core::{
+    ClaudeCliOutputError, ClaudeUsageSnapshot, parse_claude_cli_usage_diagnostic,
+};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -22,11 +24,50 @@ pub(crate) enum ClaudeRefreshEvent {
     },
     Failed {
         request_id: Option<u64>,
-        timed_out: bool,
-        /// No Claude CLI was found on `PATH`; nothing was started. Shown as
-        /// "not installed" instead of a generic error.
-        cli_missing: bool,
+        failure: ClaudeRefreshFailure,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeRefreshFailure {
+    CliMissing,
+    SpawnFailure,
+    NonzeroExit,
+    Timeout,
+    EmptyOutput,
+    UnrecognizedFormat,
+    NoQuotaValues,
+    ProcessIoFailure,
+    Cancelled,
+}
+
+impl ClaudeRefreshFailure {
+    pub(crate) fn category(self) -> &'static str {
+        match self {
+            Self::CliMissing => "cli_missing",
+            Self::SpawnFailure => "spawn_failure",
+            Self::NonzeroExit => "nonzero_exit",
+            Self::Timeout => "timeout",
+            Self::EmptyOutput => "empty_output",
+            Self::UnrecognizedFormat => "unrecognized_format",
+            Self::NoQuotaValues => "no_quota_values",
+            Self::ProcessIoFailure => "process_io_failure",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub(crate) fn from_category(category: &str) -> Option<Self> {
+        Some(match category {
+            "spawn_failure" => Self::SpawnFailure,
+            "nonzero_exit" => Self::NonzeroExit,
+            "timeout" => Self::Timeout,
+            "empty_output" => Self::EmptyOutput,
+            "unrecognized_format" => Self::UnrecognizedFormat,
+            "no_quota_values" => Self::NoQuotaValues,
+            "process_io_failure" => Self::ProcessIoFailure,
+            _ => return None,
+        })
+    }
 }
 
 /// Error text when no Claude CLI is resolved (the refresh fails closed).
@@ -36,9 +77,16 @@ pub async fn refresh_once(
     cancel: &CancellationToken,
     request_id: Option<u64>,
     observed_at: i64,
-) -> Result<ClaudeUsageSnapshot, String> {
+) -> Result<ClaudeUsageSnapshot, ClaudeRefreshFailure> {
     // Fails closed: without a resolved CLI nothing is started.
-    let command = claude_command(agent_usage_monitor_core::resolve_cli_executable("claude"))?;
+    let command = claude_command(agent_usage_monitor_core::resolve_cli_executable("claude"))
+        .map_err(|error| {
+            if error == CLI_NOT_FOUND {
+                ClaudeRefreshFailure::CliMissing
+            } else {
+                ClaudeRefreshFailure::SpawnFailure
+            }
+        })?;
     run_command(command, TIMEOUT, cancel, request_id, observed_at).await
 }
 
@@ -120,7 +168,7 @@ async fn run_command(
     cancel: &CancellationToken,
     request_id: Option<u64>,
     observed_at: i64,
-) -> Result<ClaudeUsageSnapshot, String> {
+) -> Result<ClaudeUsageSnapshot, ClaudeRefreshFailure> {
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -134,10 +182,16 @@ async fn run_command(
     let cli_started = std::time::Instant::now();
     let mut child = command
         .spawn()
-        .map_err(|_| "could not start Claude CLI".to_string())?;
+        .map_err(|_| ClaudeRefreshFailure::SpawnFailure)?;
     let pid = child.id();
-    let mut stdout = child.stdout.take().ok_or("Claude CLI stdout unavailable")?;
-    let mut stderr = child.stderr.take().ok_or("Claude CLI stderr unavailable")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or(ClaudeRefreshFailure::ProcessIoFailure)?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or(ClaudeRefreshFailure::ProcessIoFailure)?;
     let result = {
         let operation = async {
             let mut out = Vec::new();
@@ -160,21 +214,13 @@ async fn run_command(
     let (stdout, _stderr, status) = match result {
         None => {
             terminate_tree(pid, &mut child).await;
-            return Err("Claude CLI refresh cancelled".into());
+            return Err(ClaudeRefreshFailure::Cancelled);
         }
         Some(Err(_)) => {
             terminate_tree(pid, &mut child).await;
-            eprintln!(
-                "CLAUDE_REFRESH: cli_timed_out request_id={} timeout_ms={}",
-                request_id.map_or_else(|| "background".into(), |id| id.to_string()),
-                timeout.as_millis()
-            );
-            return Err(format!(
-                "Claude CLI refresh timed out after {} seconds",
-                timeout.as_secs()
-            ));
+            return Err(ClaudeRefreshFailure::Timeout);
         }
-        Some(Ok(Err(_))) => return Err("Claude CLI process failed".into()),
+        Some(Ok(Err(_))) => return Err(ClaudeRefreshFailure::ProcessIoFailure),
         Some(Ok(Ok(output))) => output,
     };
     eprintln!(
@@ -188,11 +234,18 @@ async fn run_command(
         }
     );
     if !status.success() {
-        return Err(format!("Claude CLI exited with status {status}"));
+        return Err(ClaudeRefreshFailure::NonzeroExit);
     }
     let stdout = String::from_utf8_lossy(&stdout);
+    if stdout.trim().is_empty() {
+        return Err(ClaudeRefreshFailure::EmptyOutput);
+    }
     let parse_started = std::time::Instant::now();
-    let snapshot = parse_claude_cli_usage(&stdout, observed_at);
+    let snapshot =
+        parse_claude_cli_usage_diagnostic(&stdout, observed_at).map_err(|error| match error {
+            ClaudeCliOutputError::UnrecognizedFormat => ClaudeRefreshFailure::UnrecognizedFormat,
+            ClaudeCliOutputError::NoQuotaValues => ClaudeRefreshFailure::NoQuotaValues,
+        })?;
     eprintln!(
         "CLAUDE_REFRESH: parse_completed request_id={} parse_ms={}",
         request_id.map_or_else(|| "background".into(), |id| id.to_string()),
@@ -226,10 +279,6 @@ async fn run_command(
                 .as_ref()
                 .is_some_and(|window| window.resets_at.is_some()),
         );
-    }
-    if snapshot.five_hour.is_none() && snapshot.weekly.is_none() {
-        eprintln!("CLAUDE_SOURCE: /usage contained no recognized quota lines");
-        return Err("Claude CLI returned no recognized quota values".into());
     }
     Ok(snapshot)
 }
@@ -285,7 +334,8 @@ pub async fn run(
     .await;
 }
 
-type RefreshFuture = Pin<Box<dyn Future<Output = Result<ClaudeUsageSnapshot, String>> + Send>>;
+type RefreshFuture =
+    Pin<Box<dyn Future<Output = Result<ClaudeUsageSnapshot, ClaudeRefreshFailure>> + Send>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaitResult {
@@ -418,23 +468,21 @@ async fn run_with_intervals<F>(
                 last_success_at = Some(now_unix());
                 refresh_interval
             }
-            Err(error) => {
-                let timed_out = error.contains("timed out");
-                let kind = if timed_out { "timed_out" } else { "failed" };
+            Err(failure) => {
                 eprintln!(
-                    "CLAUDE_REFRESH: {kind} request_id={} source={}",
+                    "CLAUDE_REFRESH: failed request_id={} source={} category={}",
                     request_id.map_or_else(|| "background".into(), |id| id.to_string()),
                     if request_id.is_some() {
                         "manual"
                     } else {
                         "background"
-                    }
+                    },
+                    failure.category()
                 );
                 if sender
                     .send(ClaudeRefreshEvent::Failed {
                         request_id,
-                        timed_out,
-                        cli_missing: error == CLI_NOT_FOUND,
+                        failure,
                     })
                     .await
                     .is_err()
@@ -485,7 +533,10 @@ fn now_unix() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManualRefreshRequest, RefreshFuture, run_command, run_with_intervals};
+    use super::{
+        ClaudeRefreshEvent, ClaudeRefreshFailure, ManualRefreshRequest, RefreshFuture, run_command,
+        run_with_intervals,
+    };
     use agent_usage_monitor_core::parse_claude_cli_usage;
     use std::sync::{
         Arc,
@@ -495,6 +546,22 @@ mod tests {
     use tokio::process::Command;
     use tokio::sync::{mpsc, watch};
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn missing_process_executable_is_classified_as_spawn_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let command = Command::new(directory.path().join("missing-claude-executable"));
+        let failure = run_command(
+            command,
+            Duration::from_secs(2),
+            &CancellationToken::new(),
+            None,
+            100,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, ClaudeRefreshFailure::SpawnFailure);
+    }
 
     #[cfg(windows)]
     #[test]
@@ -718,7 +785,7 @@ mod tests {
             ..Default::default()
         };
         let (_settings_tx, settings_rx) = watch::channel(enabled);
-        let (sender, _receiver) = mpsc::channel(2);
+        let (sender, mut receiver) = mpsc::channel(2);
         let (_request_sender, request_receiver) = mpsc::channel(1);
         let cancellation = CancellationToken::new();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -732,8 +799,15 @@ mod tests {
             Duration::from_millis(80),
             move |_, _, _| {
                 observed.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async { Err("stub failure".into()) }) as RefreshFuture
+                Box::pin(async { Err(ClaudeRefreshFailure::NonzeroExit) }) as RefreshFuture
             },
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ClaudeRefreshEvent::Failed {
+                failure: ClaudeRefreshFailure::NonzeroExit,
+                ..
+            })
         ));
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -769,11 +843,11 @@ mod tests {
                 let call = observed.fetch_add(1, Ordering::SeqCst) + 1;
                 Box::pin(async move {
                     if call == 1 {
-                        return Err("stub failure".into());
+                        return Err(ClaudeRefreshFailure::NonzeroExit);
                     }
                     assert_eq!(request_id, Some(42));
                     tokio::select! {
-                        _ = operation_cancel.cancelled() => Err("cancelled".into()),
+                        _ = operation_cancel.cancelled() => Err(ClaudeRefreshFailure::Cancelled),
                         _ = tokio::time::sleep(Duration::from_millis(20)) => Ok(parse_claude_cli_usage("Current session: 2% used", 102)),
                     }
                 }) as RefreshFuture
@@ -781,7 +855,10 @@ mod tests {
         ));
         assert!(matches!(
             receiver.recv().await,
-            Some(ClaudeRefreshEvent::Failed { .. })
+            Some(ClaudeRefreshEvent::Failed {
+                failure: ClaudeRefreshFailure::NonzeroExit,
+                ..
+            })
         ));
         request_sender
             .send(ManualRefreshRequest {
@@ -905,7 +982,7 @@ mod tests {
                 let call = observed.fetch_add(1, Ordering::SeqCst) + 1;
                 Box::pin(async move {
                     if call == 1 {
-                        Err("network not ready".into())
+                        Err(ClaudeRefreshFailure::NonzeroExit)
                     } else {
                         Ok(parse_claude_cli_usage("Current session: 2% used", 100))
                     }
@@ -961,7 +1038,7 @@ mod tests {
                 let call = observed.fetch_add(1, Ordering::SeqCst) + 1;
                 Box::pin(async move {
                     if call == 1 {
-                        Err("before sleep".into())
+                        Err(ClaudeRefreshFailure::NonzeroExit)
                     } else {
                         Ok(parse_claude_cli_usage("Current session: 2% used", 100))
                     }
@@ -1025,7 +1102,31 @@ mod tests {
         let failure = run_command(command, Duration::from_secs(2), &token, None, 100)
             .await
             .unwrap_err();
-        assert!(failure.contains("exited with status"));
+        assert_eq!(failure, ClaudeRefreshFailure::NonzeroExit);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_stub_distinguishes_empty_unknown_and_missing_quota_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let token = CancellationToken::new();
+        for (body, expected) in [
+            ("@echo off\n", ClaudeRefreshFailure::EmptyOutput),
+            (
+                "@echo off\necho Sanitized unfamiliar report\n",
+                ClaudeRefreshFailure::UnrecognizedFormat,
+            ),
+            (
+                "@echo off\necho Current session: unavailable\n",
+                ClaudeRefreshFailure::NoQuotaValues,
+            ),
+        ] {
+            let command = stub_command(directory.path(), body);
+            let failure = run_command(command, Duration::from_secs(2), &token, None, 100)
+                .await
+                .unwrap_err();
+            assert_eq!(failure, expected);
+        }
     }
 
     #[cfg(windows)]
@@ -1042,7 +1143,7 @@ mod tests {
         let failure = run_command(command, Duration::from_millis(100), &token, None, 100)
             .await
             .unwrap_err();
-        assert!(failure.contains("timed out"));
+        assert_eq!(failure, ClaudeRefreshFailure::Timeout);
         tokio::time::sleep(Duration::from_millis(2200)).await;
         assert!(!marker.exists(), "descendant survived process-tree cleanup");
     }

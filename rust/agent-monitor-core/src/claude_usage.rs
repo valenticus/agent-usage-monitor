@@ -25,6 +25,12 @@ pub struct ClaudeUsageSnapshot {
     pub weekly: Option<ClaudeUsageWindow>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeCliOutputError {
+    UnrecognizedFormat,
+    NoQuotaValues,
+}
+
 impl ClaudeUsageSnapshot {
     pub fn merge(&mut self, incoming: Self) {
         fn merge_window(old: &mut Option<ClaudeUsageWindow>, new: Option<ClaudeUsageWindow>) {
@@ -123,7 +129,18 @@ impl ClaudeStatusLineSnapshot {
 /// Parses Claude Code's human-readable `/usage` output. This format is not a
 /// documented stable interface; unsupported lines are simply left unavailable.
 pub fn parse_claude_cli_usage(input: &str, observed_at: i64) -> ClaudeUsageSnapshot {
+    parse_claude_cli_usage_diagnostic(input, observed_at).unwrap_or_default()
+}
+
+/// Parses the known human-readable `/usage` labels and reports only a safe
+/// category when no quota value can be extracted. The input is never retained
+/// or included in the error.
+pub fn parse_claude_cli_usage_diagnostic(
+    input: &str,
+    observed_at: i64,
+) -> Result<ClaudeUsageSnapshot, ClaudeCliOutputError> {
     let mut result = ClaudeUsageSnapshot::default();
+    let mut recognized_line = false;
     for line in input.lines() {
         let line = line.trim();
         let target = if line.starts_with("Current session:") {
@@ -133,6 +150,7 @@ pub fn parse_claude_cli_usage(input: &str, observed_at: i64) -> ClaudeUsageSnaps
         } else {
             None
         };
+        recognized_line |= target.is_some();
         let Some((slot, prefix)) = target else {
             continue;
         };
@@ -155,7 +173,13 @@ pub fn parse_claude_cli_usage(input: &str, observed_at: i64) -> ClaudeUsageSnaps
             source: ClaudeUsageSource::BackgroundCli,
         });
     }
-    result
+    if !recognized_line {
+        return Err(ClaudeCliOutputError::UnrecognizedFormat);
+    }
+    if result.five_hour.is_none() && result.weekly.is_none() {
+        return Err(ClaudeCliOutputError::NoQuotaValues);
+    }
+    Ok(result)
 }
 
 fn parse_reset(text: &str, observed_at: i64) -> Option<i64> {
@@ -316,6 +340,25 @@ mod tests {
                 .weekly
                 .is_none()
         );
+    }
+
+    #[test]
+    fn diagnostic_parser_distinguishes_unknown_format_from_missing_quota_values() {
+        assert_eq!(
+            parse_claude_cli_usage_diagnostic("A sanitized unfamiliar report", 100),
+            Err(ClaudeCliOutputError::UnrecognizedFormat)
+        );
+        assert_eq!(
+            parse_claude_cli_usage_diagnostic("Current session: unavailable", 100),
+            Err(ClaudeCliOutputError::NoQuotaValues)
+        );
+    }
+
+    #[test]
+    fn diagnostic_parser_keeps_partial_quota_results_valid() {
+        let parsed = parse_claude_cli_usage_diagnostic("Current session: 23% used", 100).unwrap();
+        assert_eq!(parsed.five_hour.unwrap().used_percent, Some(23.0));
+        assert!(parsed.weekly.is_none());
     }
 
     #[test]
