@@ -3134,14 +3134,16 @@ fn show_settings_centered(window: &SettingsWindow) {
 }
 
 fn show_settings_measured(window: &SettingsWindow) {
-    recalculate_settings_layout(window, true, true);
     #[cfg(windows)]
-    let first_open_without_retained_size = retained_settings_window_size().is_none();
-    #[cfg(windows)]
-    let initial_logical_size = window
+    let pre_fit_logical_size = window
         .window()
         .size()
         .to_logical(window.window().scale_factor().max(0.5));
+    let app_requested_size = recalculate_settings_layout(window, true, true);
+    #[cfg(not(windows))]
+    let _ = app_requested_size;
+    #[cfg(windows)]
+    let first_open_without_retained_size = retained_settings_window_size().is_none();
     let _ = window.show();
     activate_window(window.window());
     let mode = match window.get_theme_kind() {
@@ -3155,6 +3157,13 @@ fn show_settings_measured(window: &SettingsWindow) {
     // Native text metrics can settle only after the window is shown. On a
     // first open, remeasure once and apply the common page height if the user
     // has not resized the window. A retained/manual size remains authoritative.
+    //
+    // On Windows, Winit applies `set_size` asynchronously: `Window::size()`
+    // keeps the old value until `WindowEvent::Resized` arrives. A size read
+    // right after the first fit is therefore stale, and comparing against it
+    // misclassifies the app's own resize as a manual one. Compare against the
+    // sizes the app itself owns instead: the size it requested and the pre-fit
+    // size (in case the native resize has not landed yet).
     #[cfg(windows)]
     let weak = window.as_weak();
     #[cfg(windows)]
@@ -3165,53 +3174,73 @@ fn show_settings_measured(window: &SettingsWindow) {
             let retained_size = retained_settings_window_size();
             let resizing = settings_user_is_dragging_or_resizing();
             let visible = window.window().is_visible();
-            let still_at_initial_size = native_first_show_remeasure_allowed(
+            let app_owned_sizes = native_first_show_app_owned_sizes(
+                (pre_fit_logical_size.width, pre_fit_logical_size.height),
+                app_requested_size,
+            );
+            let fit_allowed = native_first_show_remeasure_allowed(
                 first_open_without_retained_size && retained_size.is_none() && visible,
-                (initial_logical_size.width, initial_logical_size.height),
+                &app_owned_sizes,
                 (current.width, current.height),
                 resizing,
             );
             #[cfg(debug_assertions)]
             if QA_GEOMETRY.load(Ordering::Acquire) {
                 eprintln!(
-                    "QA_GEOMETRY_POST_SHOW visible={visible} first_open={} retained={retained_size:?} resizing={resizing} initial={:.2}x{:.2} current={:.2}x{:.2} scale={scale:.4} fit_allowed={still_at_initial_size}",
+                    "QA_GEOMETRY_POST_SHOW visible={visible} first_open={} retained={retained_size:?} resizing={resizing} pre_fit={:.2}x{:.2} app_requested={app_requested_size:?} current={:.2}x{:.2} scale={scale:.4} fit_allowed={fit_allowed}",
                     first_open_without_retained_size,
-                    initial_logical_size.width,
-                    initial_logical_size.height,
+                    pre_fit_logical_size.width,
+                    pre_fit_logical_size.height,
                     current.width,
                     current.height,
                 );
             }
-            if still_at_initial_size {
+            if fit_allowed {
                 #[cfg(debug_assertions)]
                 if QA_GEOMETRY.load(Ordering::Acquire) {
                     eprintln!("QA_GEOMETRY_PHASE=post_show_before_native_fit");
                     log_settings_native_geometry(&window);
                 }
-                recalculate_settings_layout(&window, true, false);
+                let _ = recalculate_settings_layout(&window, true, false);
                 #[cfg(debug_assertions)]
                 if QA_GEOMETRY.load(Ordering::Acquire) {
                     eprintln!("QA_GEOMETRY_PHASE=post_show_after_native_fit");
                     log_settings_native_geometry(&window);
                 }
             } else {
-                recalculate_settings_layout(&window, false, true);
+                let _ = recalculate_settings_layout(&window, false, true);
             }
         }
     });
 }
 
+/// Sizes the app itself left or set on the Settings window during the first
+/// fit: the pre-fit size (the native resize may still be pending) and the
+/// clamped size the first fit requested.
+#[cfg(any(windows, test))]
+fn native_first_show_app_owned_sizes(
+    pre_fit_size: (f32, f32),
+    app_requested_size: Option<(f32, f32)>,
+) -> Vec<(f32, f32)> {
+    std::iter::once(pre_fit_size)
+        .chain(app_requested_size)
+        .collect()
+}
+
+/// A first-show remeasure may resize the window only while its size is still
+/// one the app owns; any other size means the user resized it.
 #[cfg(any(windows, test))]
 fn native_first_show_remeasure_allowed(
     first_open_without_retained_size: bool,
-    initial_size: (f32, f32),
+    app_owned_sizes: &[(f32, f32)],
     current_size: (f32, f32),
     user_is_resizing: bool,
 ) -> bool {
     first_open_without_retained_size
         && !user_is_resizing
-        && (current_size.0 - initial_size.0).abs() <= 0.5
-        && (current_size.1 - initial_size.1).abs() <= 0.5
+        && app_owned_sizes.iter().any(|size| {
+            (current_size.0 - size.0).abs() <= 0.5 && (current_size.1 - size.1).abs() <= 0.5
+        })
 }
 
 /// Requests ordinary foreground activation for a window opened by an explicit
@@ -3291,7 +3320,14 @@ fn prepare_settings_content_measurement(window: &SettingsWindow) {
     }
 }
 
-fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, center: bool) {
+/// Applies the Settings window geometry and returns the logical size it
+/// requested (after work-area/DPI clamping), if any. That size is the target
+/// even when the native resize lands later.
+fn recalculate_settings_layout(
+    window: &SettingsWindow,
+    use_common_size: bool,
+    center: bool,
+) -> Option<(f32, f32)> {
     if use_common_size {
         prepare_settings_content_measurement(window);
     }
@@ -3369,6 +3405,7 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
         if let Ok(mut layout) = SETTINGS_LAYOUT.lock() {
             layout.screen = Some(screen);
         }
+        return Some((geometry.width, geometry.height));
     }
     #[cfg(not(windows))]
     if use_common_size {
@@ -3376,7 +3413,9 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
         window
             .window()
             .set_size(slint::LogicalSize::new(common_width, common_height));
+        return Some((common_width, common_height));
     }
+    None
 }
 
 fn settings_open_size(
@@ -3503,7 +3542,7 @@ fn refresh_settings_layout_if_screen_changed(window: &SettingsWindow) {
     if let Some(current) = settings_screen_signature(window, false) {
         let previous = SETTINGS_LAYOUT.lock().ok().and_then(|layout| layout.screen);
         if previous != Some(current) {
-            recalculate_settings_layout(window, false, false);
+            let _ = recalculate_settings_layout(window, false, false);
         }
     }
 }
@@ -3721,25 +3760,124 @@ mod tests {
 
     #[test]
     fn native_first_show_remeasure_respects_retained_and_user_resized_sizes() {
-        let initial = (720.0, 738.0);
+        let owned = native_first_show_app_owned_sizes((720.0, 738.0), Some((720.0, 738.0)));
         assert!(native_first_show_remeasure_allowed(
             true,
-            initial,
+            &owned,
             (720.0, 738.0),
             false,
         ));
+        // A retained/manual size from an earlier open stays authoritative.
         assert!(!native_first_show_remeasure_allowed(
-            false, initial, initial, false,
+            false,
+            &owned,
+            (720.0, 738.0),
+            false,
         ));
+        // A size the app never requested is a manual resize.
         assert!(!native_first_show_remeasure_allowed(
             true,
-            initial,
+            &owned,
             (720.0, 748.0),
             false,
         ));
         assert!(!native_first_show_remeasure_allowed(
-            true, initial, initial, true,
+            true,
+            &owned,
+            (880.0, 690.0),
+            false,
         ));
+        // An active drag/resize always blocks the fit.
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (720.0, 738.0),
+            true,
+        ));
+    }
+
+    /// Regression for the native Windows QA trace on PR #14: the first fit
+    /// requested 720x738 while Winit still reported 720x480 (its `set_size` is
+    /// asynchronous), the resize landed before the post-show check, and the
+    /// app's own resize was misread as a manual one (`fit_allowed=false`).
+    #[test]
+    fn native_first_show_fit_is_allowed_after_asynchronous_app_resize() {
+        let stale_pre_fit = (720.0, 480.0);
+        let owned = native_first_show_app_owned_sizes(stale_pre_fit, Some((720.0, 738.0)));
+
+        // The app's own resize landed before the post-show check.
+        assert!(native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (720.0, 738.0),
+            false,
+        ));
+        // The native resize has not landed yet.
+        assert!(native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            stale_pre_fit,
+            false,
+        ));
+        // The previous check (current vs. the stale snapshot only) rejected it.
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &[stale_pre_fit],
+            (720.0, 738.0),
+            false,
+        ));
+        // A user resize to any other size is still respected.
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (760.0, 700.0),
+            false,
+        ));
+    }
+
+    /// After the fit is allowed, the second pass requests the remeasured
+    /// height (748), not the current client height (738), while the
+    /// work-area/DPI clamp still bounds it on small screens.
+    #[test]
+    fn native_second_fit_requests_remeasured_height_within_work_area() {
+        let roomy = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1032,
+            },
+            ..screen(1.0)
+        };
+        let (width, height) = settings_open_size(720.0, 748.0, None);
+        let fitted = settings_geometry(width, height, roomy);
+        assert_eq!((fitted.width, fitted.height), (720.0, 748.0));
+
+        // Small work area: the clamp wins and the Flickable scrolls the rest.
+        let small = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1366,
+                bottom: 728,
+            },
+            ..screen(1.0)
+        };
+        let clamped = settings_geometry(width, height, small);
+        assert!(clamped.height < 748.0);
+
+        // 150 % DPI: logical request stays 748 when the work area allows it.
+        let hidpi = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1392,
+            },
+            ..screen(1.5)
+        };
+        let scaled = settings_geometry(width, height, hidpi);
+        assert_eq!((scaled.width, scaled.height), (720.0, 748.0));
     }
 
     #[test]
@@ -3757,8 +3895,9 @@ mod tests {
         let required_about: f32 = 748.0;
         let initial_scroll_extent = (required_about - initial.1).max(0.0);
         assert_eq!(initial_scroll_extent, 10.0);
+        let owned = native_first_show_app_owned_sizes((720.0, 480.0), Some(initial));
         assert!(native_first_show_remeasure_allowed(
-            true, initial, initial, false,
+            true, &owned, initial, false,
         ));
 
         let fitted = settings_geometry(720.0, required_about, screen);

@@ -21,6 +21,11 @@ font/text metrics can settle after the hidden-window measurement, Windows
 performs one additional common-page measurement 150 ms after first show. It
 applies that measured height only if no size had been retained and the user has
 not resized the window in the meantime. The same work-area clamp is applied.
+"Not resized" means the current size is still one the app owns: the size the
+first fit requested, or the pre-fit size if the native resize has not landed
+yet. Winit applies `set_size` asynchronously on Windows, so `Window::size()`
+read right after the first fit is stale and must not be used as the reference;
+doing so misread the app's own resize as a manual one and skipped the fit.
 Reopens with a retained manual size keep that size. Tab changes, settings
 changes, language changes, and live status updates do not resize the open
 window. The About page uses one shared layout for Portable, Installer,
