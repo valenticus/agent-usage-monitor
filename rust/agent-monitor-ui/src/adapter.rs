@@ -4,6 +4,7 @@ use agent_usage_monitor_core::{
 };
 
 use crate::MainWindow;
+use crate::claude_refresher::ClaudeRefreshFailure;
 use crate::localization::Locale;
 use crate::settings::AppSettings;
 
@@ -250,21 +251,30 @@ impl UiSnapshot {
                     age_label,
                 )
             }
-            ProviderStatus::Error => match locale {
-                Locale::Uk => (
-                    "Помилка".into(),
-                    "Не вдалося отримати дані провайдера".into(),
-                ),
-                Locale::En => ("Error".into(), "Could not read provider data".into()),
-                Locale::Pl => (
-                    "Błąd".into(),
-                    "Nie udało się odczytać danych dostawcy".into(),
-                ),
-                Locale::Ru => (
-                    "Ошибка".into(),
-                    "Не удалось прочитать данные провайдера".into(),
-                ),
-            },
+            ProviderStatus::Error => {
+                if provider_id == "claude"
+                    && let Some((status, description)) =
+                        claude_error_copy(provider.error.as_ref(), locale)
+                {
+                    (status.into(), description.into())
+                } else {
+                    match locale {
+                        Locale::Uk => (
+                            "Помилка".into(),
+                            "Не вдалося отримати дані провайдера".into(),
+                        ),
+                        Locale::En => ("Error".into(), "Could not read provider data".into()),
+                        Locale::Pl => (
+                            "Błąd".into(),
+                            "Nie udało się odczytać danych dostawcy".into(),
+                        ),
+                        Locale::Ru => (
+                            "Ошибка".into(),
+                            "Не удалось прочитать данные провайдера".into(),
+                        ),
+                    }
+                }
+            }
             ProviderStatus::Unavailable => unavailable_status(
                 provider_id,
                 provider.error.as_ref().map(|error| error.code.as_str()),
@@ -437,7 +447,7 @@ impl UiSnapshot {
         next
     }
 
-    pub fn replace_claude_error(&self) -> Self {
+    pub fn replace_claude_bridge_error(&self) -> Self {
         let mut next = self.clone();
         let mut claude = next
             .providers
@@ -447,12 +457,41 @@ impl UiSnapshot {
             .unwrap_or_else(|| empty_provider("claude"));
         claude.status = ProviderStatus::Error;
         claude.error = Some(ProviderError {
-            code: "claude_pipe_error".into(),
-            message: "Claude status-line bridge is unavailable".into(),
+            code: "claude_bridge_error".into(),
+            message: "Claude Code status line did not provide an update".into(),
         });
         replace_provider(&mut next.providers, claude);
         next
     }
+
+    pub fn replace_claude_refresh_error(&self, failure: ClaudeRefreshFailure) -> Self {
+        let mut next = self.clone();
+        let mut claude = next
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "claude")
+            .cloned()
+            .unwrap_or_else(|| empty_provider("claude"));
+        claude.status = ProviderStatus::Error;
+        claude.error = Some(ProviderError {
+            code: format!("claude_refresh_{}", failure.category()),
+            message: "Claude background refresh failed".into(),
+        });
+        replace_provider(&mut next.providers, claude);
+        next
+    }
+}
+
+fn claude_error_copy(
+    error: Option<&ProviderError>,
+    locale: Locale,
+) -> Option<(&'static str, &'static str)> {
+    let code = error?.code.as_str();
+    if code == "claude_bridge_error" {
+        return Some(locale.claude_bridge_error());
+    }
+    let category = code.strip_prefix("claude_refresh_")?;
+    locale.claude_refresh_failure(ClaudeRefreshFailure::from_category(category)?)
 }
 
 /// Error code of a Claude CLI refresh that found no installed CLI.
@@ -673,22 +712,23 @@ fn provider_ui_for_locale(snapshot: &UiSnapshot, id: &str, now: i64, locale: Loc
         (strings.demo.into(), rgb(0xd9, 0xae, 0x62), 1)
     } else if snapshot.loading && id == "codex" {
         (strings.loading.into(), rgb(0x9a, 0xa5, 0xb2), 3)
-    } else if snapshot.claude_bridge_enabled && id == "claude" && !has_last_good {
-        if provider.status == ProviderStatus::Error {
+    } else if provider.status == ProviderStatus::Error && id == "claude" && !has_last_good {
+        if let Some((status, _)) = claude_error_copy(provider.error.as_ref(), locale) {
+            (status.into(), rgb(0xef, 0x82, 0x89), 2)
+        } else {
             (
                 match locale {
-                    Locale::Uk => "Помилка мосту",
-                    Locale::En => "Bridge error",
-                    Locale::Pl => "Błąd mostu",
-                    Locale::Ru => "Ошибка моста",
-                }
-                .into(),
+                    Locale::Uk => "Помилка провайдера".into(),
+                    Locale::En => "Provider error".into(),
+                    Locale::Pl => "Błąd dostawcy".into(),
+                    Locale::Ru => "Ошибка провайдера".into(),
+                },
                 rgb(0xef, 0x82, 0x89),
                 2,
             )
-        } else {
-            (strings.waiting.into(), rgb(0x9a, 0xa5, 0xb2), 3)
         }
+    } else if snapshot.claude_bridge_enabled && id == "claude" && !has_last_good {
+        (strings.waiting.into(), rgb(0x9a, 0xa5, 0xb2), 3)
     } else if fresh {
         let age = provider
             .last_success_unix_seconds
@@ -1046,7 +1086,7 @@ mod tests {
         };
         let provider = status_line.to_provider_snapshot();
         let last_good = UiSnapshot::loading(true).replace_claude(provider, status_line);
-        let failed = last_good.replace_claude_error();
+        let failed = last_good.replace_claude_refresh_error(ClaudeRefreshFailure::NonzeroExit);
         let view = provider_ui(&failed, "claude", 101);
         assert_eq!(view.five.remaining, "40%");
         assert_eq!(view.weekly.remaining, "70%");
@@ -1402,11 +1442,65 @@ mod tests {
 
     #[test]
     fn enabled_bridge_errors_are_visible_without_fabricated_values() {
-        let snapshot = UiSnapshot::loading(true).replace_claude_error();
+        let snapshot = UiSnapshot::loading(true).replace_claude_bridge_error();
         let view = provider_ui(&snapshot, "claude", 1_700_000_000);
-        assert_eq!(view.status, "Помилка мосту");
+        assert_eq!(view.status, Locale::Uk.claude_bridge_error().0);
         assert_eq!(view.five.remaining, "—");
         assert!(!view.five.available);
+    }
+
+    #[test]
+    fn claude_refresh_categories_survive_adapter_and_localize_separately_from_bridge_errors() {
+        let failures = [
+            ClaudeRefreshFailure::SpawnFailure,
+            ClaudeRefreshFailure::NonzeroExit,
+            ClaudeRefreshFailure::Timeout,
+            ClaudeRefreshFailure::EmptyOutput,
+            ClaudeRefreshFailure::UnrecognizedFormat,
+            ClaudeRefreshFailure::NoQuotaValues,
+            ClaudeRefreshFailure::ProcessIoFailure,
+        ];
+        for failure in failures {
+            let snapshot = UiSnapshot::loading(true).replace_claude_refresh_error(failure);
+            let code = snapshot
+                .providers
+                .iter()
+                .find(|provider| provider.provider_id == "claude")
+                .and_then(|provider| provider.error.as_ref())
+                .map(|error| error.code.as_str());
+            assert_eq!(
+                code,
+                Some(format!("claude_refresh_{}", failure.category()).as_str())
+            );
+
+            for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+                let (status, description) = locale.claude_refresh_failure(failure).unwrap();
+                assert!(!status.is_empty());
+                assert!(!description.is_empty());
+                assert!(!status.to_ascii_lowercase().contains("bridge"));
+                assert_eq!(
+                    provider_ui_for_locale(&snapshot, "claude", 100, locale).status,
+                    status
+                );
+                let (settings_status, settings_description) =
+                    snapshot.settings_status("claude", true, 100, locale);
+                assert_eq!(settings_status, status);
+                assert_eq!(settings_description, description);
+            }
+        }
+
+        let bridge = UiSnapshot::loading(true).replace_claude_bridge_error();
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let (status, description) = locale.claude_bridge_error();
+            assert_eq!(
+                provider_ui_for_locale(&bridge, "claude", 100, locale).status,
+                status
+            );
+            assert_eq!(
+                bridge.settings_status("claude", true, 100, locale),
+                (status.into(), description.into())
+            );
+        }
     }
 
     #[test]

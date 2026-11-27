@@ -2049,17 +2049,17 @@ async fn run_live_workers<P>(
                             eprintln!("CLAUDE_REFRESH: cache_updated request_id={} cache_ms={}", request_id.map_or_else(|| "background".into(), |id| id.to_string()), cache_started.elapsed().as_millis());
                             (request_id, updated)
                         }
-                        claude_refresher::ClaudeRefreshEvent::Failed { request_id, timed_out, cli_missing } => {
+                        claude_refresher::ClaudeRefreshEvent::Failed { request_id, failure } => {
                             let updated = if let Ok(mut current) = claude_snapshot.lock() {
-                                *current = if cli_missing {
-                                    current.replace_claude_cli_missing()
-                                } else {
-                                    current.replace_claude_error()
+                                *current = match failure {
+                                    claude_refresher::ClaudeRefreshFailure::CliMissing => {
+                                        current.replace_claude_cli_missing()
+                                    }
+                                    failure => current.replace_claude_refresh_error(failure),
                                 };
                                 Some(current.clone())
                             } else { None };
-                            let kind = if timed_out { "timed_out" } else { "failed" };
-                            eprintln!("CLAUDE_REFRESH: cache_updated request_id={} result={kind} retained_last_good=true", request_id.map_or_else(|| "background".into(), |id| id.to_string()));
+                            eprintln!("CLAUDE_REFRESH: cache_updated request_id={} result=failed category={} retained_last_good=true", request_id.map_or_else(|| "background".into(), |id| id.to_string()), failure.category());
                             (request_id, updated)
                         }
                     };
@@ -2095,7 +2095,7 @@ async fn run_live_workers<P>(
         move |listener| run_claude_status_pipe(sender.clone(), listener),
         move || {
             if let Ok(mut current) = pipe_snapshot.lock() {
-                *current = current.replace_claude_error();
+                *current = current.replace_claude_bridge_error();
             }
             queue_ui_snapshot(
                 pipe_window.clone(),
