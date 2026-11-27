@@ -8,13 +8,13 @@
 
 A small Windows tray app that shows remaining quota, reset countdowns and low-limit alerts for your AI coding assistants.
 
-[![Latest release](https://img.shields.io/badge/Release-v0.2.0-15243D?style=flat-square)](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.2.0)
+[![Release preparation: v0.3.0](https://img.shields.io/badge/Release-v0.3.0%20preparation-15243D?style=flat-square)](https://github.com/valenticus/agent-usage-monitor/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-15243D?style=flat-square)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2B%20x64-15243D?style=flat-square)
 ![Rust](https://img.shields.io/badge/Rust-Slint-15243D?style=flat-square)
 ![Languages](https://img.shields.io/badge/UI-UA%20·%20EN%20·%20PL%20·%20RU-15243D?style=flat-square)
 
-**[Download v0.2.0](https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.2.0)** · [All releases](https://github.com/valenticus/agent-usage-monitor/releases) · [Microsoft Store](https://apps.microsoft.com/detail/9N20DHG8SSS1) · [Report an issue](https://github.com/valenticus/agent-usage-monitor/issues)
+**[Latest published release: v0.2.0](https://github.com/valenticus/agent-usage-monitor/releases/latest)** · **v0.3.0 is in preparation and is not published yet.** · [All releases](https://github.com/valenticus/agent-usage-monitor/releases) · [Microsoft Store](https://apps.microsoft.com/detail/9N20DHG8SSS1) · [Report an issue](https://github.com/valenticus/agent-usage-monitor/issues)
 
 <a href="https://get.microsoft.com/installer/download/9N20DHG8SSS1?referrer=appbadge">
   <img src="https://get.microsoft.com/images/en-us%20dark.svg" alt="Download Agent Usage Monitor from Microsoft Store" width="200">
@@ -41,6 +41,7 @@ AUM is built with **Rust** and **Slint**. It is an independent community project
 - **Themes:** Graphite, Bluish Dark and Light.
 - **Languages:** Ukrainian, English, Polish and Russian.
 - **Launch at sign-in:** optional start in the tray when you sign in to Windows.
+- **Update checks (v0.3.0):** manually check public GitHub release metadata from About, or enable automatic checks (off by default, at most once per 24 hours). Checks do not download or install updates; MSIX updates remain managed by Microsoft Store. See [update checker privacy and limitations](docs/update-checker.md).
 - **Local-first:** settings and alert state stay in your user profile. AUM does not store provider credentials and does not change your agent settings.
 
 ## Screenshots
@@ -97,7 +98,7 @@ Install via the **[Microsoft Store](https://apps.microsoft.com/detail/9N20DHG8SS
 
 ### Windows installer (recommended)
 
-Download `AgentUsageMonitor-0.2.0-win-x64-setup.exe`, run the setup wizard, and launch **Agent Usage Monitor**. Installation is per-user; administrator access is not normally required. Installing over an earlier version upgrades it in place and keeps your settings.
+The latest published installer is `AgentUsageMonitor-0.2.0-win-x64-setup.exe`. The v0.3.0 installer will be named `AgentUsageMonitor-0.3.0-win-x64-setup.exe` when that release is published. Run the setup wizard and launch **Agent Usage Monitor**. Installation is per-user; administrator access is not normally required. Installing over an earlier version upgrades it in place and keeps your settings.
 
 The installer can create Start Menu and optional desktop shortcuts. AUM can optionally start when you sign in to Windows. Uninstalling the application can preserve your settings for a future reinstall.
 
@@ -105,7 +106,7 @@ The installer and the executables are not code-signed yet. Windows SmartScreen m
 
 ### Portable ZIP
 
-Download `AgentUsageMonitor-0.2.0-win-x64-portable.zip`, extract the archive, and run `agent-usage-monitor.exe`.
+The latest published archive is `AgentUsageMonitor-0.2.0-win-x64-portable.zip`. The v0.3.0 archive will be named `AgentUsageMonitor-0.3.0-win-x64-portable.zip` when that release is published. Extract the archive and run `agent-usage-monitor.exe`.
 
 The archive contains the main executable, the optional `agent-usage-monitor-claude-bridge.exe`, LICENSE, and documentation. The bridge executable does not need to be launched manually just to open AUM.
 
@@ -124,7 +125,7 @@ For manual bridge setup, see [Claude status-line documentation](docs/claude-stat
 - Usage information depends on what Codex and Claude Code expose locally. Providers may be unavailable or return incomplete or stale data.
 - Live updates through Claude Code's status line are optional and require one-time manual setup. Enabling Claude monitoring alone does not configure this integration. The in-app bridge toggle is available in the MSIX build; the installer and portable builds use the `--enable-claude-bridge` flag.
 - Notifications follow Windows notification settings and focus policies. The installed version integrates with Windows more completely than a portable launch.
-- **Update checks (0.3.0):** About can query public GitHub release metadata over HTTPS. The request does not send credentials or provider data; GitHub receives the request IP and standard HTTP metadata. Manual checks are explicit. Automatic checks are optional, off by default, and run at most once per 24 hours after a successful check while AUM is running. The checker does not download or install updates. MSIX updates are managed by Microsoft Store. See [update checker privacy and limitations](docs/update-checker.md).
+- Update-check requests contain no credentials or provider data; GitHub receives the request IP and standard HTTP metadata. Automatic checks are off by default and run at most once per 24 hours after a successful check while AUM is running. See [update checker privacy and limitations](docs/update-checker.md).
 - This is an independent community project, not an official product of OpenAI or Anthropic.
 - Claude and Codex are trademarks of their respective owners. The provider marks shown in the app identify each provider only; they are not covered by the MIT license (see [brand asset notes](docs/design/brand-assets.md)).
 

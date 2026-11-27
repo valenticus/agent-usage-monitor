@@ -1,9 +1,9 @@
 # State: main
 
 ## Goal and constraints
-- v0.2.0 is published and is the latest release. v0.1.0 and v0.1.1 stay published unchanged.
+- v0.2.0 is the latest published GitHub release; v0.3.0 release preparation is in progress and remains unreleased. v0.1.0 and v0.1.1 stay published unchanged.
 - Do not modify the published v0.1.0, v0.1.1 or v0.2.0 releases or tags.
-- Microsoft Store submission of 0.2.0.0 is pending and needs explicit user approval.
+- Microsoft Store v0.2.0.0 is published. The installed package reports `SignatureKind=Store` and `Status=Ok`.
 - Never run authenticated Claude requests, read credentials or transcripts, use private OAuth APIs, or change global Claude settings (see `AGENTS.md`).
 - Commit and push only on explicit request; never force-push.
 
@@ -12,7 +12,7 @@
 | --- | --- | --- | --- |
 | v0.1.0 | `v0.1.0` → `ddd862b` | 2026-11-21 19:08:31 | setup 7,652,335 B; portable ZIP 7,821,645 B |
 | v0.1.1 | `v0.1.1` (annotated, `c82e1bc`) → `b24d207` | 2026-11-21 20:43:30 | see below |
-| v0.2.0 (Latest) | `v0.2.0` (annotated, `11f76e0`) → `e278a90` | 2026-11-23 16:00:35 | see "v0.2.0" below |
+| v0.2.0 (Latest GitHub release) | `v0.2.0` (annotated, `11f76e0`) → `e278a90` | 2026-11-23 16:00:35 | see "v0.2.0" below; Microsoft Store package is also published |
 
 v0.1.1: https://github.com/valenticus/agent-usage-monitor/releases/tag/v0.1.1
 
@@ -53,11 +53,37 @@ Decision: B (`opt-level = "s"`, no Thin LTO); no further size experiments. The s
 | `AgentUsageMonitor-0.2.0-win-x64-setup.exe` | 7,104,903 B | `DE852635CFF40E45D945C31552302150CB38D9762569CF3154315F0C282625D0` |
 | `AgentUsageMonitor-0.2.0-win-x64-portable.zip` | 6,827,876 B | `7AE03F1AA7293CA6547B13EB4EA60B32A47AA85746CFA91363A97905D76F73C7` |
 
-- No MSIX on GitHub. Store package (unsigned, `C347C544…`) and handoff notes: `AUM-recovery\store-handoff\v0.2.0\` (outside the repo). **Store submission pending user approval.** Open risk: Windows S mode untested.
-- The installed test-signed MSIX on this PC is 0.2.0.0 rc1 (differs from release only in Claude wording).
+- No MSIX on GitHub. The unsigned Store upload package (`C347C544…`) and handoff notes are in `AUM-recovery\store-handoff\v0.2.0\` (outside the repo); Partner Center signing is reflected in the published Store package. Windows S mode remains untested.
+- The installed Microsoft Store package on this PC is version 0.2.0.0 (`SignatureKind=Store`, `Status=Ok`).
+
+## v0.3.0 release preparation (unreleased)
+- v0.3.0 is the current release-preparation target, not a published release. No v0.3.0 tag or GitHub Release exists; final release packages must wait until the preparation changes are merged.
+- Release-readiness work covers the release-mode test compilation gate for `AboutPreview`, README v0.3.0 metadata/asset names and update-check description, plus the Inno Setup 0.3.0 fallback.
+- Update checking in v0.3.0 is metadata-only: manual checks and optional automatic checks, with no downloading or installing packages. Microsoft Store updates continue through the Store.
+- The v0.3.0 installer and portable asset names are `AgentUsageMonitor-0.3.0-win-x64-setup.exe` and `AgentUsageMonitor-0.3.0-win-x64-portable.zip` when published.
+
+## Roadmap after v0.3.0
+- **v0.4.0:** Antigravity integration.
+- **v0.5.0:** automatic update installation. This is separate from v0.3.0 metadata checks and from the v0.4.0 Antigravity integration.
+
+## Merged pull requests through #12
+| PR | Merged change |
+| --- | --- |
+| [#1](https://github.com/valenticus/agent-usage-monitor/pull/1) | Tray recovery after resume and flyout z-order |
+| [#2](https://github.com/valenticus/agent-usage-monitor/pull/2) | Microsoft Store MSIX packaging |
+| [#3](https://github.com/valenticus/agent-usage-monitor/pull/3) | AUM v0.2.0 feature release |
+| [#4](https://github.com/valenticus/agent-usage-monitor/pull/4) | Post-v0.2.0 state and design-spec documentation |
+| [#5](https://github.com/valenticus/agent-usage-monitor/pull/5) | README accuracy for v0.2.0 |
+| [#6](https://github.com/valenticus/agent-usage-monitor/pull/6) | v0.3.0 update checking |
+| [#7](https://github.com/valenticus/agent-usage-monitor/pull/7) | Adaptive Settings window |
+| [#8](https://github.com/valenticus/agent-usage-monitor/pull/8) | Separate tray hover preview from main statistics window |
+| [#9](https://github.com/valenticus/agent-usage-monitor/pull/9) | README screenshots |
+| [#10](https://github.com/valenticus/agent-usage-monitor/pull/10) | Declare supported MSIX package languages |
+| [#11](https://github.com/valenticus/agent-usage-monitor/pull/11) | README hero image |
+| [#12](https://github.com/valenticus/agent-usage-monitor/pull/12) | Typed Claude background-refresh failure diagnostics |
 
 ## Git state
-- `main` = merge commit for PR #3 plus the post-release docs PR; in sync with `origin/main`.
+- `main` was synchronized at `d91ab70` (PR #12 merge) before creating `release/v0.3.0-prep`; this preparation branch is not merged.
 - The unpublished history was cleaned before the first push, so the obsolete design reference images were never published.
 - Worktrees: `C:\project\agent-usage-monitor` and the Kilo Code pool worktree `flaxen-marmoset` (managed by Kilo; leave it). The merged worktrees `agent-usage-monitor-msix` and `agent-usage-monitor-tray` were removed in the post-v0.2.0 cleanup; remote branches were kept.
 

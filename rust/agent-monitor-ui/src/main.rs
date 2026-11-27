@@ -51,7 +51,7 @@ type SharedSnapshot = Arc<Mutex<adapter::UiSnapshot>>;
 type SharedAlerts = Arc<Mutex<AlertRuntime>>;
 static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
 static QA_ISOLATED: AtomicBool = AtomicBool::new(false);
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 static QA_ABOUT_PREVIEW: std::sync::Mutex<Option<AboutPreview>> = std::sync::Mutex::new(None);
 static SETTINGS_OPEN_PENDING: AtomicBool = AtomicBool::new(false);
 static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus::Idle);
@@ -66,7 +66,7 @@ const SETTINGS_MARGIN_LOGICAL: f32 = 16.0;
 const SETTINGS_CAPTION_LOGICAL: f32 = 32.0;
 const SETTINGS_MIN_HEIGHT_LOGICAL: f32 = 420.0;
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 #[derive(Clone, Copy)]
 struct AboutPreview {
     distribution: Distribution,
@@ -84,7 +84,7 @@ enum AboutPreviewStatus {
     Invalid,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 impl AboutPreview {
     fn from_args(args: &[String]) -> Option<Self> {
         let distribution = match args
