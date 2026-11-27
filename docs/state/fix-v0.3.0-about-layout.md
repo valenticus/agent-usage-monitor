@@ -33,7 +33,8 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - Base before compactness revision: `bf00245` (`Record About layout fix PR state`).
 - Compactness revision commit: `15d3d49` (`Keep About update status compact and readable`), pushed to PR #14.
 - Current PR head at start of geometry investigation: `0a4b5f4a54551c4a858aff09019e6c0cb4758da2` (`Fit About statuses without scroll`), clean and synced before this correction.
-- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. Latest geometry correction is in progress and not yet pushed.
+- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. Geometry correction commit `f531b50b3fc989a2626763978e59fc2217677665` is pushed; exact-head Windows CI passed (run `46069491077`).
+- Isolated MSVC debug build from that exact source commit, not launched: `%TEMP%\AUM-PR14-QA-f531b50-build\x86_64-pc-windows-msvc\debug\agent-usage-monitor.exe`, SHA256 `CC94281B0AC06B8373E412633D7677DC491EA30D1B76DEE8DBE37B9A5829A221`.
 - No installed AUM instance or GUI executable has been launched or manipulated.
 
 ## Changed files
@@ -68,7 +69,7 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - Isolated Windows MSVC debug executable from that PR head — built offline, not launched: `%TEMP%\AUM-PR14-QA-c046723-build\x86_64-pc-windows-msvc\debug\agent-usage-monitor.exe`, SHA256 `CC9E43F67C9BC3ABD25355095AF6098821591556C8D1C8102DF393875967EE47`.
 - PR #14 remains open and unmerged. Native GUI root cause and visual verification are pending manual measurements from the affected Windows display.
 - Manual GUI verification was not performed; the installed RC and GUI were left untouched. Headless Slint tests are not visual confirmation.
-- Push the reviewed correction, wait for Windows CI on the exact final head, then build an isolated debug executable from that passing head without launching it. Give the user the executable path/hash and request manual geometry collection; keep PR #14 open.
+- User to run the isolated executable manually and provide `QA_GEOMETRY` output from the affected display. Confirm post-fit viewport/content/extent, child heights, and scrolling before calling native layout fixed. Keep PR #14 open until that visual/native QA is complete.
 
 ## Decisions (and why)
 - Idle reuses the existing installed-version chip. Result text goes below the update buttons and takes its natural wrapped height, because a fixed slot clips long translations while moving the row below the buttons preserves their position.
