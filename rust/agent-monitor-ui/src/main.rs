@@ -159,11 +159,15 @@ struct SettingsScreenSignature {
 #[derive(Debug, Clone, Copy, Default)]
 struct SettingsLayoutSnapshot {
     screen: Option<SettingsScreenSignature>,
+    retained_size: Option<(f32, f32)>,
 }
 
 impl SettingsLayoutSnapshot {
     const fn new() -> Self {
-        Self { screen: None }
+        Self {
+            screen: None,
+            retained_size: None,
+        }
     }
 }
 
@@ -602,6 +606,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let panel = settings_window.as_weak();
         move || {
             if let Some(panel) = panel.upgrade() {
+                remember_settings_window_size(&panel);
                 let _ = panel.hide();
             }
             slint::CloseRequestResponse::HideWindow
@@ -3108,12 +3113,13 @@ fn settings_geometry(
 fn prepare_settings_content_measurement(window: &SettingsWindow) {
     let scale = window.window().scale_factor().max(0.5);
     let current = window.window().size().to_logical(scale);
-    let width = window.get_default_width();
-    let height = if current.height > 0.0 {
-        current.height
-    } else {
-        window.get_settings_window_height().max(1.0)
-    };
+    let retained_size = retained_settings_window_size();
+    let (width, retained_height) = settings_open_size(
+        window.get_default_width(),
+        window.get_settings_window_height(),
+        retained_size,
+    );
+    let height = retained_height.max(current.height).max(1.0);
 
     // A newly created hidden Winit window can still have a zero-sized layout.
     // Set its intended width while hidden so wrapped text is measured at the
@@ -3130,10 +3136,15 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
         prepare_settings_content_measurement(window);
     }
     let required_height = window.get_required_settings_height();
+    let (common_width, common_height) = settings_open_size(
+        window.get_default_width(),
+        required_height,
+        retained_settings_window_size(),
+    );
     #[cfg(windows)]
     if let Some(screen) = settings_screen_signature(window, use_common_size) {
         let (requested_width, requested_height) = if use_common_size {
-            (window.get_default_width(), required_height)
+            (common_width, common_height)
         } else {
             let scale = f32::from_bits(screen.scale_bits);
             let current = window.window().size().to_logical(scale);
@@ -3167,7 +3178,40 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
     }
     #[cfg(not(windows))]
     if use_common_size {
-        window.set_settings_window_height(required_height);
+        window.set_settings_window_height(common_height);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(common_width, common_height));
+    }
+}
+
+fn settings_open_size(
+    default_width: f32,
+    required_height: f32,
+    retained_size: Option<(f32, f32)>,
+) -> (f32, f32) {
+    retained_size.unwrap_or((default_width, required_height))
+}
+
+fn retained_settings_window_size() -> Option<(f32, f32)> {
+    SETTINGS_LAYOUT
+        .lock()
+        .ok()
+        .and_then(|layout| layout.retained_size)
+}
+
+fn remember_settings_window_size(window: &SettingsWindow) {
+    let size = window
+        .window()
+        .size()
+        .to_logical(window.window().scale_factor().max(0.5));
+    if size.width.is_finite()
+        && size.height.is_finite()
+        && size.width > 0.0
+        && size.height > 0.0
+        && let Ok(mut layout) = SETTINGS_LAYOUT.lock()
+    {
+        layout.retained_size = Some((size.width, size.height));
     }
 }
 
@@ -3579,12 +3623,16 @@ mod tests {
                     &adapter::UiSnapshot::unavailable(),
                     now_unix(),
                 );
+                configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
                 window.set_selected_tab(2);
                 let store = distribution == Distribution::MicrosoftStore;
                 let mut expected_window_size = None;
                 let mut measurements = Vec::new();
                 let mut expected_button_gap = None;
                 let mut expected_required_height = None;
+                let mut expected_button_y: Option<f32> = None;
+                let mut expected_status_y: Option<f32> = None;
+                let mut expected_footer_bottom: Option<f32> = None;
 
                 for status in statuses {
                     configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
@@ -3702,8 +3750,99 @@ mod tests {
                         expected_window_size = Some(window.window().size());
                     }
                     for tab in 0..3 {
-                        window.set_selected_tab(tab);
+                        window.invoke_select_settings_tab(tab);
                         assert_eq!(window.window().size(), expected_window_size.unwrap());
+                        let viewport = window.get_settings_scroll_viewport_height();
+                        let content_height = window.get_settings_scroll_content_height();
+                        let scroll_extent = window.get_settings_scroll_max_extent();
+                        let scroll_y_before = window.get_settings_scroll_y();
+                        let button_y = window.get_settings_about_update_actions_y();
+                        let status_y = window.get_settings_about_status_y();
+                        let footer_bottom = window.get_settings_about_footer_bottom();
+                        let status_expansion = window.get_settings_about_status_layout_expansion();
+                        let reclaimed = window.get_settings_about_status_space_reclaimed();
+                        assert_eq!(reclaimed, status_expansion.min(26.0));
+                        for gap in [
+                            window.get_settings_about_gap_after_update_actions(),
+                            window.get_settings_about_gap_after_links(),
+                            window.get_settings_about_gap_before_footer(),
+                            window.get_settings_about_gap_after_divider(),
+                        ] {
+                            assert!((8.0..=16.0).contains(&gap));
+                        }
+                        if tab == 2 {
+                            if let Some(expected) = expected_button_y {
+                                assert!(
+                                    (button_y - expected).abs() < 0.1,
+                                    "About update button moved across status states: expected {expected:.2}, got {button_y:.2}"
+                                );
+                            } else {
+                                expected_button_y = Some(button_y);
+                            }
+                            if let Some(expected) = expected_status_y {
+                                assert!(
+                                    (status_y - expected).abs() < 0.1,
+                                    "About status row moved across status states"
+                                );
+                            } else {
+                                expected_status_y = Some(status_y);
+                            }
+                            if store || !matches!(status, AboutPreviewStatus::Long) {
+                                if let Some(expected) = expected_footer_bottom {
+                                    assert!(
+                                        (footer_bottom - expected).abs() < 0.1,
+                                        "About footer moved across normal status states"
+                                    );
+                                } else {
+                                    expected_footer_bottom = Some(footer_bottom);
+                                }
+                            }
+                        }
+                        let should_fit =
+                            tab != 2 || store || !matches!(status, AboutPreviewStatus::Long);
+                        if should_fit {
+                            assert_eq!(
+                                scroll_extent, 0.0,
+                                "normal {status:?} content must fit in tab {tab} for {locale:?}/{distribution:?}"
+                            );
+                            if tab == 2 {
+                                assert!(
+                                    footer_bottom <= viewport + 0.1,
+                                    "About footer must fit for {locale:?}/{distribution:?}/{status:?}: footer={footer_bottom:.1}, viewport={viewport:.1}"
+                                );
+                            }
+                        } else {
+                            assert!(
+                                scroll_extent > 0.0,
+                                "long text should retain real scrolling"
+                            );
+                        }
+                        window.invoke_scroll_settings_to_bottom();
+                        let scroll_y_after = window.get_settings_scroll_y();
+                        assert!(
+                            (scroll_y_after + scroll_extent).abs() < 0.1,
+                            "scroll-to-bottom must expose the measured extent: extent={scroll_extent:.1}, y={scroll_y_after:.1}"
+                        );
+                        if should_fit {
+                            assert_eq!(
+                                scroll_y_after, 0.0,
+                                "fitting content must not move on scroll"
+                            );
+                        } else if tab == 2 {
+                            assert!(
+                                window.get_settings_about_footer_bottom() <= viewport + 0.1,
+                                "scrolling long text to the bottom must reveal the footer"
+                            );
+                        }
+                        if locale == Locale::En && distribution == Distribution::GitHubPortable {
+                            println!(
+                                "GEOMETRY status={status:?} tab={tab} test_backend_window_size_px={:?} logical_viewport={viewport:.1} page_pref={:.1} shared_required={required:.1} top_padding={:.1} bottom_padding={:.1} content={content_height:.1} max_extent={scroll_extent:.1} content_y={scroll_y_before:.1}->{scroll_y_after:.1} button_y={button_y:.1} status_y={status_y:.1} status_h={status_height:.1} footer_bottom={footer_bottom:.1}",
+                                window.window().size(),
+                                window.get_active_page_required_height(),
+                                window.get_settings_about_top_padding(),
+                                window.get_settings_about_bottom_padding(),
+                            );
+                        }
                     }
                     for theme_kind in 0..=2 {
                         window.set_theme_kind(theme_kind);
@@ -3712,6 +3851,18 @@ mod tests {
                         assert_eq!(window.get_about_update_button_gap(), 12.0);
                     }
                 }
+                // Reopening Settings after an exceptional saved result must
+                // retain the normal-state sizing budget and native size.
+                if store {
+                    configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
+                } else {
+                    apply_about_preview_status(&window, locale, AboutPreviewStatus::Long);
+                }
+                assert_eq!(
+                    window.get_required_settings_height(),
+                    expected_required_height.unwrap()
+                );
+                assert_eq!(window.window().size(), expected_window_size.unwrap());
                 println!("{locale:?}/{distribution:?}: {measurements:?}");
             }
         }
@@ -3733,10 +3884,17 @@ mod tests {
                 &adapter::UiSnapshot::unavailable(),
                 now_unix(),
             );
+            configure_about_update_ui(
+                &window,
+                Distribution::GitHubPortable,
+                locale,
+                &UpdateStatus::Idle,
+            );
             window.invoke_select_settings_tab(2);
             let idle_height = window.get_about_page_required_height();
             let native_size = window.window().size();
             let labels = locale.settings();
+            let mut button_y: Option<f32> = None;
 
             for message in [
                 labels.update_offline,
@@ -3745,6 +3903,7 @@ mod tests {
                 labels.update_timeout,
             ] {
                 window.set_update_status(message.into());
+                window.invoke_select_settings_tab(2);
                 let slot_height = window.get_update_status_slot_height();
                 let text_height = window.get_update_status_text_height();
                 assert!(slot_height > 0.0, "{locale:?}: status must remain visible");
@@ -3755,6 +3914,22 @@ mod tests {
                 assert_eq!(window.get_about_update_button_gap(), 12.0);
                 assert_eq!(window.window().size(), native_size);
                 assert!(window.get_about_page_required_height() >= idle_height);
+                let current_button_y = window.get_settings_about_update_actions_y();
+                if let Some(expected) = button_y {
+                    assert!((current_button_y - expected).abs() < 0.1);
+                } else {
+                    button_y = Some(current_button_y);
+                }
+                let scroll_extent = window.get_settings_scroll_max_extent();
+                assert!(scroll_extent > 0.0, "constrained viewport should scroll");
+                window.invoke_scroll_settings_to_bottom();
+                let scroll_y = window.get_settings_scroll_y();
+                assert!((scroll_y + scroll_extent).abs() < 0.1);
+                assert!(
+                    window.get_settings_about_footer_bottom()
+                        <= window.get_settings_scroll_viewport_height() + 0.1,
+                    "scrolling to the bottom must reveal the footer for {locale:?}"
+                );
             }
         }
     }
@@ -4011,6 +4186,23 @@ mod tests {
         assert!(geometry.height < 900.0);
         assert_eq!(geometry.minimum_height, geometry.height);
         assert!(geometry.y + (geometry.height * 2.0).round() as i32 + 64 <= 600);
+    }
+
+    #[test]
+    fn settings_reopen_preserves_a_user_sized_window_when_available() {
+        assert_eq!(settings_open_size(720.0, 764.0, None), (720.0, 764.0));
+        let window = SettingsWindow::new().unwrap();
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(880.0, 680.0));
+        let previous = retained_settings_window_size();
+        remember_settings_window_size(&window);
+        let retained = retained_settings_window_size().unwrap();
+        assert_eq!(retained, (880.0, 680.0));
+        assert_eq!(settings_open_size(720.0, 764.0, Some(retained)), retained);
+        if let Ok(mut layout) = SETTINGS_LAYOUT.lock() {
+            layout.retained_size = previous;
+        }
     }
 
     use super::*;

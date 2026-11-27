@@ -2,11 +2,10 @@
 
 The Settings window keeps General, Notifications, and About instantiated as
 separate Slint layouts at the same scroll origin. It measures each layout's
-natural preferred height and uses the maximum as the common opening height.
-Inactive pages remain measurable. The active page alone determines the
-Flickable's scrollable content height, and selecting a tab resets its scroll
-offset to the top. The About footer uses its natural content height instead of
-stretching to fill the viewport.
+natural preferred height and uses one shared opening height. Inactive pages
+remain measurable. The active page alone determines the Flickable's scrollable
+content height, and selecting a tab resets its scroll offset to the top. All
+three tabs use the same native window dimensions.
 
 Before the initial measurement, the hidden window is assigned its intended
 logical width (720 px). Slint then gets one event-loop turn to lay out wrapped
@@ -15,16 +14,28 @@ zero width; measuring wrapped text at zero width makes natural heights
 artificially large. Only after that layout turn does the app read all three
 page preferred heights, choose their maximum, apply the work-area cap, and
 show the window at the final size. Thus the work area is an upper bound, not
-the desired height. Manual native resizing remains available. Tab changes,
+the desired height. Manual native resizing remains available and is retained
+in memory when Settings closes; reopening respects that size when it fits the
+work area, otherwise the existing work-area clamp applies. Tab changes,
 settings changes, language changes, and live status updates do not resize the
-open window. A language change takes effect for the next opening measurement.
-The About page uses one shared layout for Portable, Installer, and Store. The
-status area has no height when empty; when text is present it uses the wrapped
-text's preferred height (24–72 logical px) and can add content to the active
-page's scrollable area. An 8 px gap separates a present status from the action
-row. Status changes never resize the open window. The Store variant shows its
-localized Microsoft Store update notice in that same area and hides both
-GitHub update controls; it does not reserve a placeholder button row.
+open window. The About page uses one shared layout for Portable, Installer,
+and Store. The idle status row collapses completely, retaining the 12 logical
+px gap before the update controls. A present status uses its natural wrapped
+height and the existing 8 px trailing gap.
+
+The previous sizing calculation subtracted the full dynamic status row and its
+8 px gap from the common height. This kept the native size fixed but left a
+26 px scroll extent for normal one-line results. The fix reclaims that measured
+26 px from four existing post-action gaps: 16/16/16/10 px become 8/8/8/8 px
+while a status is visible. Those gaps return to their original values when the
+status is idle, so the UI reserves no empty status slot and does not increase
+the Settings minimum height. The common-height calculation removes only status
+growth left after this existing spacing has been reclaimed. Ordinary localized
+messages therefore fit with zero scroll; longer wrapped text keeps its full
+natural height and uses the existing Flickable for the excess. The update
+button's position remains fixed. The Store variant shows its localized
+Microsoft Store notice in the same status element and hides both GitHub
+controls.
 
 On Windows, the opening size is capped to the active monitor's `rcWork` area,
 which excludes the taskbar. The calculation accounts for the native caption, a
@@ -41,43 +52,46 @@ while the left mouse button is held, covering native dragging and edge resize.
 The existing 720 logical pixel default width and 680 pixel minimum width are
 retained, subject to work-area constraints.
 
-This phase does not include physical multi-monitor or DPI testing. Unit tests
-exercise work-area geometry at 100%, 125%, 150%, and 200% scale, including a
-taskbar-reduced work area and a monitor with negative horizontal coordinates.
-The UI test uses the Slint 1.19 testing backend to measure all three actual
-Settings pages, confirms they have distinct preferred heights, and verifies
-the shared maximum remains the same while tabs and update states change. With
-a constrained viewport, it scrolls About to the bottom, switches to General,
-and checks that scrolling resets and the active page's content height shrinks.
-It also checks preservation of a fitting manual size and clamping of an
-oversized size against simulated DPI/work-area changes.
+The Slint 1.19 test backend now records window size, viewport/content heights,
+page preferred height, shared required height, page padding, status/button/footer
+positions, status natural height, maximum scroll extent, and content-y before
+and after a bottom-scroll attempt. At 720 logical px width, the headless window
+is 720×738 px for all states. General measures 641 px; Notifications measures
+606 px in Ukrainian, English, and Polish and 623 px in Russian; About measures
+738 px both idle and with each ordinary result. All three tabs have zero
+scroll extent and content-y remains 0.0. In English, the update button stays
+at y=465 px, the status row at y=505 px, and the copyright bottom at y=714 px;
+the ordinary status height is 18 px. Idle status height is 0 px.
 
-The 1080p regression covers all four supported locales. At the intended width,
-the current normal-content measurements are General 641 px, Notifications
-606–623 px, and About 726 px with no update status. The About page becomes
-750 px with a normal status and 778 px with a long status. The test also
-reproduces the pre-fix zero-width condition, which measured a 1,800–1,976 px
-maximum and would be capped near the full work-area height. In an isolated
-Windows QA run at 1920×1080/96 DPI, the final build measured 736×765 physical
-pixels with no Portable status, 736×789 with an Installer offline status, and
-736×789 with the Store notice (native frame included). The former oversized
-window measured 736×1,007 px. The physical check covers one monitor and DPI
-only; multi-monitor and alternate-DPI behavior still needs manual QA.
+Before the fix, the same English test geometry was 720×738 px idle and 720×738
+px during a normal result, while About preferred height grew to 764 px. Its
+26 px scroll extent moved content-y from 0 to -26 px. The button's document
+position remained y=465 px; the visible shift came from scrolling the entire
+page to reveal the footer. After the fix, ordinary states remain at 720×738 px
+with zero scroll and the footer remains at y=714 px. The synthetic long message
+measures 52 px high; after reclaiming 26 px from the existing gaps, its page is
+772 px with a real 34 px scroll extent. Scrolling to the bottom reveals the
+footer without clipping the status text.
 
-The About regression exercises all 3 distributions × 4 locales × 6 states
-(empty, available, long available, offline, HTTP error, and invalid data) with
-the Slint 1.19 test backend. At normal width, Portable and Installer measure
-726 px with no status, 750 px with a normal/error status, and 761 px (Ukrainian)
-or 778 px (English, Polish, Russian) with the localized long status. Store
-measures 750 px because its localized Store notice is always present. The
-Store checks also assert that
-the GitHub check and release controls are hidden. The test holds native window
-size stable while changing status and selecting all three tabs.
+These dimensions are headless Slint logical measurements. They do not include
+or report native Windows frame dimensions, and they are not a visual pass.
+Work-area geometry has unit coverage at 100%, 125%, 150%, and 200% scale,
+including a taskbar-reduced work area and a monitor with negative horizontal
+coordinates. The current change still needs manual Windows GUI review, including
+actual work-area clamping and 150% DPI where available.
+
+The status regression exercises Portable, Installer, and Store layouts across
+all four locales, all three themes, repeated Idle/Checking/Current/Available/
+Offline/HTTP/Invalid/Timeout transitions, and long text. It asserts identical
+window size on every tab, zero scroll for normal messages, a stable update
+button and footer, readable natural status height, and real scrolling for long
+text. A 420×360 logical viewport test confirms that constrained content scrolls
+to reveal the footer. The Store checks confirm the GitHub controls stay hidden.
 
 For isolated visual QA, a debug build accepts
 `--qa-about-distribution=portable|installer|store` and
-`--qa-about-status=available|long|offline|http|invalid`; omit status for the
-empty state. These arguments are honored only together with `--qa-isolated
---empty`. They replace display-only About values; the runtime package
+`--qa-about-status=idle|checking|current|available|long|offline|http|invalid|timeout`.
+These arguments are honored only together with `--qa-isolated --empty`. They
+replace display-only About values; the runtime package
 detector, update worker, and persisted settings are not changed. Production
 builds do not include this preview mechanism.
