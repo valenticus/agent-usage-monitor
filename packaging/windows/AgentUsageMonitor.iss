@@ -3,12 +3,12 @@
 ; Build with packaging\windows\build-installer.ps1, which compiles the release
 ; binaries, stages the static AUM icon and passes the version from Cargo.toml.
 ; Manual build (from this folder):
-;   ISCC.exe /DAppVersion=0.2.0 /DStageDir=..\..\rust\target\installer\stage AgentUsageMonitor.iss
+;   ISCC.exe /DAppVersion=0.3.0 /DStageDir=..\..\rust\target\installer\stage AgentUsageMonitor.iss
 ;
 ; Policy for this release:
 ; - Per-user install under %LOCALAPPDATA%\Programs; no administrator rights.
 ; - Start menu shortcut; desktop shortcut only when chosen.
-; - Optional per-user Windows sign-in launch, disabled by default; no automatic updates or telemetry.
+; - Optional per-user Windows sign-in launch, disabled by default; no automatic update installation or telemetry.
 ; - Provider (Codex/Claude) marks are embedded inside agent-usage-monitor.exe
 ;   by build.rs from the tracked original SVGs in
 ;   rust/agent-monitor-ui/assets/providers/; no loose logo files are
@@ -20,7 +20,7 @@
 ; - The Claude Code status-line bridge stays opt-in (unchecked task).
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.3.0"
 #endif
 #ifndef StageDir
   #define StageDir "..\..\rust\target\installer\stage"
