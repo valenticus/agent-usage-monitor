@@ -3162,14 +3162,26 @@ fn show_settings_measured(window: &SettingsWindow) {
         if let Some(window) = weak.upgrade() {
             let scale = window.window().scale_factor().max(0.5);
             let current = window.window().size().to_logical(scale);
+            let retained_size = retained_settings_window_size();
+            let resizing = settings_user_is_dragging_or_resizing();
+            let visible = window.window().is_visible();
             let still_at_initial_size = native_first_show_remeasure_allowed(
-                first_open_without_retained_size
-                    && retained_settings_window_size().is_none()
-                    && window.window().is_visible(),
+                first_open_without_retained_size && retained_size.is_none() && visible,
                 (initial_logical_size.width, initial_logical_size.height),
                 (current.width, current.height),
-                settings_user_is_dragging_or_resizing(),
+                resizing,
             );
+            #[cfg(debug_assertions)]
+            if QA_GEOMETRY.load(Ordering::Acquire) {
+                eprintln!(
+                    "QA_GEOMETRY_POST_SHOW visible={visible} first_open={} retained={retained_size:?} resizing={resizing} initial={:.2}x{:.2} current={:.2}x{:.2} scale={scale:.4} fit_allowed={still_at_initial_size}",
+                    first_open_without_retained_size,
+                    initial_logical_size.width,
+                    initial_logical_size.height,
+                    current.width,
+                    current.height,
+                );
+            }
             if still_at_initial_size {
                 #[cfg(debug_assertions)]
                 if QA_GEOMETRY.load(Ordering::Acquire) {
@@ -3290,7 +3302,15 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
         retained_settings_window_size(),
     );
     #[cfg(windows)]
-    if let Some(screen) = settings_screen_signature(window, use_common_size) {
+    let screen = settings_screen_signature(window, use_common_size);
+    #[cfg(all(windows, debug_assertions))]
+    if QA_GEOMETRY.load(Ordering::Acquire) && screen.is_none() {
+        eprintln!(
+            "QA_GEOMETRY_NATIVE_FIT_SKIPPED reason=screen_lookup_failed common={use_common_size} required={required_height:.2}"
+        );
+    }
+    #[cfg(windows)]
+    if let Some(screen) = screen {
         let (requested_width, requested_height) = if use_common_size {
             (common_width, common_height)
         } else {
@@ -3307,10 +3327,36 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
             .window()
             .size()
             .to_logical(f32::from_bits(screen.scale_bits));
-        if (current.width - geometry.width).abs() > 0.5
-            || (current.height - geometry.height).abs() > 0.5
-        {
+        let will_resize = (current.width - geometry.width).abs() > 0.5
+            || (current.height - geometry.height).abs() > 0.5;
+        #[cfg(debug_assertions)]
+        if QA_GEOMETRY.load(Ordering::Acquire) {
+            eprintln!(
+                "QA_GEOMETRY_NATIVE_FIT required={required_height:.2} requested={requested_width:.2}x{requested_height:.2} work_area={}x{}@{},{} scale={:.4} clamped={:.2}x{:.2} current={:.2}x{:.2} set_size={will_resize}",
+                screen.work_area.right - screen.work_area.left,
+                screen.work_area.bottom - screen.work_area.top,
+                screen.work_area.left,
+                screen.work_area.top,
+                f32::from_bits(screen.scale_bits),
+                geometry.width,
+                geometry.height,
+                current.width,
+                current.height,
+            );
+        }
+        if will_resize {
             window.window().set_size(logical_size);
+        }
+        #[cfg(debug_assertions)]
+        if QA_GEOMETRY.load(Ordering::Acquire) {
+            let after = window
+                .window()
+                .size()
+                .to_logical(f32::from_bits(screen.scale_bits));
+            eprintln!(
+                "QA_GEOMETRY_NATIVE_FIT_RESULT requested={:.2}x{:.2} immediate={:.2}x{:.2}",
+                geometry.width, geometry.height, after.width, after.height,
+            );
         }
         let position = if center {
             slint::PhysicalPosition::new(geometry.x, geometry.y)
@@ -3694,6 +3740,30 @@ mod tests {
         assert!(!native_first_show_remeasure_allowed(
             true, initial, initial, true,
         ));
+    }
+
+    #[test]
+    fn native_fit_resolves_748_required_height_from_738_client() {
+        let screen = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1032,
+            },
+            ..screen(1.0)
+        };
+        let initial: (f32, f32) = (720.0, 738.0);
+        let required_about: f32 = 748.0;
+        let initial_scroll_extent = (required_about - initial.1).max(0.0);
+        assert_eq!(initial_scroll_extent, 10.0);
+        assert!(native_first_show_remeasure_allowed(
+            true, initial, initial, false,
+        ));
+
+        let fitted = settings_geometry(720.0, required_about, screen);
+        assert_eq!((fitted.width, fitted.height), (720.0, 748.0));
+        assert_eq!((required_about - fitted.height).max(0.0), 0.0);
     }
 
     #[test]

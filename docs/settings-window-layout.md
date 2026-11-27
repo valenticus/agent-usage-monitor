@@ -91,8 +91,11 @@ native Win32 outer and client rectangle sizes in physical pixels, the Slint
 window size converted to logical pixels using the active scale factor, the
 Flickable viewport/content/scroll extent/content-y, active page preferred
 and shared required heights, About component heights/positions, dynamic status
-height/reclaimed spacing, and update-button/footer positions. Before and after
-the first-show native remeasurement it emits a labeled geometry sample. This
+height/reclaimed spacing, and update-button/footer positions. It reports the
+first-show eligibility inputs, screen lookup failure, requested and work-area
+clamped size, whether `set_size` was called, and the immediate result. Before
+and after the first-show native fit it emits a labeled geometry sample; later
+500 ms samples show the settled native client size. This
 distinguishes native frame/client sizing from Slint's logical layout and makes
 it possible to correlate an attempted user scroll with the actual extent.
 These measurements must be collected from the affected Windows display; the
