@@ -59,7 +59,9 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
 - `cargo check --locked --workspace --target x86_64-pc-windows-msvc` and release variant — passed.
 - `git diff --check` — passed.
-- Windows PR CI and an isolated executable for this diagnostic correction — pending push/CI.
+- PR Windows CI on `c046723daf8253cbde4ac5c71a354500796e940e` — passed (run `46064879606`: formatting, static MSIX validation, Clippy, Windows tests, application build, artifact upload).
+- Isolated Windows MSVC debug executable from that PR head — built offline, not launched: `%TEMP%\AUM-PR14-QA-c046723-build\x86_64-pc-windows-msvc\debug\agent-usage-monitor.exe`, SHA256 `CC9E43F67C9BC3ABD25355095AF6098821591556C8D1C8102DF393875967EE47`.
+- PR #14 remains open and unmerged. Native GUI root cause and visual verification are pending manual measurements from the affected Windows display.
 - Manual GUI verification was not performed; the installed RC and GUI were left untouched. Headless Slint tests are not visual confirmation.
 - After push, wait for Windows CI on the final head, then build from that exact passing head without launching it.
 
@@ -72,6 +74,6 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - None known.
 
 ## Next actions
-1. Commit and push the diagnostic/test correction to existing PR #14, then wait for CI on the exact new head.
-3. Build from the exact passing PR head and provide the executable path, hash, and isolated geometry/status preview commands without launching it.
-4. Use native measurements returned from manual QA to establish the Windows-specific root cause before proposing any layout correction.
+1. Collect `--qa-geometry` output from a manual isolated preview while Settings is visible and after attempting to scroll About.
+2. Compare HWND outer/client physical sizes, scale-converted Slint logical size, Flickable viewport/content/range/content-y, preferred heights, and footer position.
+3. Establish the native Windows-specific root cause from those measurements before proposing any layout correction; keep PR #14 open until then.
