@@ -2015,21 +2015,20 @@ export component SettingsWindow inherits Window {
                     wrap: word-wrap;
                 }
                 Rectangle {
-                    // Use only the height required by the current status. A
-                    // small cap keeps pathological QA text from dominating
-                    // About; the Flickable remains available for overflow.
-                    height: root.update-status == "" ? 0px : min(72px, max(24px, update-status-label.preferred-height));
+                    // Keep the status slot fixed so changing its text never
+                    // changes About's measured height or the action position.
+                    height: 32px;
                     update-status-label := Text {
                         width: parent.width;
+                        height: parent.height;
                         text: root.update-status;
-                        visible: root.update-status != "";
                         font-size: 13px;
                         color: root.update-available ? Theme.accent : Theme.text-secondary;
                         vertical-alignment: center;
                         wrap: word-wrap;
                     }
                 }
-                Rectangle { height: 12px; }
+                Rectangle { height: 8px; }
                 update-actions := VerticalLayout {
                     HorizontalLayout {
                         height: 32px;

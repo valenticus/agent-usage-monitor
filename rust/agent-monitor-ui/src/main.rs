@@ -77,11 +77,14 @@ struct AboutPreview {
 #[derive(Debug, Clone, Copy)]
 enum AboutPreviewStatus {
     Idle,
+    Checking,
     Available,
+    Current,
     Long,
     Offline,
     Http,
     Invalid,
+    Timeout,
 }
 
 #[cfg(any(debug_assertions, test))]
@@ -101,10 +104,13 @@ impl AboutPreview {
             .find_map(|arg| arg.strip_prefix("--qa-about-status="))
         {
             Some("available") => AboutPreviewStatus::Available,
+            Some("checking") => AboutPreviewStatus::Checking,
+            Some("current") => AboutPreviewStatus::Current,
             Some("long") => AboutPreviewStatus::Long,
             Some("offline") => AboutPreviewStatus::Offline,
             Some("http") => AboutPreviewStatus::Http,
             Some("invalid") => AboutPreviewStatus::Invalid,
+            Some("timeout") => AboutPreviewStatus::Timeout,
             None => AboutPreviewStatus::Idle,
             _ => return None,
         };
@@ -2655,30 +2661,47 @@ fn apply_about_preview_status(
     preview_status: AboutPreviewStatus,
 ) {
     let labels = locale.settings();
-    let (status, available, release_visible) = match preview_status {
-        AboutPreviewStatus::Idle => (String::new(), false, false),
+    let (status, available, release_visible, checking) = match preview_status {
+        AboutPreviewStatus::Idle => (
+            format!("{} v{}", labels.update_installed, env!("CARGO_PKG_VERSION")),
+            false,
+            false,
+            false,
+        ),
+        AboutPreviewStatus::Checking => (labels.update_checking.into(), false, false, true),
         AboutPreviewStatus::Available => (
-            format!("{}: 0.3.0 → 0.3.1", labels.update_available),
+            format!(
+                "{}: v{} → v{}",
+                labels.update_available,
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION")
+            ),
             true,
             true,
+            false,
         ),
         AboutPreviewStatus::Long => (
             format!(
-                "{}: 0.3.0 → 0.3.1 · {}",
+                "{}: v{} → v{} · {}",
                 labels.update_available,
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION"),
                 [labels.update_available; 5].join(" · ")
             ),
             true,
             true,
+            false,
         ),
-        AboutPreviewStatus::Offline => (labels.update_offline.into(), false, false),
-        AboutPreviewStatus::Http => (format!("{} (503)", labels.update_http), false, false),
-        AboutPreviewStatus::Invalid => (labels.update_invalid.into(), false, false),
+        AboutPreviewStatus::Current => (labels.update_current.into(), false, false, false),
+        AboutPreviewStatus::Offline => (labels.update_offline.into(), false, false, false),
+        AboutPreviewStatus::Http => (format!("{} (503)", labels.update_http), false, false, false),
+        AboutPreviewStatus::Invalid => (labels.update_invalid.into(), false, false, false),
+        AboutPreviewStatus::Timeout => (labels.update_timeout.into(), false, false, false),
     };
     window.set_update_status(status.into());
     window.set_update_available(available);
     window.set_update_release_visible(release_visible);
-    window.set_update_checking(false);
+    window.set_update_checking(checking);
 }
 
 fn request_update_check(
@@ -2809,7 +2832,9 @@ fn set_update_status_text(
 ) {
     use slint::SharedString;
     let text: SharedString = match status {
-        UpdateStatus::Idle => "".into(),
+        UpdateStatus::Idle => {
+            format!("{} v{}", labels.update_installed, env!("CARGO_PKG_VERSION")).into()
+        }
         UpdateStatus::Checking => labels.update_checking.into(),
         UpdateStatus::Available { current, latest } => {
             format!("{}: v{} → v{}", labels.update_available, current, latest).into()
@@ -3494,11 +3519,26 @@ mod tests {
         ];
         let statuses = [
             AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
+            AboutPreviewStatus::Current,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Available,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Long,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Offline,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Http,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Invalid,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
+            AboutPreviewStatus::Timeout,
         ];
 
         for locale in locales {
@@ -3517,6 +3557,8 @@ mod tests {
                 let store = distribution == Distribution::MicrosoftStore;
                 let mut expected_window_size = None;
                 let mut measurements = Vec::new();
+                let mut expected_about_height = None;
+                let mut expected_button_gap = None;
 
                 for status in statuses {
                     configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
@@ -3527,19 +3569,14 @@ mod tests {
                         assert!(!window.get_update_check_available());
                     } else {
                         let gap = window.get_about_update_button_gap();
-                        if matches!(status, AboutPreviewStatus::Idle) {
-                            println!(
-                                "{locale:?}/{distribution:?} idle label-to-button gap: {gap:.2} logical px"
-                            );
-                            assert!(
-                                (gap - 12.0).abs() < 0.1,
-                                "idle label-to-button gap should be 12 logical px for {locale:?}/{distribution:?}, got {gap:.2}"
-                            );
+                        assert!(
+                            (gap - 40.0).abs() < 0.1,
+                            "status slot and button gap should total 40 logical px for {locale:?}/{distribution:?}/{status:?}, got {gap:.2}"
+                        );
+                        if let Some(expected) = expected_button_gap {
+                            assert_eq!(gap, expected, "button position changed across statuses");
                         } else {
-                            assert!(
-                                gap >= 12.0,
-                                "status must preserve at least a 12 logical px gap before the button for {locale:?}/{distribution:?}/{status:?}, got {gap:.2}"
-                            );
+                            expected_button_gap = Some(gap);
                         }
                     }
                     assert_eq!(
@@ -3571,6 +3608,16 @@ mod tests {
                     );
                     if store {
                         assert_eq!(window.get_update_status().as_str(), labels.update_store);
+                    } else if matches!(status, AboutPreviewStatus::Idle) {
+                        assert_eq!(
+                            window.get_update_status().as_str(),
+                            format!("{} v{}", labels.update_installed, env!("CARGO_PKG_VERSION"))
+                        );
+                    } else if matches!(status, AboutPreviewStatus::Checking) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_checking);
+                        assert!(window.get_update_checking());
+                    } else if matches!(status, AboutPreviewStatus::Current) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_current);
                     } else if matches!(status, AboutPreviewStatus::Offline) {
                         assert_eq!(window.get_update_status().as_str(), labels.update_offline);
                     } else if matches!(status, AboutPreviewStatus::Http) {
@@ -3582,13 +3629,24 @@ mod tests {
                         );
                     } else if matches!(status, AboutPreviewStatus::Invalid) {
                         assert_eq!(window.get_update_status().as_str(), labels.update_invalid);
+                    } else if matches!(status, AboutPreviewStatus::Timeout) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_timeout);
                     }
                     if !store && matches!(status, AboutPreviewStatus::Long) {
                         assert!(window.get_update_status().len() > 100);
                     }
 
                     let required = window.get_required_settings_height();
-                    measurements.push((status, window.get_about_page_required_height(), required));
+                    let about_height = window.get_about_page_required_height();
+                    measurements.push((status, about_height, required));
+                    if let Some(expected) = expected_about_height {
+                        assert_eq!(
+                            about_height, expected,
+                            "About height changed across status transitions for {distribution:?}/{locale:?}/{status:?}"
+                        );
+                    } else {
+                        expected_about_height = Some(about_height);
+                    }
                     assert_eq!(
                         required,
                         window
@@ -3606,22 +3664,12 @@ mod tests {
                         window.set_selected_tab(tab);
                         assert_eq!(window.window().size(), expected_window_size.unwrap());
                     }
-                }
-                if !store {
-                    let empty_height = measurements
-                        .iter()
-                        .find(|(status, _, _)| matches!(status, AboutPreviewStatus::Idle))
-                        .map(|(_, about, _)| *about)
-                        .unwrap();
-                    let long_height = measurements
-                        .iter()
-                        .find(|(status, _, _)| matches!(status, AboutPreviewStatus::Long))
-                        .map(|(_, about, _)| *about)
-                        .unwrap();
-                    assert!(
-                        long_height > empty_height,
-                        "long localized status should increase scrollable About content for {distribution:?}/{locale:?}"
-                    );
+                    for theme_kind in 0..=2 {
+                        window.set_theme_kind(theme_kind);
+                        window.invoke_apply_theme_palette();
+                        assert_eq!(window.get_about_page_required_height(), about_height);
+                        assert_eq!(window.get_about_update_button_gap(), 40.0);
+                    }
                 }
                 println!("{locale:?}/{distribution:?}: {measurements:?}");
             }
@@ -3719,14 +3767,15 @@ mod tests {
         let required_after_content_change = window.get_required_settings_height();
         assert_eq!(window.window().size(), manually_resized_size);
 
-        // A newly visible status can increase the About page's scroll extent,
-        // but must not resize a window the user has already sized.
+        // A newly visible status changes only the fixed update-status slot;
+        // it cannot change the About page's scroll extent or resize the window.
         window.set_update_status("update available: version 0.3.1".into());
         window.set_update_available(true);
         window.set_update_release_visible(true);
         assert_eq!(window.window().size(), manually_resized_size);
         let required_after_status = window.get_required_settings_height();
-        assert!(required_after_status > required_after_content_change);
+        assert_eq!(required_after_status, required_after_content_change);
+        assert_eq!(window.get_about_update_button_gap(), 40.0);
         assert_eq!(
             required_after_status,
             window
