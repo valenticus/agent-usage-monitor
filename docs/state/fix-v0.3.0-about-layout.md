@@ -16,7 +16,9 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 ## Git state
 <!-- HEAD, branch, `git status --short`, `git diff --stat` as captured -->
 - Branch: `fix/v0.3.0-about-layout`, created from synchronized `main` (`8648085`).
-- Pre-commit HEAD: `8648085`.
+- Implementation commit: `9b4f615` (`Fix About update status layout stability`).
+- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged.
+- PR head verified at `9b4f61555e2051f84953c0a1f719509c68258fcd`; Git status was clean after push.
 
 ## Changed files
 - `rust/agent-monitor-ui/ui/main.slint`
@@ -42,4 +44,4 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - None known.
 
 ## Next actions
-1. Commit and push this branch, then open a PR against `main` without merging.
+1. Await review of PR #14; do not merge automatically.
