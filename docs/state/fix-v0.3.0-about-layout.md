@@ -13,6 +13,7 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - The initial common-height measurement runs while the Winit window is hidden. QA-03R shows the earlier first-show correction did not alter the observed 738 px client. Code inspection confirms `show_settings_centered` does schedule `show_settings_measured`, so bypassing that wrapper is not the cause. Which first-show guard, screen lookup, work-area clamp, or native resize outcome explains the result remains unconfirmed pending expanded diagnostics.
 - Changed first-show Windows behavior to remeasure and apply the common tab height once after native layout settles (150 ms), only if no retained size exists and the user has not resized. The existing work-area and DPI geometry clamp still governs the applied size. Retained/manual sizing is preserved.
 - Added `native_fit_resolves_748_required_height_from_738_client`, covering the reported 10 px initial extent and the expected 720×748 fit in a sufficiently large work area. Expanded debug-only `--qa-geometry` output to show first-show guard inputs, screen lookup failure, requested/clamped dimensions, whether `set_size` ran, immediate result, before/after fit, and later settled client geometry.
+- Latest correction is diagnostic/regression coverage, not a claimed native fix: it distinguishes a failed gate, screen lookup, work-area clamp, or native resize outcome so the cause of QA-03R can be determined from native output before changing sizing behavior.
 - Native post-fix GUI measurements have not been collected. The code-path correction and headless late-reflow regression are verified; do not describe this as native visual PASS or assert post-fix native scroll extent without manual measurement.
 - Final geometry investigation on exact prior PR head `0a4b5f4a54551c4a858aff09019e6c0cb4758da2`: headless Slint measurements show a 720×738 logical window/client, 738 px Flickable viewport and About preferred height, zero scroll range, and `content-y` 0 before/after attempted bottom scrolling. This does not reproduce the user's native Windows overflow, so the native root cause remains unestablished and no layout/padding adjustment is justified.
 - Added debug-only `--qa-geometry` diagnostics for isolated previews. While Settings is visible, it samples native Win32 outer/client rectangles, scale, Slint logical window dimensions, Flickable viewport/content/extent/content-y, active/About preferred heights, and button/footer positions every 500 ms. The trace can correlate measurements with a manual scroll attempt.
@@ -33,8 +34,8 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - Base before compactness revision: `bf00245` (`Record About layout fix PR state`).
 - Compactness revision commit: `15d3d49` (`Keep About update status compact and readable`), pushed to PR #14.
 - Current PR head at start of geometry investigation: `0a4b5f4a54551c4a858aff09019e6c0cb4758da2` (`Fit About statuses without scroll`), clean and synced before this correction.
-- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. Geometry correction commit `f531b50b3fc989a2626763978e59fc2217677665` is pushed; exact-head Windows CI passed (run `46069491077`).
-- Isolated MSVC debug build from that exact source commit, not launched: `%TEMP%\AUM-PR14-QA-f531b50-build\x86_64-pc-windows-msvc\debug\agent-usage-monitor.exe`, SHA256 `CC94281B0AC06B8373E412633D7677DC491EA30D1B76DEE8DBE37B9A5829A221`.
+- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged. Native-fit diagnostics/regression commit `4d178004f56e02f4d297c2998270faea9bcf7b65` is pushed; exact-head Windows CI passed (run `46072705655`).
+- Isolated MSVC debug QA build from that head, not launched: `%TEMP%\AUM-PR14-QA-4d17800\agent-usage-monitor.exe`, SHA256 `FA7133ED904A28CBACF62CC0E28E4A93D275A64ECC2FC88C5959B2C41AD062BE`.
 - No installed AUM instance or GUI executable has been launched or manipulated.
 
 ## Changed files
@@ -47,6 +48,7 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 ## Checks
 <!-- commands run with results; not-run or stale checks named as such -->
 - `cargo fmt --all --check` — passed.
+- Latest correction checks: `cargo fmt --manifest-path rust/Cargo.toml --all --check`, `git diff --check`, focused 748/738 geometry test, full debug and release workspace tests (45 Core, 3 bridge, 1 bridge-process, 158 UI; doc tests passed), Clippy with `-D warnings`, Windows MSVC debug check, and Windows MSVC release check — all passed. Release test build continues to emit the existing debug-only QA static dead-code warning.
 - `cargo test --locked --workspace` — passed on the current correction (45 Core, 3 bridge, 1 bridge process integration, 155 UI; 204 tests total; doc tests passed).
 - `cargo test --locked --package agent-usage-monitor-ui --bin agent-usage-monitor isolated_qa_blocks_update_network_actions -- --nocapture` — passed.
 - `cargo test --locked --release --workspace` — passed on the current correction (45 Core, 3 bridge, 1 bridge process integration, 155 UI; 204 tests total; doc tests passed). Release test build reports one existing dead-code warning for the debug-only `QA_ABOUT_PREVIEW` static.
@@ -69,7 +71,7 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 - Isolated Windows MSVC debug executable from that PR head — built offline, not launched: `%TEMP%\AUM-PR14-QA-c046723-build\x86_64-pc-windows-msvc\debug\agent-usage-monitor.exe`, SHA256 `CC9E43F67C9BC3ABD25355095AF6098821591556C8D1C8102DF393875967EE47`.
 - PR #14 remains open and unmerged. Native GUI root cause and visual verification are pending manual measurements from the affected Windows display.
 - Manual GUI verification was not performed; the installed RC and GUI were left untouched. Headless Slint tests are not visual confirmation.
-- Push the diagnostic/regression correction, wait for CI on its exact head, build a fresh isolated MSVC debug executable without launching it, then have user provide the new `QA_GEOMETRY` output. Confirm first-show eligibility, screen lookup, work-area clamp, `set_size` request/result, settled viewport/content/extent, and scroll behavior before claiming native layout fixed. Keep PR #14 open.
+- User to run the isolated QA build and provide `QA_GEOMETRY` output from the affected display. Confirm first-show eligibility, screen lookup, work-area clamp, `set_size` request/result, settled viewport/content/extent, and scroll behavior before deciding the final native sizing fix. Keep PR #14 open; do not claim native PASS or merge before GUI PASS.
 
 ## Decisions (and why)
 - Idle reuses the existing installed-version chip. Result text goes below the update buttons and takes its natural wrapped height, because a fixed slot clips long translations while moving the row below the buttons preserves their position.
