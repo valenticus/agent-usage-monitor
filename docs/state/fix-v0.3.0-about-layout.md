@@ -19,7 +19,9 @@ _Handoff file for this branch, in the Agent Kit `handoff` skill format. Only thi
 <!-- HEAD, branch, `git status --short`, `git diff --stat` as captured -->
 - Branch: `fix/v0.3.0-about-layout`, created from synchronized `main` (`8648085`).
 - Base before compactness revision: `bf00245` (`Record About layout fix PR state`).
-- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged; this compactness revision is being prepared.
+- Compactness revision commit: `15d3d49` (`Keep About update status compact and readable`), pushed to PR #14.
+- PR: https://github.com/valenticus/agent-usage-monitor/pull/14 — open against `main`, not merged.
+- HEAD before this state-note update: `15d3d49`; working tree was clean after push.
 
 ## Changed files
 - `rust/agent-monitor-ui/ui/main.slint`
