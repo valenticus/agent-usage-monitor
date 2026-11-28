@@ -343,12 +343,25 @@ end;
 procedure CurPageChanged(CurPageID: Integer);
 begin
   CurrentWizardPageID := CurPageID;
+
+  { Inno calls this again after PrepareToInstall returns an error. On that
+    interactive failure, replace its disabled Next control with Retry. Silent
+    runs have no wizard recovery UI and must never show the custom button. }
+  if CurPageID = wpPreparing then begin
+    if PrepareFailurePending and not WizardSilent then begin
+      WizardForm.NextButton.Visible := False;
+      RetryButton.Enabled := True;
+      RetryButton.Visible := True;
+    end;
+    exit;
+  end;
+
   RetryButton.Visible := False;
   RetryButton.Enabled := False;
 
   { Inno owns the Preparing/Finished controls. In particular, a restart-
     required preflight must retain its native Finish/restart action. }
-  if CurPageID in [wpPreparing, wpFinished] then
+  if CurPageID = wpFinished then
     exit;
 
   WizardForm.BackButton.Visible := False;
@@ -805,10 +818,6 @@ end;
 function FailPreparation(const ErrorText: String): String;
 begin
   PrepareFailurePending := True;
-  { This common callback runs whether automatic advancement or a user clicked
-    the visible manual Install fallback. Keep recovery available in both. }
-  RetryButton.Enabled := True;
-  RetryButton.Visible := True;
   Result := ErrorText;
 end;
 

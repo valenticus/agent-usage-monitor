@@ -682,8 +682,8 @@ mod tests {
             "function InitializeUninstall",
         );
         assert!(preparation.contains("PrepareFailurePending := True"));
-        assert!(preparation.contains("RetryButton.Enabled := True"));
-        assert!(preparation.contains("RetryButton.Visible := True"));
+        assert!(!preparation.contains("RetryButton.Enabled := True"));
+        assert!(!preparation.contains("RetryButton.Visible := True"));
         assert!(preparation.contains("FailPreparation(CustomMessage('InstallPathMismatch'))"));
         assert!(preparation.contains("FailPreparation(CustomMessage('InstallPathOccupied'))"));
         assert!(preparation.contains("FailPreparation(ErrorText)"));
@@ -767,7 +767,28 @@ mod tests {
             "procedure CurPageChanged(CurPageID: Integer)",
             "procedure DeinitializeSetup",
         );
-        assert!(page_change.contains("if CurPageID in [wpPreparing, wpFinished] then\n    exit"));
+        let preparing_start = page_change
+            .find("if CurPageID = wpPreparing then begin")
+            .expect("Preparing page handled explicitly");
+        let retry_reset = page_change
+            .find("RetryButton.Visible := False;")
+            .expect("generic Retry reset exists");
+        assert!(preparing_start < retry_reset);
+        let preparing = &page_change[preparing_start..retry_reset];
+        assert!(preparing.contains("PrepareFailurePending and not WizardSilent"));
+        assert!(preparing.contains("WizardForm.NextButton.Visible := False"));
+        assert!(preparing.contains("RetryButton.Enabled := True"));
+        assert!(preparing.contains("RetryButton.Visible := True"));
+        assert!(!preparing.contains("CancelButton.Visible := False"));
+        assert!(page_change.contains("if CurPageID = wpFinished then\n    exit"));
+
+        let failure = source_between(
+            INSTALLER_SCRIPT,
+            "function FailPreparation",
+            "function PrepareToInstall",
+        );
+        assert!(failure.contains("PrepareFailurePending := True"));
+        assert!(!failure.contains("RetryButton.Visible := True"));
         let completion = source_between(
             INSTALLER_SCRIPT,
             "procedure CurStepChanged",
