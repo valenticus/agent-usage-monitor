@@ -8,6 +8,7 @@ mod autostart;
 mod claude_refresher;
 mod claude_statusline;
 mod flyout;
+mod installer_migration;
 mod localization;
 mod notifications;
 mod packaged;
@@ -524,11 +525,23 @@ fn main() -> Result<(), slint::PlatformError> {
             directory,
         ));
     }
-    let config: SharedSettings = Arc::new(Mutex::new(
-        settings::load(&settings_path).unwrap_or_default(),
-    ));
-    if !qa_isolated {
-        reconcile_autostart(&config, &settings_path, claude_bridge_enabled);
+    let loaded_settings_result = settings::load(&settings_path);
+    let migration_can_persist = loaded_settings_result.is_ok() || !settings_path.exists();
+    let mut loaded_settings = loaded_settings_result.unwrap_or_default();
+    let mut autostart_reconciliation_allowed = migration_can_persist;
+    if !qa_isolated && migration_can_persist && packaged::is_confirmed_unpackaged() {
+        match installer_migration::consume_pending(&mut loaded_settings, &settings_path) {
+            Ok(true) => eprintln!("INSTALLER_MIGRATION: completed legacy bridge opt-in migration"),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("INSTALLER_MIGRATION: migration remains pending: {error}");
+                autostart_reconciliation_allowed = false;
+            }
+        }
+    }
+    let config: SharedSettings = Arc::new(Mutex::new(loaded_settings));
+    if !qa_isolated && autostart_reconciliation_allowed {
+        reconcile_autostart(&config, &settings_path);
     }
     // Debug-only visual review aid: override the theme in memory (never saved).
     #[cfg(debug_assertions)]
@@ -1753,8 +1766,8 @@ fn save_setting_change(context: &CallbackContext, change: impl FnOnce(&mut AppSe
 
 /// The one rule for the Claude status-line listener: it runs only while the
 /// Claude provider is enabled **and** the user explicitly opted in. The opt-in
-/// is `--enable-claude-bridge` for the EXE builds and, in the MSIX build
-/// (which cannot pass launch arguments on Windows 10 1809), the off-by-default
+/// is an explicit EXE Settings choice or the current-process CLI override,
+/// and in the MSIX build the independent
 /// `claude_bridge_listener_enabled` setting. Disabling Claude or the opt-in
 /// stops the listener; neither ever turns the other on.
 fn claude_bridge_wanted(bridge_argument: bool, settings: &AppSettings) -> bool {
@@ -1762,8 +1775,23 @@ fn claude_bridge_wanted(bridge_argument: bool, settings: &AppSettings) -> bool {
 }
 
 fn claude_bridge_wanted_for(packaged: bool, bridge_argument: bool, settings: &AppSettings) -> bool {
-    let opted_in = bridge_argument || (packaged && settings.claude_bridge_listener_enabled);
+    let opted_in = if packaged {
+        settings.claude_bridge_listener_enabled
+    } else {
+        bridge_argument || settings.exe_claude_bridge_enabled.unwrap_or(false)
+    };
     settings.claude_enabled && opted_in
+}
+
+fn exe_bridge_cli_override_active(bridge_argument: bool, settings: &AppSettings) -> bool {
+    bridge_argument && settings.exe_claude_bridge_enabled != Some(true)
+}
+
+fn exe_bridge_toggle_state(bridge_argument: bool, settings: &AppSettings) -> (bool, bool) {
+    (
+        bridge_argument || settings.exe_claude_bridge_enabled.unwrap_or(false),
+        exe_bridge_cli_override_active(bridge_argument, settings),
+    )
 }
 
 /// `--enable-claude-bridge` was passed to this process.
@@ -1772,16 +1800,23 @@ fn claude_bridge_argument() -> bool {
     *ARGUMENT.get_or_init(|| std::env::args().any(|argument| argument == "--enable-claude-bridge"))
 }
 
-/// Store build only: flip the persisted listener opt-in. The pipe worker
-/// follows the published setting; the UI snapshot reflects it immediately.
+/// Flip the distribution-specific persisted listener opt-in. The CLI override
+/// is session-only and is deliberately not persisted by the Settings control.
 fn toggle_claude_bridge_listener(context: &CallbackContext, bridge_argument: bool) {
     let _mutation = settings_mutation_guard();
-    if !packaged::is_packaged() {
+    if !packaged::is_packaged()
+        && exe_bridge_cli_override_active(bridge_argument, &lock_settings(&context.0))
+    {
         return;
     }
     let (config, path, _, _, _, _, snapshot) = context;
     let mut updated = lock_settings(config);
-    updated.claude_bridge_listener_enabled = !updated.claude_bridge_listener_enabled;
+    if packaged::is_packaged() {
+        updated.claude_bridge_listener_enabled = !updated.claude_bridge_listener_enabled;
+    } else {
+        updated.exe_claude_bridge_enabled =
+            Some(!updated.exe_claude_bridge_enabled.unwrap_or(false));
+    }
     if let Err(error) = settings::save(path, &updated) {
         eprintln!("CLAUDE_BRIDGE: listener preference could not be saved: {error}");
         return;
@@ -1994,8 +2029,7 @@ fn toggle_autostart(context: &CallbackContext) {
         }
     };
     let requested = !actual_before;
-    let claude_bridge = std::env::args().any(|argument| argument == "--enable-claude-bridge");
-    if let Err(error) = autostart::set_enabled(requested, &executable, claude_bridge) {
+    if let Err(error) = autostart::set_enabled(requested, &executable) {
         eprintln!("AUTOSTART: registration change failed: {error}");
         show_autostart_unverified(context);
         return;
@@ -2104,7 +2138,7 @@ fn launch_reconcile_writes_registration(state: packaged::PackageState) -> bool {
     state == packaged::PackageState::Unpackaged
 }
 
-fn reconcile_autostart(config: &SharedSettings, path: &Path, claude_bridge: bool) {
+fn reconcile_autostart(config: &SharedSettings, path: &Path) {
     let _mutation = settings_mutation_guard();
     if packaged::is_packaged() {
         // Read later by the StartupTask controller, off the UI thread.
@@ -2126,9 +2160,7 @@ fn reconcile_autostart(config: &SharedSettings, path: &Path, claude_bridge: bool
         }
         return;
     }
-    if let Err(error) =
-        autostart::set_enabled(settings.launch_at_startup, &executable, claude_bridge)
-    {
+    if let Err(error) = autostart::set_enabled(settings.launch_at_startup, &executable) {
         eprintln!("AUTOSTART: startup registration could not be reconciled: {error}");
         if let Ok(actual) = autostart::is_enabled_for(&executable) {
             settings.launch_at_startup = actual;
@@ -2578,7 +2610,13 @@ fn update_settings_window(
     // The QA preview substitutes About-only values. Preserve actual runtime
     // package identity for every Store-specific Settings control elsewhere.
     window.set_store_build(packaged::is_packaged());
-    window.set_claude_bridge_listener_enabled(settings.claude_bridge_listener_enabled);
+    let (bridge_toggle_enabled, cli_override_active) = if packaged::is_packaged() {
+        (settings.claude_bridge_listener_enabled, false)
+    } else {
+        exe_bridge_toggle_state(claude_bridge_argument(), settings)
+    };
+    window.set_claude_bridge_listener_enabled(bridge_toggle_enabled);
+    window.set_claude_bridge_cli_override(cli_override_active);
     window.set_store_import_available(store_import_available());
     // Visible, not silent: without persistent storage changes cannot be saved.
     window.set_storage_warning(
@@ -2774,7 +2812,14 @@ fn update_settings_window(
     window.set_claude_refresh_label(labels.claude_refresh.into());
     window.set_claude_refresh_description(labels.claude_refresh_description.into());
     window.set_claude_bridge_label(labels.claude_bridge.into());
-    window.set_claude_bridge_description(labels.claude_bridge_description.into());
+    window.set_claude_bridge_description(
+        if cli_override_active {
+            labels.claude_bridge_cli_override
+        } else {
+            labels.claude_bridge_description
+        }
+        .into(),
+    );
     if let Ok(mut context) = STATUSLINE_CONTEXT.lock() {
         *context = Some((
             locale,
@@ -3073,9 +3118,10 @@ fn bridge_command() -> Result<String, claude_statusline::CommandError> {
 
 /// (text, error, copy offered) for the statusLine row. `command_supported`
 /// is false when AUM's own path cannot be put into a shell command safely;
-/// then nothing is offered for copying. `store_build` picks how live updates
-/// are turned on: the Settings toggle (MSIX) or `--enable-claude-bridge`
-/// (EXE builds, which have no toggle). Another tool's status line is
+/// then nothing is offered for copying. `store_build` picks the runtime's
+/// distribution context; both distributions use an explicit Settings opt-in,
+/// while EXE also retains the current-process `--enable-claude-bridge` flag.
+/// Another tool's status line is
 /// described generically; its program is never named in the UI.
 fn statusline_row(
     state: &claude_statusline::StatusLineState,
@@ -5086,7 +5132,7 @@ mod tests {
 
     #[test]
     fn claude_bridge_listener_needs_claude_and_an_explicit_opt_in() {
-        let settings = |claude_enabled, bridge| AppSettings {
+        let store_settings = |claude_enabled, bridge| AppSettings {
             claude_enabled,
             claude_bridge_listener_enabled: bridge,
             ..Default::default()
@@ -5102,23 +5148,59 @@ mod tests {
             false,
             &AppSettings::default()
         ));
-        // EXE builds: only the command-line opt-in counts; the Store setting is ignored.
+        // EXE builds use their own persisted choice plus the session-only flag.
         assert!(!claude_bridge_wanted_for(
             false,
             false,
-            &settings(true, true)
+            &store_settings(true, true)
         ));
         assert!(claude_bridge_wanted_for(
             false,
             true,
-            &settings(true, false)
+            &store_settings(true, false)
         ));
+        let exe_opted_in = AppSettings {
+            claude_enabled: true,
+            exe_claude_bridge_enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(claude_bridge_wanted_for(false, false, &exe_opted_in));
+        let exe_opted_out = AppSettings {
+            claude_enabled: true,
+            exe_claude_bridge_enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(!claude_bridge_wanted_for(false, false, &exe_opted_out));
+        // The session-only CLI flag overrides saved OFF without changing it.
+        assert!(claude_bridge_wanted_for(false, true, &exe_opted_out));
+        assert_eq!(exe_opted_out.exe_claude_bridge_enabled, Some(false));
+        assert!(exe_bridge_cli_override_active(true, &exe_opted_out));
+        assert_eq!(exe_bridge_toggle_state(true, &exe_opted_out), (true, true));
+        assert_eq!(
+            exe_bridge_toggle_state(false, &exe_opted_out),
+            (false, false)
+        );
+        let unset_choice = AppSettings {
+            claude_enabled: true,
+            ..Default::default()
+        };
+        assert!(claude_bridge_wanted_for(false, true, &unset_choice));
+        assert!(exe_bridge_cli_override_active(true, &unset_choice));
         // MSIX build: the persisted setting is the opt-in.
-        assert!(claude_bridge_wanted_for(true, false, &settings(true, true)));
+        assert!(claude_bridge_wanted_for(
+            true,
+            false,
+            &store_settings(true, true)
+        ));
+        assert!(!claude_bridge_wanted_for(
+            true,
+            true,
+            &store_settings(true, false)
+        ));
         assert!(!claude_bridge_wanted_for(
             true,
             false,
-            &settings(true, false)
+            &store_settings(true, false)
         ));
         // Claude off stops the listener in every build, whatever the opt-in.
         for packaged in [false, true] {
@@ -5126,12 +5208,12 @@ mod tests {
                 assert!(!claude_bridge_wanted_for(
                     packaged,
                     argument,
-                    &settings(false, true)
+                    &store_settings(false, true)
                 ));
             }
         }
         // Tests never run packaged, so the runtime helper follows the EXE rules.
-        assert!(!claude_bridge_wanted(false, &settings(true, true)));
+        assert!(!claude_bridge_wanted(false, &store_settings(true, true)));
     }
 
     #[test]

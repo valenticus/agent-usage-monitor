@@ -37,7 +37,7 @@ Settings → General → Claude shows a **Claude Code status line** row in every
   - The text is prepared before the clipboard is opened, so a failure to open it (another program holding it) leaves the previous content in place.
   - The button shows the actual result: "Copied" or "Copy failed".
 - When another command owns the status line, AUM shows one generic message ("Already used by another command…; Background refresh still works") without naming the program. It never replaces, wraps or chains that command.
-- Settings names the two Claude sources plainly: **Background refresh** (the Claude CLI every 5 minutes, no open session needed) and, in the Store build, **Live updates from Claude Code** (the status-line listener). Turning the toggle on does not configure Claude Code; the status-line row says when manual setup is needed.
+- Settings names the two Claude sources plainly: **Background refresh** (the Claude CLI every 5 minutes, no open session needed) and **Live updates from Claude Code** (the status-line listener). The Settings toggle is explicit and off by default in both EXE and Store builds. Turning it on does not configure Claude Code; the status-line row says when manual setup is needed.
 - Project-level settings (`.claude/settings.json` in a repository) can override the user setting and are not checked.
 
 ## Implemented opt-in bridge
@@ -51,18 +51,21 @@ The desktop listener validates current-user access, payload size, percentage
 ranges and timestamps before updating only Claude's provider state. The UI
 marks the last snapshot stale after 15 minutes without new status-line input.
 
-Enable the listener explicitly with `--enable-claude-bridge` and build the
+Enable the listener explicitly in AUM Settings, or pass `--enable-claude-bridge` for a
+current-process-only EXE override, and build the
 `agent-usage-monitor-claude-bridge` executable. Configure it as Claude Code's documented
 `statusLine` command only if no other command is in use or an explicitly approved,
 command-specific wrapper is ready. The executable path and app startup options are in
 [the Rust UI README](../rust/agent-monitor-ui/README.md). Agent Usage Monitor never
 writes Claude settings.
 
-**Microsoft Store (MSIX) build:** packaged apps cannot receive launch arguments on
-Windows 10 1809, so the listener is enabled instead in Settings → General → Claude →
-**Live updates from Claude Code** (named "Status-line bridge" before v0.2.0). That toggle exists only in the Store build and is off by default.
-In every build the listener runs only while the Claude provider is on and the opt-in
-(the launch argument or the Store toggle) is set; turning either off stops it at once.
+**Microsoft Store (MSIX) build:** packaged apps cannot normally receive launch arguments on
+Windows 10 1809, so its independent saved preference is Settings → General → Claude →
+**Live updates from Claude Code** (`claude_bridge_listener_enabled`, off by default).
+EXE builds use their separate saved Settings choice; `--enable-claude-bridge` overrides
+saved OFF only for that process and is never written to settings or HKCU `Run`.
+In every build the listener runs only while the Claude provider is on and an applicable
+opt-in is set; turning either off stops it at once.
 The bridge is reachable through the package's App Execution Alias, so the
 `statusLine` command is just `agent-usage-monitor-claude-bridge.exe`. Executables
 inside `WindowsApps` cannot be started by path. The same rules apply: AUM never writes
