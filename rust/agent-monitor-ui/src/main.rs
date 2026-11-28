@@ -53,6 +53,8 @@ static NEXT_REFRESH_ID: AtomicU64 = AtomicU64::new(1);
 static QA_ISOLATED: AtomicBool = AtomicBool::new(false);
 #[cfg(any(debug_assertions, test))]
 static QA_ABOUT_PREVIEW: std::sync::Mutex<Option<AboutPreview>> = std::sync::Mutex::new(None);
+#[cfg(debug_assertions)]
+static QA_GEOMETRY: AtomicBool = AtomicBool::new(false);
 static SETTINGS_OPEN_PENDING: AtomicBool = AtomicBool::new(false);
 static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus::Idle);
 static SETTINGS_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -77,11 +79,14 @@ struct AboutPreview {
 #[derive(Debug, Clone, Copy)]
 enum AboutPreviewStatus {
     Idle,
+    Checking,
     Available,
+    Current,
     Long,
     Offline,
     Http,
     Invalid,
+    Timeout,
 }
 
 #[cfg(any(debug_assertions, test))]
@@ -100,11 +105,15 @@ impl AboutPreview {
             .iter()
             .find_map(|arg| arg.strip_prefix("--qa-about-status="))
         {
+            Some("idle") => AboutPreviewStatus::Idle,
             Some("available") => AboutPreviewStatus::Available,
+            Some("checking") => AboutPreviewStatus::Checking,
+            Some("current") => AboutPreviewStatus::Current,
             Some("long") => AboutPreviewStatus::Long,
             Some("offline") => AboutPreviewStatus::Offline,
             Some("http") => AboutPreviewStatus::Http,
             Some("invalid") => AboutPreviewStatus::Invalid,
+            Some("timeout") => AboutPreviewStatus::Timeout,
             None => AboutPreviewStatus::Idle,
             _ => return None,
         };
@@ -130,6 +139,10 @@ fn about_display_distribution(
     }
 }
 
+fn update_checks_allowed(qa_isolated: bool, distribution: Distribution) -> bool {
+    !qa_isolated && distribution.can_offer_github_update()
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PhysicalWorkArea {
     left: i32,
@@ -148,11 +161,90 @@ struct SettingsScreenSignature {
 #[derive(Debug, Clone, Copy, Default)]
 struct SettingsLayoutSnapshot {
     screen: Option<SettingsScreenSignature>,
+    size_ownership: SettingsSizeOwnership,
 }
 
 impl SettingsLayoutSnapshot {
     const fn new() -> Self {
-        Self { screen: None }
+        Self {
+            screen: None,
+            size_ownership: SettingsSizeOwnership::new(),
+        }
+    }
+}
+
+/// Tracks whether the Settings size was chosen by the user. Only a native
+/// modal size loop that contains `WM_SIZING` counts: Windows sends
+/// `WM_SIZING` solely while the user drags a border or sizes the window from
+/// the keyboard. App-requested `SetWindowPos` resizes (including Winit's
+/// asynchronous `set_size`), DPI changes, maximize and snap never send it, so
+/// none of them turn an automatic size into a retained one.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct SettingsSizeOwnership {
+    in_size_move: bool,
+    user_sizing_seen: bool,
+    user_size: Option<(f32, f32)>,
+}
+
+impl SettingsSizeOwnership {
+    const fn new() -> Self {
+        Self {
+            in_size_move: false,
+            user_sizing_seen: false,
+            user_size: None,
+        }
+    }
+
+    /// `WM_ENTERSIZEMOVE`: a native move or size loop starts.
+    fn enter_size_move(&mut self) {
+        self.in_size_move = true;
+        self.user_sizing_seen = false;
+    }
+
+    /// `WM_SIZING`: the user is changing the size inside that loop.
+    fn user_sizing(&mut self) {
+        if self.in_size_move {
+            self.user_sizing_seen = true;
+        }
+    }
+
+    /// `WM_EXITSIZEMOVE` with the final logical client size. Returns the
+    /// size recorded as user-selected, if this loop resized the window.
+    fn exit_size_move(&mut self, client_logical: (f32, f32)) -> Option<(f32, f32)> {
+        let user_resized = self.in_size_move && self.user_sizing_seen;
+        self.in_size_move = false;
+        self.user_sizing_seen = false;
+        let valid = client_logical.0.is_finite()
+            && client_logical.1.is_finite()
+            && client_logical.0 > 0.0
+            && client_logical.1 > 0.0;
+        if user_resized && valid {
+            self.user_size = Some(client_logical);
+            return self.user_size;
+        }
+        None
+    }
+
+    fn user_size(&self) -> Option<(f32, f32)> {
+        self.user_size
+    }
+}
+
+/// Which monitor bounds a Settings geometry pass. A hidden window is opened
+/// on the monitor under the cursor; a visible window is fitted on the monitor
+/// that contains it, so a post-show remeasure cannot follow the mouse to
+/// another display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsMonitor {
+    Cursor,
+    Window,
+}
+
+fn settings_fit_monitor(window_visible: bool) -> SettingsMonitor {
+    if window_visible {
+        SettingsMonitor::Window
+    } else {
+        SettingsMonitor::Cursor
     }
 }
 
@@ -352,6 +444,11 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(not(debug_assertions))]
     let qa_isolated = false;
     QA_ISOLATED.store(qa_isolated, Ordering::Release);
+    #[cfg(debug_assertions)]
+    QA_GEOMETRY.store(
+        qa_isolated && args.iter().any(|arg| arg == "--qa-geometry"),
+        Ordering::Release,
+    );
 
     #[cfg(windows)]
     let _instance_guard = match SingleInstance::acquire(qa_isolated) {
@@ -590,6 +687,8 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_window.window().on_close_requested({
         let panel = settings_window.as_weak();
         move || {
+            // A user-selected size was already recorded when its native size
+            // loop ended; an automatic size is deliberately not retained.
             if let Some(panel) = panel.upgrade() {
                 let _ = panel.hide();
             }
@@ -860,8 +959,16 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
-    settings_window.on_open_repository(open_repository);
-    settings_window.on_open_issues(open_issues);
+    settings_window.on_open_repository(move || {
+        if !qa_isolated {
+            open_repository();
+        }
+    });
+    settings_window.on_open_issues(move || {
+        if !qa_isolated {
+            open_issues();
+        }
+    });
     settings_window.set_update_distribution_label(
         update_checker::distribution_label(update_display_distribution, lock_locale(&locale))
             .into(),
@@ -884,6 +991,9 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_window.on_open_update_release({
         let state = update_state.clone();
         move || {
+            if qa_isolated {
+                return;
+            }
             if let Some(url) = state
                 .lock()
                 .ok()
@@ -920,7 +1030,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let manual_settings_path = settings_path.clone();
         let manual_settings_sender = settings_sender.clone();
         move || {
-            if distribution.can_offer_github_update() {
+            if update_checks_allowed(qa_isolated, distribution) {
                 request_update_check(
                     panel.clone(),
                     state.clone(),
@@ -937,7 +1047,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     let update_timer = slint::Timer::default();
-    if update_distribution.can_offer_github_update() && !demo_mode {
+    if update_checks_allowed(qa_isolated, update_distribution) && !demo_mode {
         let panel = settings_window.as_weak();
         let state = update_state.clone();
         let in_flight = update_checking.clone();
@@ -1415,6 +1525,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(panel) = panel.upgrade() {
                     if panel.window().is_visible() {
                         refresh_settings_layout_if_screen_changed(&panel);
+                        #[cfg(all(windows, debug_assertions))]
+                        if QA_GEOMETRY.load(Ordering::Acquire) {
+                            log_settings_native_geometry(&panel);
+                        }
                     }
                 }
             },
@@ -1429,6 +1543,100 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = worker.join();
     }
     result
+}
+
+/// Debug-only QA trace that separates the native HWND rectangles from Slint's
+/// logical client/Flickable measurements. It runs only for an explicitly
+/// isolated preview process.
+#[cfg(all(windows, debug_assertions))]
+fn log_settings_native_geometry(window: &SettingsWindow) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+
+    let handle = window.window().window_handle();
+    let Ok(handle) = handle.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as _;
+    let mut client = RECT::default();
+    let mut outer = RECT::default();
+    let (client_ok, outer_ok) = unsafe {
+        (
+            GetClientRect(hwnd, &mut client) != 0,
+            GetWindowRect(hwnd, &mut outer) != 0,
+        )
+    };
+    let scale = window.window().scale_factor().max(0.5);
+    let logical_window = window.window().size().to_logical(scale);
+    eprintln!(
+        "QA_GEOMETRY tab={} scale={scale:.4} slint_logical={:.2}x{:.2} native_client={}x{} client_delta_logical_h={:.2} native_outer={}x{} flickable_viewport={:.2} content={:.2} scroll_extent={:.2} content_y={:.2} required={} page_required={:.2} general={:.2} notifications={:.2} about_preferred={:.2} about_window_required={:.2} about_paddings={:.1}/{:.1} button_y={:.2} status_y={:.2} status_text_h={:.2} status_expansion={:.2} reclaimed={:.2} hero_h={:.2} features_y_h={:.2}/{:.2} feature_rows={:.2}/{:.2}/{:.2} connections_title_h={:.2} connections_y_h={:.2}/{:.2} connection_rows={:.2}/{:.2} distribution_h={:.2} links_h={:.2} legal_y_h={:.2}/{:.2} copyright_h={:.2} footer_bottom={:.2}",
+        window.get_selected_tab(),
+        logical_window.width,
+        logical_window.height,
+        if client_ok {
+            client.right - client.left
+        } else {
+            -1
+        },
+        if client_ok {
+            client.bottom - client.top
+        } else {
+            -1
+        },
+        if client_ok {
+            (client.bottom - client.top) as f32 / scale - logical_window.height
+        } else {
+            f32::NAN
+        },
+        if outer_ok {
+            outer.right - outer.left
+        } else {
+            -1
+        },
+        if outer_ok {
+            outer.bottom - outer.top
+        } else {
+            -1
+        },
+        window.get_settings_scroll_viewport_height(),
+        window.get_settings_scroll_content_height(),
+        window.get_settings_scroll_max_extent(),
+        window.get_settings_scroll_y(),
+        window.get_required_settings_height(),
+        window.get_active_page_required_height(),
+        window.get_general_page_required_height(),
+        window.get_notifications_page_required_height(),
+        window.get_about_page_required_height(),
+        window.get_about_page_window_required_height(),
+        window.get_settings_about_top_padding(),
+        window.get_settings_about_bottom_padding(),
+        window.get_settings_about_update_actions_y(),
+        window.get_settings_about_status_y(),
+        window.get_settings_about_status_text_height(),
+        window.get_settings_about_status_layout_expansion(),
+        window.get_settings_about_status_space_reclaimed(),
+        window.get_settings_about_hero_height(),
+        window.get_settings_about_features_y(),
+        window.get_settings_about_features_height(),
+        window.get_settings_about_feature_tray_height(),
+        window.get_settings_about_feature_local_height(),
+        window.get_settings_about_feature_agents_height(),
+        window.get_settings_about_connections_title_height(),
+        window.get_settings_about_connections_y(),
+        window.get_settings_about_connections_height(),
+        window.get_settings_about_codex_row_height(),
+        window.get_settings_about_claude_row_height(),
+        window.get_settings_about_distribution_height(),
+        window.get_settings_about_links_height(),
+        window.get_settings_about_legal_note_y(),
+        window.get_settings_about_legal_note_height(),
+        window.get_settings_about_copyright_height(),
+        window.get_settings_about_footer_bottom(),
+    );
 }
 
 /// Threshold legend in the same left-to-right order as the scale:
@@ -2655,30 +2863,42 @@ fn apply_about_preview_status(
     preview_status: AboutPreviewStatus,
 ) {
     let labels = locale.settings();
-    let (status, available, release_visible) = match preview_status {
-        AboutPreviewStatus::Idle => (String::new(), false, false),
+    let (status, available, release_visible, checking) = match preview_status {
+        AboutPreviewStatus::Idle => (String::new(), false, false, false),
+        AboutPreviewStatus::Checking => (labels.update_checking.into(), false, false, true),
         AboutPreviewStatus::Available => (
-            format!("{}: 0.3.0 → 0.3.1", labels.update_available),
+            format!(
+                "{}: v{} → v{}",
+                labels.update_available,
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION")
+            ),
             true,
             true,
+            false,
         ),
         AboutPreviewStatus::Long => (
             format!(
-                "{}: 0.3.0 → 0.3.1 · {}",
+                "{}: v{} → v{} · {}",
                 labels.update_available,
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION"),
                 [labels.update_available; 5].join(" · ")
             ),
             true,
             true,
+            false,
         ),
-        AboutPreviewStatus::Offline => (labels.update_offline.into(), false, false),
-        AboutPreviewStatus::Http => (format!("{} (503)", labels.update_http), false, false),
-        AboutPreviewStatus::Invalid => (labels.update_invalid.into(), false, false),
+        AboutPreviewStatus::Current => (labels.update_current.into(), false, false, false),
+        AboutPreviewStatus::Offline => (labels.update_offline.into(), false, false, false),
+        AboutPreviewStatus::Http => (format!("{} (503)", labels.update_http), false, false, false),
+        AboutPreviewStatus::Invalid => (labels.update_invalid.into(), false, false, false),
+        AboutPreviewStatus::Timeout => (labels.update_timeout.into(), false, false, false),
     };
     window.set_update_status(status.into());
     window.set_update_available(available);
     window.set_update_release_visible(release_visible);
-    window.set_update_checking(false);
+    window.set_update_checking(checking);
 }
 
 fn request_update_check(
@@ -2689,7 +2909,9 @@ fn request_update_check(
     locale: SharedLocale,
     persistence: Option<(SharedSettings, PathBuf, watch::Sender<AppSettings>)>,
 ) {
-    if !distribution.can_offer_github_update() || in_flight.swap(true, Ordering::AcqRel) {
+    if !update_checks_allowed(QA_ISOLATED.load(Ordering::Acquire), distribution)
+        || in_flight.swap(true, Ordering::AcqRel)
+    {
         return;
     }
     if let Ok(mut state) = state.lock() {
@@ -2988,8 +3210,21 @@ fn show_settings_centered(window: &SettingsWindow) {
 }
 
 fn show_settings_measured(window: &SettingsWindow) {
-    recalculate_settings_layout(window, true, true);
+    #[cfg(windows)]
+    let pre_fit_logical_size = window
+        .window()
+        .size()
+        .to_logical(window.window().scale_factor().max(0.5));
+    let app_requested_size = recalculate_settings_layout(window, true, true);
+    #[cfg(not(windows))]
+    let _ = app_requested_size;
+    #[cfg(windows)]
+    let opened_with_automatic_size = retained_settings_window_size().is_none();
     let _ = window.show();
+    #[cfg(windows)]
+    if !install_settings_size_tracker(window.window()) {
+        retry_settings_size_tracker(window.as_weak(), 20);
+    }
     activate_window(window.window());
     let mode = match window.get_theme_kind() {
         1 => ThemeMode::BluishDark,
@@ -2999,18 +3234,199 @@ fn show_settings_measured(window: &SettingsWindow) {
     if !theme::apply_title_bar(window.window(), mode) {
         retry_title_bar(window.as_weak(), mode, 20);
     }
-    // The window can receive its final per-monitor DPI after it becomes
-    // visible. Recheck once, without resetting a size that still fits.
+    // Native text metrics can settle only after the window is shown. On every
+    // open with an automatic size (no user-selected size retained), remeasure
+    // once and apply the common page height if the user has not resized the
+    // window meanwhile. A user-selected size remains authoritative.
+    //
+    // On Windows, Winit applies `set_size` asynchronously: `Window::size()`
+    // keeps the old value until `WindowEvent::Resized` arrives. A size read
+    // right after the first fit is therefore stale, and comparing against it
+    // misclassifies the app's own resize as a manual one. Compare against the
+    // sizes the app itself owns instead: the size it requested and the pre-fit
+    // size (in case the native resize has not landed yet).
     #[cfg(windows)]
     let weak = window.as_weak();
     #[cfg(windows)]
     slint::Timer::single_shot(Duration::from_millis(150), move || {
-        if let Some(window) = weak.upgrade()
-            && !settings_user_is_dragging_or_resizing()
-        {
-            recalculate_settings_layout(&window, false, true);
+        if let Some(window) = weak.upgrade() {
+            let scale = window.window().scale_factor().max(0.5);
+            let current = window.window().size().to_logical(scale);
+            let retained_size = retained_settings_window_size();
+            let resizing = settings_user_is_dragging_or_resizing();
+            let visible = window.window().is_visible();
+            let app_owned_sizes = native_first_show_app_owned_sizes(
+                (pre_fit_logical_size.width, pre_fit_logical_size.height),
+                app_requested_size,
+            );
+            let fit_allowed = native_first_show_remeasure_allowed(
+                opened_with_automatic_size && retained_size.is_none() && visible,
+                &app_owned_sizes,
+                (current.width, current.height),
+                resizing,
+            );
+            #[cfg(debug_assertions)]
+            if QA_GEOMETRY.load(Ordering::Acquire) {
+                eprintln!(
+                    "QA_GEOMETRY_POST_SHOW visible={visible} auto_size={} retained={retained_size:?} resizing={resizing} pre_fit={:.2}x{:.2} app_requested={app_requested_size:?} current={:.2}x{:.2} scale={scale:.4} fit_allowed={fit_allowed}",
+                    opened_with_automatic_size,
+                    pre_fit_logical_size.width,
+                    pre_fit_logical_size.height,
+                    current.width,
+                    current.height,
+                );
+            }
+            if fit_allowed {
+                #[cfg(debug_assertions)]
+                if QA_GEOMETRY.load(Ordering::Acquire) {
+                    eprintln!("QA_GEOMETRY_PHASE=post_show_before_native_fit");
+                    log_settings_native_geometry(&window);
+                }
+                let _ = recalculate_settings_layout(&window, true, false);
+                #[cfg(debug_assertions)]
+                if QA_GEOMETRY.load(Ordering::Acquire) {
+                    eprintln!("QA_GEOMETRY_PHASE=post_show_after_native_fit");
+                    log_settings_native_geometry(&window);
+                }
+            } else {
+                let _ = recalculate_settings_layout(&window, false, true);
+            }
         }
     });
+}
+
+/// Sizes the app itself left or set on the Settings window during the first
+/// fit: the pre-fit size (the native resize may still be pending) and the
+/// clamped size the first fit requested.
+#[cfg(any(windows, test))]
+fn native_first_show_app_owned_sizes(
+    pre_fit_size: (f32, f32),
+    app_requested_size: Option<(f32, f32)>,
+) -> Vec<(f32, f32)> {
+    std::iter::once(pre_fit_size)
+        .chain(app_requested_size)
+        .collect()
+}
+
+/// A first-show remeasure may resize the window only while its size is still
+/// one the app owns; any other size means the user resized it.
+#[cfg(any(windows, test))]
+fn native_first_show_remeasure_allowed(
+    opened_with_automatic_size: bool,
+    app_owned_sizes: &[(f32, f32)],
+    current_size: (f32, f32),
+    user_is_resizing: bool,
+) -> bool {
+    opened_with_automatic_size
+        && !user_is_resizing
+        && app_owned_sizes.iter().any(|size| {
+            (current_size.0 - size.0).abs() <= 0.5 && (current_size.1 - size.1).abs() <= 0.5
+        })
+}
+
+#[cfg(windows)]
+const SETTINGS_SIZE_TRACKER_ID: usize = 0x4155_4d53; // "AUMS"
+
+/// Subclasses the Settings HWND to observe the native size loop. Installing
+/// the same proc/id again only updates it, so calling this on every show is
+/// safe. Returns false while the native window does not exist yet.
+#[cfg(windows)]
+fn install_settings_size_tracker(window: &slint::Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+    let handle = window.window_handle();
+    let Ok(handle) = handle.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+    unsafe {
+        SetWindowSubclass(
+            handle.hwnd.get() as _,
+            Some(settings_size_tracker_proc),
+            SETTINGS_SIZE_TRACKER_ID,
+            0,
+        ) != 0
+    }
+}
+
+#[cfg(windows)]
+fn retry_settings_size_tracker(window: slint::Weak<SettingsWindow>, attempts: u8) {
+    if attempts == 0 {
+        return;
+    }
+    slint::Timer::single_shot(Duration::from_millis(50), move || {
+        if let Some(panel) = window.upgrade()
+            && !install_settings_size_tracker(panel.window())
+        {
+            retry_settings_size_tracker(panel.as_weak(), attempts - 1);
+        }
+    });
+}
+
+/// Records only the size-loop facts; it never calls back into Slint or
+/// resizes the window, so it cannot start a resize loop. `try_lock` keeps a
+/// message dispatched while the layout lock is held from deadlocking.
+#[cfg(windows)]
+unsafe extern "system" fn settings_size_tracker_proc(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SIZING,
+    };
+    match message {
+        WM_ENTERSIZEMOVE => {
+            if let Ok(mut layout) = SETTINGS_LAYOUT.try_lock() {
+                layout.size_ownership.enter_size_move();
+            }
+        }
+        WM_SIZING => {
+            if let Ok(mut layout) = SETTINGS_LAYOUT.try_lock() {
+                layout.size_ownership.user_sizing();
+            }
+        }
+        WM_EXITSIZEMOVE => {
+            let mut client = RECT::default();
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            let scale = if dpi > 0 { dpi as f32 / 96.0 } else { 1.0 };
+            let logical = if unsafe { GetClientRect(hwnd, &mut client) } != 0 {
+                (
+                    (client.right - client.left) as f32 / scale,
+                    (client.bottom - client.top) as f32 / scale,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            if let Ok(mut layout) = SETTINGS_LAYOUT.try_lock() {
+                let _recorded = layout.size_ownership.exit_size_move(logical);
+                #[cfg(debug_assertions)]
+                if QA_GEOMETRY.load(Ordering::Acquire) {
+                    eprintln!(
+                        "QA_GEOMETRY_SIZE_LOOP_END client_logical={:.2}x{:.2} user_size_recorded={_recorded:?}",
+                        logical.0, logical.1
+                    );
+                }
+            }
+        }
+        WM_NCDESTROY => unsafe {
+            RemoveWindowSubclass(
+                hwnd,
+                Some(settings_size_tracker_proc),
+                SETTINGS_SIZE_TRACKER_ID,
+            );
+        },
+        _ => {}
+    }
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
 /// Requests ordinary foreground activation for a window opened by an explicit
@@ -3072,12 +3488,13 @@ fn settings_geometry(
 fn prepare_settings_content_measurement(window: &SettingsWindow) {
     let scale = window.window().scale_factor().max(0.5);
     let current = window.window().size().to_logical(scale);
-    let width = window.get_default_width();
-    let height = if current.height > 0.0 {
-        current.height
-    } else {
-        window.get_settings_window_height().max(1.0)
-    };
+    let retained_size = retained_settings_window_size();
+    let (width, retained_height) = settings_open_size(
+        window.get_default_width(),
+        window.get_settings_window_height(),
+        retained_size,
+    );
+    let height = retained_height.max(current.height).max(1.0);
 
     // A newly created hidden Winit window can still have a zero-sized layout.
     // Set its intended width while hidden so wrapped text is measured at the
@@ -3089,15 +3506,37 @@ fn prepare_settings_content_measurement(window: &SettingsWindow) {
     }
 }
 
-fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, center: bool) {
+/// Applies the Settings window geometry and returns the logical size it
+/// requested (after work-area/DPI clamping), if any. That size is the target
+/// even when the native resize lands later.
+fn recalculate_settings_layout(
+    window: &SettingsWindow,
+    use_common_size: bool,
+    center: bool,
+) -> Option<(f32, f32)> {
     if use_common_size {
         prepare_settings_content_measurement(window);
     }
     let required_height = window.get_required_settings_height();
+    let (common_width, common_height) = settings_open_size(
+        window.get_default_width(),
+        required_height,
+        retained_settings_window_size(),
+    );
     #[cfg(windows)]
-    if let Some(screen) = settings_screen_signature(window, use_common_size) {
+    let monitor = settings_fit_monitor(window.window().is_visible());
+    #[cfg(windows)]
+    let screen = settings_screen_signature(window, monitor == SettingsMonitor::Cursor);
+    #[cfg(all(windows, debug_assertions))]
+    if QA_GEOMETRY.load(Ordering::Acquire) && screen.is_none() {
+        eprintln!(
+            "QA_GEOMETRY_NATIVE_FIT_SKIPPED reason=screen_lookup_failed common={use_common_size} monitor={monitor:?} required={required_height:.2}"
+        );
+    }
+    #[cfg(windows)]
+    if let Some(screen) = screen {
         let (requested_width, requested_height) = if use_common_size {
-            (window.get_default_width(), required_height)
+            (common_width, common_height)
         } else {
             let scale = f32::from_bits(screen.scale_bits);
             let current = window.window().size().to_logical(scale);
@@ -3112,10 +3551,36 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
             .window()
             .size()
             .to_logical(f32::from_bits(screen.scale_bits));
-        if (current.width - geometry.width).abs() > 0.5
-            || (current.height - geometry.height).abs() > 0.5
-        {
+        let will_resize = (current.width - geometry.width).abs() > 0.5
+            || (current.height - geometry.height).abs() > 0.5;
+        #[cfg(debug_assertions)]
+        if QA_GEOMETRY.load(Ordering::Acquire) {
+            eprintln!(
+                "QA_GEOMETRY_NATIVE_FIT monitor={monitor:?} required={required_height:.2} requested={requested_width:.2}x{requested_height:.2} work_area={}x{}@{},{} scale={:.4} clamped={:.2}x{:.2} current={:.2}x{:.2} set_size={will_resize}",
+                screen.work_area.right - screen.work_area.left,
+                screen.work_area.bottom - screen.work_area.top,
+                screen.work_area.left,
+                screen.work_area.top,
+                f32::from_bits(screen.scale_bits),
+                geometry.width,
+                geometry.height,
+                current.width,
+                current.height,
+            );
+        }
+        if will_resize {
             window.window().set_size(logical_size);
+        }
+        #[cfg(debug_assertions)]
+        if QA_GEOMETRY.load(Ordering::Acquire) {
+            let after = window
+                .window()
+                .size()
+                .to_logical(f32::from_bits(screen.scale_bits));
+            eprintln!(
+                "QA_GEOMETRY_NATIVE_FIT_RESULT requested={:.2}x{:.2} immediate={:.2}x{:.2}",
+                geometry.width, geometry.height, after.width, after.height,
+            );
         }
         let position = if center {
             slint::PhysicalPosition::new(geometry.x, geometry.y)
@@ -3128,11 +3593,32 @@ fn recalculate_settings_layout(window: &SettingsWindow, use_common_size: bool, c
         if let Ok(mut layout) = SETTINGS_LAYOUT.lock() {
             layout.screen = Some(screen);
         }
+        return Some((geometry.width, geometry.height));
     }
     #[cfg(not(windows))]
     if use_common_size {
-        window.set_settings_window_height(required_height);
+        window.set_settings_window_height(common_height);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(common_width, common_height));
+        return Some((common_width, common_height));
     }
+    None
+}
+
+fn settings_open_size(
+    default_width: f32,
+    required_height: f32,
+    retained_size: Option<(f32, f32)>,
+) -> (f32, f32) {
+    retained_size.unwrap_or((default_width, required_height))
+}
+
+fn retained_settings_window_size() -> Option<(f32, f32)> {
+    SETTINGS_LAYOUT
+        .lock()
+        .ok()
+        .and_then(|layout| layout.size_ownership.user_size())
 }
 
 #[cfg(windows)]
@@ -3229,7 +3715,7 @@ fn refresh_settings_layout_if_screen_changed(window: &SettingsWindow) {
     if let Some(current) = settings_screen_signature(window, false) {
         let previous = SETTINGS_LAYOUT.lock().ok().and_then(|layout| layout.screen);
         if previous != Some(current) {
-            recalculate_settings_layout(window, false, false);
+            let _ = recalculate_settings_layout(window, false, false);
         }
     }
 }
@@ -3405,7 +3891,7 @@ mod tests {
     use super::{
         AboutPreview, AboutPreviewStatus, Distribution, PhysicalWorkArea, SettingsScreenSignature,
         UpdateStatus, about_display_distribution, apply_about_preview_status,
-        configure_about_update_ui, settings_geometry,
+        configure_about_update_ui, settings_geometry, update_checks_allowed,
     };
 
     #[test]
@@ -3428,6 +3914,168 @@ mod tests {
             about_display_distribution(production, false, Some(store_preview)),
             production
         );
+    }
+
+    #[test]
+    fn isolated_qa_blocks_update_network_actions() {
+        assert!(!update_checks_allowed(true, Distribution::GitHubPortable));
+        assert!(update_checks_allowed(false, Distribution::GitHubPortable));
+        assert!(!update_checks_allowed(false, Distribution::MicrosoftStore));
+
+        let preview = AboutPreview::from_args(&[
+            "aum".into(),
+            "--qa-about-distribution=portable".into(),
+            "--qa-about-status=idle".into(),
+        ])
+        .unwrap();
+        assert!(matches!(preview.status, AboutPreviewStatus::Idle));
+    }
+
+    #[test]
+    fn native_first_show_remeasure_respects_retained_and_user_resized_sizes() {
+        let owned = native_first_show_app_owned_sizes((720.0, 738.0), Some((720.0, 738.0)));
+        assert!(native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (720.0, 738.0),
+            false,
+        ));
+        // A retained/manual size from an earlier open stays authoritative.
+        assert!(!native_first_show_remeasure_allowed(
+            false,
+            &owned,
+            (720.0, 738.0),
+            false,
+        ));
+        // A size the app never requested is a manual resize.
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (720.0, 748.0),
+            false,
+        ));
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (880.0, 690.0),
+            false,
+        ));
+        // An active drag/resize always blocks the fit.
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (720.0, 738.0),
+            true,
+        ));
+    }
+
+    /// Regression for the native Windows QA trace on PR #14: the first fit
+    /// requested 720x738 while Winit still reported 720x480 (its `set_size` is
+    /// asynchronous), the resize landed before the post-show check, and the
+    /// app's own resize was misread as a manual one (`fit_allowed=false`).
+    #[test]
+    fn native_first_show_fit_is_allowed_after_asynchronous_app_resize() {
+        let stale_pre_fit = (720.0, 480.0);
+        let owned = native_first_show_app_owned_sizes(stale_pre_fit, Some((720.0, 738.0)));
+
+        // The app's own resize landed before the post-show check.
+        assert!(native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (720.0, 738.0),
+            false,
+        ));
+        // The native resize has not landed yet.
+        assert!(native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            stale_pre_fit,
+            false,
+        ));
+        // The previous check (current vs. the stale snapshot only) rejected it.
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &[stale_pre_fit],
+            (720.0, 738.0),
+            false,
+        ));
+        // A user resize to any other size is still respected.
+        assert!(!native_first_show_remeasure_allowed(
+            true,
+            &owned,
+            (760.0, 700.0),
+            false,
+        ));
+    }
+
+    /// After the fit is allowed, the second pass requests the remeasured
+    /// height (748), not the current client height (738), while the
+    /// work-area/DPI clamp still bounds it on small screens.
+    #[test]
+    fn native_second_fit_requests_remeasured_height_within_work_area() {
+        let roomy = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1032,
+            },
+            ..screen(1.0)
+        };
+        let (width, height) = settings_open_size(720.0, 748.0, None);
+        let fitted = settings_geometry(width, height, roomy);
+        assert_eq!((fitted.width, fitted.height), (720.0, 748.0));
+
+        // Small work area: the clamp wins and the Flickable scrolls the rest.
+        let small = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1366,
+                bottom: 728,
+            },
+            ..screen(1.0)
+        };
+        let clamped = settings_geometry(width, height, small);
+        assert!(clamped.height < 748.0);
+
+        // 150 % DPI: logical request stays 748 when the work area allows it.
+        let hidpi = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1392,
+            },
+            ..screen(1.5)
+        };
+        let scaled = settings_geometry(width, height, hidpi);
+        assert_eq!((scaled.width, scaled.height), (720.0, 748.0));
+    }
+
+    #[test]
+    fn native_fit_resolves_748_required_height_from_738_client() {
+        let screen = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1032,
+            },
+            ..screen(1.0)
+        };
+        let initial: (f32, f32) = (720.0, 738.0);
+        let required_about: f32 = 748.0;
+        let initial_scroll_extent = (required_about - initial.1).max(0.0);
+        assert_eq!(initial_scroll_extent, 10.0);
+        let owned = native_first_show_app_owned_sizes((720.0, 480.0), Some(initial));
+        assert!(native_first_show_remeasure_allowed(
+            true, &owned, initial, false,
+        ));
+
+        let fitted = settings_geometry(720.0, required_about, screen);
+        assert_eq!((fitted.width, fitted.height), (720.0, 748.0));
+        assert_eq!((required_about - fitted.height).max(0.0), 0.0);
     }
 
     #[test]
@@ -3484,6 +4132,46 @@ mod tests {
     }
 
     #[test]
+    fn second_common_measurement_fits_content_that_grows_after_initial_layout() {
+        i_slint_backend_testing::init_no_event_loop();
+        let window = SettingsWindow::new().unwrap();
+        update_settings_window(
+            &window,
+            &AppSettings::default(),
+            Locale::En,
+            false,
+            &adapter::UiSnapshot::unavailable(),
+            now_unix(),
+        );
+        prepare_settings_content_measurement(&window);
+        let first_measurement = window.get_required_settings_height();
+        window.set_settings_window_height(first_measurement);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(720.0, first_measurement));
+
+        // Model text metrics settling after the first measurement: the About
+        // legal note wraps to additional lines only after its final text lands.
+        window.set_legal_note("native text reflow ".repeat(18).into());
+        let settled_required = window.get_required_settings_height();
+        assert!(settled_required > first_measurement);
+        let (width, common_height) = settings_open_size(720.0, settled_required, None);
+        window.set_settings_window_height(common_height);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(width, common_height));
+        let final_size = window.window().size();
+
+        for tab in 0..3 {
+            window.invoke_select_settings_tab(tab);
+            assert_eq!(window.window().size(), final_size);
+            assert_eq!(window.get_settings_scroll_max_extent(), 0.0);
+            window.invoke_scroll_settings_to_bottom();
+            assert_eq!(window.get_settings_scroll_y(), 0.0);
+        }
+    }
+
+    #[test]
     fn about_distribution_and_status_layout_is_shared_and_stable() {
         i_slint_backend_testing::init_no_event_loop();
         let locales = [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru];
@@ -3494,11 +4182,26 @@ mod tests {
         ];
         let statuses = [
             AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
+            AboutPreviewStatus::Current,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Available,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Long,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Offline,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Http,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
             AboutPreviewStatus::Invalid,
+            AboutPreviewStatus::Idle,
+            AboutPreviewStatus::Checking,
+            AboutPreviewStatus::Timeout,
         ];
 
         for locale in locales {
@@ -3513,10 +4216,16 @@ mod tests {
                     &adapter::UiSnapshot::unavailable(),
                     now_unix(),
                 );
+                configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
                 window.set_selected_tab(2);
                 let store = distribution == Distribution::MicrosoftStore;
                 let mut expected_window_size = None;
                 let mut measurements = Vec::new();
+                let mut expected_button_gap = None;
+                let mut expected_required_height = None;
+                let mut expected_button_y: Option<f32> = None;
+                let mut expected_status_y: Option<f32> = None;
+                let mut expected_footer_bottom: Option<f32> = None;
 
                 for status in statuses {
                     configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
@@ -3527,19 +4236,14 @@ mod tests {
                         assert!(!window.get_update_check_available());
                     } else {
                         let gap = window.get_about_update_button_gap();
-                        if matches!(status, AboutPreviewStatus::Idle) {
-                            println!(
-                                "{locale:?}/{distribution:?} idle label-to-button gap: {gap:.2} logical px"
-                            );
-                            assert!(
-                                (gap - 12.0).abs() < 0.1,
-                                "idle label-to-button gap should be 12 logical px for {locale:?}/{distribution:?}, got {gap:.2}"
-                            );
+                        assert!(
+                            (gap - 12.0).abs() < 0.1,
+                            "idle spacing from the distribution label to the update button should remain 12 logical px for {locale:?}/{distribution:?}/{status:?}, got {gap:.2}"
+                        );
+                        if let Some(expected) = expected_button_gap {
+                            assert_eq!(gap, expected, "button position changed across statuses");
                         } else {
-                            assert!(
-                                gap >= 12.0,
-                                "status must preserve at least a 12 logical px gap before the button for {locale:?}/{distribution:?}/{status:?}, got {gap:.2}"
-                            );
+                            expected_button_gap = Some(gap);
                         }
                     }
                     assert_eq!(
@@ -3571,6 +4275,17 @@ mod tests {
                     );
                     if store {
                         assert_eq!(window.get_update_status().as_str(), labels.update_store);
+                    } else if matches!(status, AboutPreviewStatus::Idle) {
+                        assert!(window.get_update_status().is_empty());
+                        assert_eq!(
+                            window.get_app_version().as_str(),
+                            format!("v{}", env!("CARGO_PKG_VERSION"))
+                        );
+                    } else if matches!(status, AboutPreviewStatus::Checking) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_checking);
+                        assert!(window.get_update_checking());
+                    } else if matches!(status, AboutPreviewStatus::Current) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_current);
                     } else if matches!(status, AboutPreviewStatus::Offline) {
                         assert_eq!(window.get_update_status().as_str(), labels.update_offline);
                     } else if matches!(status, AboutPreviewStatus::Http) {
@@ -3582,48 +4297,242 @@ mod tests {
                         );
                     } else if matches!(status, AboutPreviewStatus::Invalid) {
                         assert_eq!(window.get_update_status().as_str(), labels.update_invalid);
+                    } else if matches!(status, AboutPreviewStatus::Timeout) {
+                        assert_eq!(window.get_update_status().as_str(), labels.update_timeout);
                     }
                     if !store && matches!(status, AboutPreviewStatus::Long) {
                         assert!(window.get_update_status().len() > 100);
                     }
 
                     let required = window.get_required_settings_height();
-                    measurements.push((status, window.get_about_page_required_height(), required));
+                    let about_height = window.get_about_page_required_height();
+                    measurements.push((status, about_height, required));
+                    if let Some(expected) = expected_required_height {
+                        assert_eq!(
+                            required, expected,
+                            "window sizing basis changed across status transitions for {distribution:?}/{locale:?}/{status:?}"
+                        );
+                    } else {
+                        expected_required_height = Some(required);
+                    }
+                    let status_height = window.get_update_status_slot_height();
+                    let text_height = window.get_update_status_text_height();
+                    if window.get_update_status().is_empty() {
+                        assert_eq!(status_height, 0.0, "idle status row should collapse");
+                    } else {
+                        assert!(status_height > 0.0);
+                        assert!(
+                            (status_height - text_height).abs() < 0.1,
+                            "the status row must contain the complete wrapped text without clipping for {distribution:?}/{locale:?}/{status:?}: row={status_height:.2}, text={text_height:.2}"
+                        );
+                    }
+                    if matches!(status, AboutPreviewStatus::Long) && !store {
+                        assert!(status_height > 32.0, "long status should grow naturally");
+                    }
                     assert_eq!(
                         required,
                         window
                             .get_general_page_required_height()
                             .max(window.get_notifications_page_required_height())
-                            .max(window.get_about_page_required_height())
+                            .max(window.get_about_page_window_required_height())
                     );
                     if expected_window_size.is_none() {
+                        window.set_settings_window_height(required);
                         window
                             .window()
                             .set_size(slint::LogicalSize::new(720.0, required));
                         expected_window_size = Some(window.window().size());
                     }
                     for tab in 0..3 {
-                        window.set_selected_tab(tab);
+                        window.invoke_select_settings_tab(tab);
                         assert_eq!(window.window().size(), expected_window_size.unwrap());
+                        let viewport = window.get_settings_scroll_viewport_height();
+                        let content_height = window.get_settings_scroll_content_height();
+                        let scroll_extent = window.get_settings_scroll_max_extent();
+                        let scroll_y_before = window.get_settings_scroll_y();
+                        let button_y = window.get_settings_about_update_actions_y();
+                        let status_y = window.get_settings_about_status_y();
+                        let footer_bottom = window.get_settings_about_footer_bottom();
+                        let logical_window_height = window
+                            .window()
+                            .size()
+                            .to_logical(window.window().scale_factor().max(0.5))
+                            .height;
+                        assert!(
+                            (viewport - logical_window_height).abs() < 0.1,
+                            "Flickable viewport must match the Slint logical client height: viewport={viewport:.2}, logical_window={logical_window_height:.2}"
+                        );
+                        let status_expansion = window.get_settings_about_status_layout_expansion();
+                        let reclaimed = window.get_settings_about_status_space_reclaimed();
+                        assert_eq!(reclaimed, status_expansion.min(26.0));
+                        for gap in [
+                            window.get_settings_about_gap_after_update_actions(),
+                            window.get_settings_about_gap_after_links(),
+                            window.get_settings_about_gap_before_footer(),
+                            window.get_settings_about_gap_after_divider(),
+                        ] {
+                            assert!((8.0..=16.0).contains(&gap));
+                        }
+                        if tab == 2 {
+                            if let Some(expected) = expected_button_y {
+                                assert!(
+                                    (button_y - expected).abs() < 0.1,
+                                    "About update button moved across status states: expected {expected:.2}, got {button_y:.2}"
+                                );
+                            } else {
+                                expected_button_y = Some(button_y);
+                            }
+                            if let Some(expected) = expected_status_y {
+                                assert!(
+                                    (status_y - expected).abs() < 0.1,
+                                    "About status row moved across status states"
+                                );
+                            } else {
+                                expected_status_y = Some(status_y);
+                            }
+                            if store || !matches!(status, AboutPreviewStatus::Long) {
+                                if let Some(expected) = expected_footer_bottom {
+                                    assert!(
+                                        (footer_bottom - expected).abs() < 0.1,
+                                        "About footer moved across normal status states"
+                                    );
+                                } else {
+                                    expected_footer_bottom = Some(footer_bottom);
+                                }
+                            }
+                        }
+                        let should_fit =
+                            tab != 2 || store || !matches!(status, AboutPreviewStatus::Long);
+                        if should_fit {
+                            assert_eq!(
+                                scroll_extent, 0.0,
+                                "normal {status:?} content must fit in tab {tab} for {locale:?}/{distribution:?}"
+                            );
+                            if tab == 2 {
+                                assert!(
+                                    footer_bottom <= viewport + 0.1,
+                                    "About footer must fit for {locale:?}/{distribution:?}/{status:?}: footer={footer_bottom:.1}, viewport={viewport:.1}"
+                                );
+                            }
+                        } else {
+                            assert!(
+                                scroll_extent > 0.0,
+                                "long text should retain real scrolling"
+                            );
+                        }
+                        window.invoke_scroll_settings_to_bottom();
+                        let scroll_y_after = window.get_settings_scroll_y();
+                        assert!(
+                            (scroll_y_after + scroll_extent).abs() < 0.1,
+                            "scroll-to-bottom must expose the measured extent: extent={scroll_extent:.1}, y={scroll_y_after:.1}"
+                        );
+                        if should_fit {
+                            assert_eq!(
+                                scroll_y_after, 0.0,
+                                "fitting content must not move on scroll"
+                            );
+                        } else if tab == 2 {
+                            assert!(
+                                window.get_settings_about_footer_bottom() <= viewport + 0.1,
+                                "scrolling long text to the bottom must reveal the footer"
+                            );
+                        }
+                        if locale == Locale::En && distribution == Distribution::GitHubPortable {
+                            println!(
+                                "GEOMETRY status={status:?} tab={tab} test_backend_window_size_px={:?} logical_viewport={viewport:.1} page_pref={:.1} shared_required={required:.1} top_padding={:.1} bottom_padding={:.1} content={content_height:.1} max_extent={scroll_extent:.1} content_y={scroll_y_before:.1}->{scroll_y_after:.1} button_y={button_y:.1} status_y={status_y:.1} status_h={status_height:.1} footer_bottom={footer_bottom:.1}",
+                                window.window().size(),
+                                window.get_active_page_required_height(),
+                                window.get_settings_about_top_padding(),
+                                window.get_settings_about_bottom_padding(),
+                            );
+                        }
+                    }
+                    for theme_kind in 0..=2 {
+                        window.set_theme_kind(theme_kind);
+                        window.invoke_apply_theme_palette();
+                        assert_eq!(window.get_about_page_required_height(), about_height);
+                        assert_eq!(window.get_about_update_button_gap(), 12.0);
                     }
                 }
-                if !store {
-                    let empty_height = measurements
-                        .iter()
-                        .find(|(status, _, _)| matches!(status, AboutPreviewStatus::Idle))
-                        .map(|(_, about, _)| *about)
-                        .unwrap();
-                    let long_height = measurements
-                        .iter()
-                        .find(|(status, _, _)| matches!(status, AboutPreviewStatus::Long))
-                        .map(|(_, about, _)| *about)
-                        .unwrap();
-                    assert!(
-                        long_height > empty_height,
-                        "long localized status should increase scrollable About content for {distribution:?}/{locale:?}"
-                    );
+                // Reopening Settings after an exceptional saved result must
+                // retain the normal-state sizing budget and native size.
+                if store {
+                    configure_about_update_ui(&window, distribution, locale, &UpdateStatus::Idle);
+                } else {
+                    apply_about_preview_status(&window, locale, AboutPreviewStatus::Long);
                 }
+                assert_eq!(
+                    window.get_required_settings_height(),
+                    expected_required_height.unwrap()
+                );
+                assert_eq!(window.window().size(), expected_window_size.unwrap());
                 println!("{locale:?}/{distribution:?}: {measurements:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn localized_update_status_wraps_fully_on_narrow_about_content() {
+        i_slint_backend_testing::init_no_event_loop();
+        for locale in [Locale::Uk, Locale::En, Locale::Pl, Locale::Ru] {
+            let window = SettingsWindow::new().unwrap();
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(420.0, 360.0));
+            update_settings_window(
+                &window,
+                &AppSettings::default(),
+                locale,
+                false,
+                &adapter::UiSnapshot::unavailable(),
+                now_unix(),
+            );
+            configure_about_update_ui(
+                &window,
+                Distribution::GitHubPortable,
+                locale,
+                &UpdateStatus::Idle,
+            );
+            window.invoke_select_settings_tab(2);
+            let idle_height = window.get_about_page_required_height();
+            let native_size = window.window().size();
+            let labels = locale.settings();
+            let mut button_y: Option<f32> = None;
+
+            for message in [
+                labels.update_offline,
+                labels.update_http,
+                labels.update_invalid,
+                labels.update_timeout,
+            ] {
+                window.set_update_status(message.into());
+                window.invoke_select_settings_tab(2);
+                let slot_height = window.get_update_status_slot_height();
+                let text_height = window.get_update_status_text_height();
+                assert!(slot_height > 0.0, "{locale:?}: status must remain visible");
+                assert!(
+                    (slot_height - text_height).abs() < 0.1,
+                    "{locale:?}: wrapped status text must fit its row without clipping"
+                );
+                assert_eq!(window.get_about_update_button_gap(), 12.0);
+                assert_eq!(window.window().size(), native_size);
+                assert!(window.get_about_page_required_height() >= idle_height);
+                let current_button_y = window.get_settings_about_update_actions_y();
+                if let Some(expected) = button_y {
+                    assert!((current_button_y - expected).abs() < 0.1);
+                } else {
+                    button_y = Some(current_button_y);
+                }
+                let scroll_extent = window.get_settings_scroll_max_extent();
+                assert!(scroll_extent > 0.0, "constrained viewport should scroll");
+                window.invoke_scroll_settings_to_bottom();
+                let scroll_y = window.get_settings_scroll_y();
+                assert!((scroll_y + scroll_extent).abs() < 0.1);
+                assert!(
+                    window.get_settings_about_footer_bottom()
+                        <= window.get_settings_scroll_viewport_height() + 0.1,
+                    "scrolling to the bottom must reveal the footer for {locale:?}"
+                );
             }
         }
     }
@@ -3719,20 +4628,40 @@ mod tests {
         let required_after_content_change = window.get_required_settings_height();
         assert_eq!(window.window().size(), manually_resized_size);
 
-        // A newly visible status can increase the About page's scroll extent,
-        // but must not resize a window the user has already sized.
-        window.set_update_status("update available: version 0.3.1".into());
+        // Status appears below the update action, expands the scroll extent,
+        // and leaves both the action position and native window size intact.
+        window.set_update_status(
+            ("update available: ".to_owned() + &"localized release details ".repeat(10)).into(),
+        );
         window.set_update_available(true);
         window.set_update_release_visible(true);
         assert_eq!(window.window().size(), manually_resized_size);
         let required_after_status = window.get_required_settings_height();
-        assert!(required_after_status > required_after_content_change);
+        assert_eq!(required_after_status, required_after_content_change);
+        assert_eq!(window.get_about_update_button_gap(), 12.0);
+        assert_eq!(
+            window.get_update_status_slot_height(),
+            window.get_update_status_text_height()
+        );
+        window.invoke_select_settings_tab(2);
+        assert_eq!(window.window().size(), manually_resized_size);
+        window.set_settings_window_height(constrained_viewport);
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(720.0, constrained_viewport));
+        assert!(window.get_active_page_required_height() > constrained_viewport);
+        window.invoke_scroll_settings_to_bottom();
+        assert!(window.get_settings_scroll_y() < 0.0);
+        window.set_settings_window_height(manually_resized_size.height as f32);
+        window
+            .window()
+            .set_size(manually_resized_size.to_logical(1.0));
         assert_eq!(
             required_after_status,
             window
                 .get_general_page_required_height()
                 .max(window.get_notifications_page_required_height())
-                .max(window.get_about_page_required_height())
+                .max(window.get_about_page_window_required_height())
         );
 
         // N2: the native size survives a DPI change when it fits the new work
@@ -3860,6 +4789,166 @@ mod tests {
         assert!(geometry.height < 900.0);
         assert_eq!(geometry.minimum_height, geometry.height);
         assert!(geometry.y + (geometry.height * 2.0).round() as i32 + 64 <= 600);
+    }
+
+    /// Native message order for a user border drag.
+    fn user_resize(ownership: &mut SettingsSizeOwnership, size: (f32, f32)) -> Option<(f32, f32)> {
+        ownership.enter_size_move();
+        ownership.user_sizing();
+        ownership.user_sizing();
+        ownership.exit_size_move(size)
+    }
+
+    #[test]
+    fn auto_sized_settings_are_measured_again_after_close_and_reopen() {
+        let ownership = SettingsSizeOwnership::new();
+        // First open: the app sizes the window (no native size loop), the
+        // asynchronous resize lands, and the user closes Settings.
+        assert_eq!(
+            settings_open_size(720.0, 748.0, ownership.user_size()),
+            (720.0, 748.0)
+        );
+        assert_eq!(ownership.user_size(), None);
+        // Reopen: nothing was retained, so the post-show fit runs again.
+        assert!(native_first_show_remeasure_allowed(
+            ownership.user_size().is_none(),
+            &native_first_show_app_owned_sizes((720.0, 748.0), Some((720.0, 748.0))),
+            (720.0, 748.0),
+            false,
+        ));
+    }
+
+    #[test]
+    fn language_or_content_growth_between_opens_refits_an_automatic_size() {
+        let ownership = SettingsSizeOwnership::new();
+        // About grew between opens (e.g. a longer locale): 738 -> 764.
+        assert_eq!(
+            settings_open_size(720.0, 738.0, ownership.user_size()),
+            (720.0, 738.0)
+        );
+        assert_eq!(
+            settings_open_size(720.0, 764.0, ownership.user_size()),
+            (720.0, 764.0)
+        );
+        let roomy = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1032,
+            },
+            ..screen(1.0)
+        };
+        let fitted = settings_geometry(720.0, 764.0, roomy);
+        assert_eq!(fitted.height, 764.0);
+    }
+
+    #[test]
+    fn manual_resize_persists_across_close_and_reopen() {
+        let mut ownership = SettingsSizeOwnership::new();
+        assert_eq!(
+            user_resize(&mut ownership, (880.0, 680.0)),
+            Some((880.0, 680.0))
+        );
+        // Close does not change it; reopen uses it even when content grew.
+        let retained = ownership.user_size();
+        assert_eq!(retained, Some((880.0, 680.0)));
+        assert_eq!(settings_open_size(720.0, 764.0, retained), (880.0, 680.0));
+        // A retained user size blocks the automatic post-show fit.
+        assert!(!native_first_show_remeasure_allowed(
+            retained.is_none(),
+            &native_first_show_app_owned_sizes((880.0, 680.0), Some((880.0, 680.0))),
+            (880.0, 680.0),
+            false,
+        ));
+        // A later move-only loop keeps the user's size.
+        ownership.enter_size_move();
+        assert_eq!(ownership.exit_size_move((880.0, 680.0)), None);
+        assert_eq!(ownership.user_size(), Some((880.0, 680.0)));
+        // A second manual resize replaces it.
+        assert_eq!(
+            user_resize(&mut ownership, (760.0, 700.0)),
+            Some((760.0, 700.0))
+        );
+        assert_eq!(ownership.user_size(), Some((760.0, 700.0)));
+    }
+
+    #[test]
+    fn only_a_native_user_size_loop_marks_the_size_as_user_selected() {
+        let mut ownership = SettingsSizeOwnership::new();
+        // App/Winit `SetWindowPos`, DPI change, maximize and snap: no size
+        // loop with WM_SIZING, whatever the client size becomes.
+        assert_eq!(ownership.user_size(), None);
+        // Dragging the caption (move loop, no WM_SIZING), including moving to
+        // another monitor with a different DPI, is not a resize.
+        ownership.enter_size_move();
+        assert_eq!(ownership.exit_size_move((960.0, 1000.0)), None);
+        // A stray WM_SIZING outside a loop is ignored.
+        ownership.user_sizing();
+        assert_eq!(ownership.exit_size_move((960.0, 1000.0)), None);
+        // A loop that ends with an unusable size records nothing.
+        ownership.enter_size_move();
+        ownership.user_sizing();
+        assert_eq!(ownership.exit_size_move((0.0, 0.0)), None);
+        assert_eq!(ownership.user_size(), None);
+        // Flags reset after each loop.
+        ownership.enter_size_move();
+        assert_eq!(ownership.exit_size_move((720.0, 748.0)), None);
+        assert_eq!(ownership.user_size(), None);
+    }
+
+    #[test]
+    fn post_show_fit_uses_the_monitor_containing_settings() {
+        // Hidden: open on the cursor's monitor. Visible (the 150 ms post-show
+        // fit and monitor-change refresh): the window's own monitor.
+        assert_eq!(settings_fit_monitor(false), SettingsMonitor::Cursor);
+        assert_eq!(settings_fit_monitor(true), SettingsMonitor::Window);
+    }
+
+    #[test]
+    fn moving_settings_between_monitors_keeps_work_area_and_dpi_bounds() {
+        let large = SettingsScreenSignature {
+            monitor: 1,
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1392,
+            },
+            scale_bits: 1.5f32.to_bits(),
+        };
+        let small = SettingsScreenSignature {
+            monitor: 2,
+            work_area: PhysicalWorkArea {
+                left: 2560,
+                top: 0,
+                right: 3926,
+                bottom: 728,
+            },
+            scale_bits: 1.0f32.to_bits(),
+        };
+        // An automatic size clamped on the small monitor is not retained, so
+        // a later open on the large monitor gets the full required height.
+        let ownership = SettingsSizeOwnership::new();
+        let on_small = settings_geometry(720.0, 748.0, small);
+        assert!(on_small.height < 748.0);
+        assert!(on_small.minimum_height <= on_small.height);
+        let (width, height) = settings_open_size(720.0, 748.0, ownership.user_size());
+        let on_large = settings_geometry(width, height, large);
+        assert_eq!((on_large.width, on_large.height), (720.0, 748.0));
+        assert!(on_large.x >= large.work_area.left && on_large.x < large.work_area.right);
+
+        // A user size from the large monitor is clamped on the small one and
+        // restored in full when the large monitor is used again.
+        let mut ownership = SettingsSizeOwnership::new();
+        user_resize(&mut ownership, (900.0, 820.0));
+        let (width, height) = settings_open_size(720.0, 748.0, ownership.user_size());
+        let clamped = settings_geometry(width, height, small);
+        assert_eq!(clamped.width, 900.0);
+        assert!(clamped.height < 820.0);
+        assert!(clamped.x >= small.work_area.left);
+        let restored = settings_geometry(width, height, large);
+        assert_eq!((restored.width, restored.height), (900.0, 820.0));
     }
 
     use super::*;

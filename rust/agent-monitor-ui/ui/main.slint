@@ -1440,14 +1440,62 @@ export component SettingsWindow inherits Window {
     out property <length> general-page-required-height: general-page.preferred-height;
     out property <length> notifications-page-required-height: notifications-page.preferred-height;
     out property <length> about-page-required-height: about-page.preferred-height;
+    out property <length> about-page-window-required-height: about-page.preferred-height
+        - max(
+            0px,
+            root.settings-about-status-layout-expansion
+                - root.settings-about-status-space-reclaimed
+        );
     out property <length> about-update-button-gap: update-actions.absolute-position.y
         - update-distribution-label.absolute-position.y
         - update-distribution-label.height;
+    out property <length> update-status-slot-height: update-status-container.height;
+    out property <length> update-status-text-height: update-status-label.preferred-height;
     out property <length> settings-content-width: content.width;
-    out property <length> required-settings-height: max(max(general-page.preferred-height, notifications-page.preferred-height), about-page.preferred-height);
+    out property <length> settings-scroll-viewport-height: content.height;
+    out property <length> required-settings-height: max(max(general-page.preferred-height, notifications-page.preferred-height), about-page-window-required-height);
     out property <length> active-page-required-height: root.selected-tab == 0 ? general-page.preferred-height : (root.selected-tab == 1 ? notifications-page.preferred-height : about-page.preferred-height);
     out property <length> settings-scroll-y: content.content-y;
     out property <length> settings-scroll-content-height: content.content-height;
+    out property <length> settings-scroll-max-extent: max(0px, content.content-height - content.height);
+    out property <length> settings-about-update-actions-y: update-actions.absolute-position.y;
+    out property <length> settings-about-status-y: update-status-container.absolute-position.y;
+    out property <length> settings-about-footer-y: copyright-label.absolute-position.y;
+    out property <length> settings-about-footer-bottom: copyright-label.absolute-position.y + copyright-label.height;
+    out property <length> settings-about-hero-height: about-hero.height;
+    out property <length> settings-about-features-height: about-features.preferred-height;
+    out property <length> settings-about-feature-tray-height: about-feature-tray.preferred-height;
+    out property <length> settings-about-feature-local-height: about-feature-local.preferred-height;
+    out property <length> settings-about-feature-agents-height: about-feature-agents.preferred-height;
+    out property <length> settings-about-connections-title-height: about-connections-title.preferred-height;
+    out property <length> settings-about-connections-height: about-connections.preferred-height;
+    out property <length> settings-about-codex-row-height: about-codex-row.preferred-height;
+    out property <length> settings-about-claude-row-height: about-claude-row.preferred-height;
+    out property <length> settings-about-distribution-height: update-distribution-label.preferred-height;
+    out property <length> settings-about-status-text-height: update-status-label.preferred-height;
+    out property <length> settings-about-links-height: about-links.height;
+    out property <length> settings-about-legal-note-height: legal-note-label.preferred-height;
+    out property <length> settings-about-copyright-height: copyright-label.preferred-height;
+    out property <length> settings-about-legal-note-y: legal-note-label.absolute-position.y;
+    out property <length> settings-about-connections-y: about-connections.absolute-position.y;
+    out property <length> settings-about-features-y: about-features.absolute-position.y;
+    out property <length> settings-about-top-padding: about-page.padding-top;
+    out property <length> settings-about-bottom-padding: about-page.padding-bottom;
+    out property <length> settings-about-status-layout-expansion: update-status-container.height
+        + (root.update-status == "" ? 0px : 8px);
+    out property <length> settings-about-gap-after-update-actions: 16px
+        - min(root.settings-about-status-layout-expansion, 8px);
+    out property <length> settings-about-gap-after-links: 16px
+        - min(max(root.settings-about-status-layout-expansion - 8px, 0px), 8px);
+    out property <length> settings-about-gap-before-footer: 16px
+        - min(max(root.settings-about-status-layout-expansion - 16px, 0px), 8px);
+    out property <length> settings-about-gap-after-divider: 10px
+        - min(max(root.settings-about-status-layout-expansion - 24px, 0px), 2px);
+    out property <length> settings-about-status-space-reclaimed:
+        16px - root.settings-about-gap-after-update-actions
+        + 16px - root.settings-about-gap-after-links
+        + 16px - root.settings-about-gap-before-footer
+        + 10px - root.settings-about-gap-after-divider;
     in property <string> codex-source: "";
     in property <string> claude-source: "";
     in property <string> legal-note: "";
@@ -1931,7 +1979,7 @@ export component SettingsWindow inherits Window {
             VerticalLayout {
                 spacing: 0px;
                 Rectangle { height: 10px; }
-                HorizontalLayout {
+                about-hero := HorizontalLayout {
                     height: 64px;
                     spacing: 17px;
                     AumMark { size: 64px; }
@@ -1965,30 +2013,30 @@ export component SettingsWindow inherits Window {
                     }
                 }
                 Rectangle { height: 16px; }
-                Card {
+                about-features := Card {
                     VerticalLayout {
-                        FeatureRow {
+                        about-feature-tray := FeatureRow {
                             icon: Icons.refresh;
                             text: root.about-feature-tray;
                         }
                         Divider { }
-                        FeatureRow {
+                        about-feature-local := FeatureRow {
                             icon: Icons.lock;
                             text: root.about-feature-local;
                         }
                         Divider { }
-                        FeatureRow {
+                        about-feature-agents := FeatureRow {
                             icon: Icons.shield;
                             text: root.about-feature-agents;
                         }
                     }
                 }
                 Rectangle { height: 16px; }
-                SectionLabel { text: root.connections-label; }
+                about-connections-title := SectionLabel { text: root.connections-label; }
                 Rectangle { height: 4px; }
-                Card {
+                about-connections := Card {
                     VerticalLayout {
-                        SettingsRow {
+                        about-codex-row := SettingsRow {
                             title: "Codex";
                             description: root.codex-source;
                             StatusChip {
@@ -1997,7 +2045,7 @@ export component SettingsWindow inherits Window {
                             }
                         }
                         Divider { }
-                        SettingsRow {
+                        about-claude-row := SettingsRow {
                             title: "Claude";
                             description: root.claude-source;
                             StatusChip {
@@ -2013,21 +2061,6 @@ export component SettingsWindow inherits Window {
                     font-size: 12px;
                     color: Theme.text-muted;
                     wrap: word-wrap;
-                }
-                Rectangle {
-                    // Use only the height required by the current status. A
-                    // small cap keeps pathological QA text from dominating
-                    // About; the Flickable remains available for overflow.
-                    height: root.update-status == "" ? 0px : min(72px, max(24px, update-status-label.preferred-height));
-                    update-status-label := Text {
-                        width: parent.width;
-                        text: root.update-status;
-                        visible: root.update-status != "";
-                        font-size: 13px;
-                        color: root.update-available ? Theme.accent : Theme.text-secondary;
-                        vertical-alignment: center;
-                        wrap: word-wrap;
-                    }
                 }
                 Rectangle { height: 12px; }
                 update-actions := VerticalLayout {
@@ -2046,6 +2079,21 @@ export component SettingsWindow inherits Window {
                         }
                     }
                     Rectangle { height: 8px; }
+                    update-status-container := Rectangle {
+                        width: parent.width;
+                        // Idle version information is already shown in the
+                        // product header's version chip. Collapse only this
+                        // status row while idle; the update button stays above.
+                        height: root.update-status == "" ? 0px : update-status-label.preferred-height;
+                        update-status-label := Text {
+                            width: parent.width;
+                            text: root.update-status;
+                            font-size: 13px;
+                            color: root.update-available ? Theme.accent : Theme.text-secondary;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Rectangle { height: root.update-status == "" ? 0px : 8px; }
                     if !root.store-build && root.update-check-available: Card {
                         SettingsRow {
                             title: root.update-auto-label;
@@ -2057,9 +2105,11 @@ export component SettingsWindow inherits Window {
                         }
                     }
                 }
-                Rectangle { height: 16px; }
-                // Two equal-width actions spanning the content column, 12 px apart.
                 Rectangle {
+                    height: root.settings-about-gap-after-update-actions;
+                }
+                // Two equal-width actions spanning the content column, 12 px apart.
+                about-links := Rectangle {
                     height: 32px;
                     SettingsButton {
                         x: 0px;
@@ -2076,10 +2126,12 @@ export component SettingsWindow inherits Window {
                         clicked => { root.open-issues(); }
                     }
                 }
-                Rectangle { height: 16px; }
+                Rectangle {
+                    height: root.settings-about-gap-after-links;
+                }
                 HorizontalLayout {
                     alignment: center;
-                    Text {
+                    legal-note-label := Text {
                         max-width: 420px;
                         text: root.legal-note;
                         font-size: 12px;
@@ -2091,11 +2143,13 @@ export component SettingsWindow inherits Window {
                 // Keep a deliberate gap before the footer. Its natural content
                 // height is measured with the rest of About when Settings opens.
                 Rectangle {
-                    min-height: 16px;
+                    min-height: root.settings-about-gap-before-footer;
                 }
                 Divider { }
-                Rectangle { height: 10px; }
-                Text {
+                Rectangle {
+                    height: root.settings-about-gap-after-divider;
+                }
+                copyright-label := Text {
                     text: root.copyright-line;
                     font-size: 12px;
                     color: Theme.text-muted;
