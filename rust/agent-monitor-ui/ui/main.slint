@@ -1339,9 +1339,11 @@ export component SettingsWindow inherits Window {
     in property <bool> codex-enabled: true;
     in property <bool> claude-enabled: true;
     in property <bool> claude-cli-refresh-enabled: false;
-    // MSIX / Store build only: the Claude status-line listener opt-in row.
+    // Distribution-specific saved Claude bridge opt-in; EXE also has a
+    // process-scoped CLI override shown through the adjacent property.
     in property <bool> store-build: false;
     in property <bool> claude-bridge-listener-enabled: false;
+    in property <bool> claude-bridge-cli-override: false;
     in property <bool> store-import-available: false;
     // Non-empty when settings cannot be saved (no persistent storage).
     in property <string> storage-warning: "";
@@ -1769,16 +1771,13 @@ export component SettingsWindow inherits Window {
                                 toggled => { root.toggle-claude-cli-refresh(); }
                             }
                         }
-                        // Store (MSIX) build only: packaged apps cannot receive
-                        // --enable-claude-bridge, so the listener is opted into here.
-                        if root.store-build: Divider { }
-                        if root.store-build: SettingsRow {
+                        Divider { }
+                        SettingsRow {
                             title: root.claude-bridge-label;
                             description: root.claude-bridge-description;
-                            // Always operable, so the opt-in can be revoked at any
-                            // time. The listener itself runs only while Claude is on.
                             ToggleSwitch {
                                 checked: root.claude-bridge-listener-enabled;
+                                enabled: !root.claude-bridge-cli-override;
                                 toggled => { root.toggle-claude-bridge-listener(); }
                             }
                         }

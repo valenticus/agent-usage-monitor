@@ -30,11 +30,7 @@ const VALUE_NAME: &str = "AgentUsageMonitor";
 /// value is only updated/deleted by name; no other Run entries are enumerated
 /// or modified. Packaged builds use [`packaged_controller`] instead.
 #[cfg(windows)]
-pub fn set_enabled(
-    enabled: bool,
-    executable: &std::path::Path,
-    claude_bridge: bool,
-) -> Result<(), String> {
+pub fn set_enabled(enabled: bool, executable: &std::path::Path) -> Result<(), String> {
     match crate::packaged::state() {
         crate::packaged::PackageState::Unpackaged => {}
         crate::packaged::PackageState::Packaged => {
@@ -69,7 +65,7 @@ pub fn set_enabled(
     }
 
     let outcome = if enabled {
-        let command = startup_command(executable, claude_bridge);
+        let command = startup_command(executable);
         let mut data: Vec<u16> = std::ffi::OsStr::new(&command).encode_wide().collect();
         data.push(0);
         unsafe {
@@ -105,10 +101,48 @@ pub fn is_enabled_for(executable: &std::path::Path) -> Result<bool, String> {
     if crate::packaged::is_packaged() {
         return Err("the packaged build reads its startup task asynchronously".into());
     }
+    let Some(command) = read_run_command()? else {
+        return Ok(false);
+    };
+    Ok(command_matches_executable(&command, executable))
+}
+
+/// Detect the exact legacy Portable bridge command for this executable.
+/// This is read-only; callers persist the opt-in before rewriting the Run value.
+#[cfg(windows)]
+pub fn has_legacy_bridge_opt_in(executable: &std::path::Path) -> Result<bool, String> {
+    if crate::packaged::state() != crate::packaged::PackageState::Unpackaged {
+        return Ok(false);
+    }
+    Ok(read_run_command()?
+        .is_some_and(|command| legacy_bridge_command_matches(&command, executable)))
+}
+
+#[cfg(not(windows))]
+pub fn has_legacy_bridge_opt_in(_executable: &std::path::Path) -> Result<bool, String> {
+    Ok(false)
+}
+
+/// Remove only the old bridge argument from a verified, exact AUM Run command.
+/// The migration caller must persist the explicit preference before calling.
+#[cfg(windows)]
+pub fn remove_legacy_bridge_flag(executable: &std::path::Path) -> Result<(), String> {
+    if !has_legacy_bridge_opt_in(executable)? {
+        return Ok(());
+    }
+    set_enabled(true, executable)
+}
+
+#[cfg(not(windows))]
+pub fn remove_legacy_bridge_flag(_executable: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_run_command() -> Result<Option<String>, String> {
     use windows_sys::Win32::System::Registry::{
         HKEY_CURRENT_USER, KEY_QUERY_VALUE, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
     };
-
     let mut key = std::ptr::null_mut();
     let result = unsafe {
         RegOpenKeyExW(
@@ -120,12 +154,11 @@ pub fn is_enabled_for(executable: &std::path::Path) -> Result<bool, String> {
         )
     };
     if result == 2 {
-        return Ok(false);
+        return Ok(None);
     }
     if result != 0 {
         return Err(format!("could not read per-user startup key ({result})"));
     }
-
     let mut kind = 0;
     let mut bytes = 0u32;
     let mut query = unsafe {
@@ -140,12 +173,12 @@ pub fn is_enabled_for(executable: &std::path::Path) -> Result<bool, String> {
     };
     if query == 2 {
         unsafe { RegCloseKey(key) };
-        return Ok(false);
+        return Ok(None);
     }
     if query != 0 || kind != REG_SZ || bytes < 2 || bytes % 2 != 0 {
         unsafe { RegCloseKey(key) };
         return if query == 0 {
-            Ok(false)
+            Ok(None)
         } else {
             Err(format!("could not read per-user startup entry ({query})"))
         };
@@ -169,8 +202,7 @@ pub fn is_enabled_for(executable: &std::path::Path) -> Result<bool, String> {
         .iter()
         .position(|unit| *unit == 0)
         .unwrap_or(data.len());
-    let command = String::from_utf16_lossy(&data[..length]);
-    Ok(command_matches_executable(&command, executable))
+    Ok(Some(String::from_utf16_lossy(&data[..length])))
 }
 
 /// Who decides whether AUM launches at sign-in.
@@ -524,11 +556,7 @@ mod startup_task {
 }
 
 #[cfg(not(windows))]
-pub fn set_enabled(
-    _enabled: bool,
-    _executable: &std::path::Path,
-    _claude_bridge: bool,
-) -> Result<(), String> {
+pub fn set_enabled(_enabled: bool, _executable: &std::path::Path) -> Result<(), String> {
     Err("Windows sign-in startup is only available on Windows".into())
 }
 
@@ -546,12 +574,8 @@ fn quote_executable(executable: &std::path::Path) -> String {
     format!("\"{}\"", executable.to_string_lossy())
 }
 
-fn startup_command(executable: &std::path::Path, claude_bridge: bool) -> String {
-    let mut command = quote_executable(executable);
-    if claude_bridge {
-        command.push_str(" --enable-claude-bridge");
-    }
-    command
+fn startup_command(executable: &std::path::Path) -> String {
+    quote_executable(executable)
 }
 
 fn command_matches_executable(command: &str, executable: &std::path::Path) -> bool {
@@ -567,6 +591,17 @@ fn command_matches_executable(command: &str, executable: &std::path::Path) -> bo
     path_matches && arguments_match
 }
 
+fn legacy_bridge_command_matches(command: &str, executable: &std::path::Path) -> bool {
+    let Some((path, arguments)) = command
+        .strip_prefix('"')
+        .and_then(|value| value.split_once('"'))
+    else {
+        return false;
+    };
+    path.eq_ignore_ascii_case(&executable.to_string_lossy())
+        && arguments == " --enable-claude-bridge"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,15 +612,14 @@ mod tests {
     #[test]
     fn startup_command_quotes_paths_with_spaces_and_unicode() {
         assert_eq!(
-            startup_command(
-                Path::new(r"C:\Users\Éva Kovács\AUM\agent-usage-monitor.exe"),
-                false
-            ),
+            startup_command(Path::new(
+                r"C:\Users\Éva Kovács\AUM\agent-usage-monitor.exe"
+            )),
             r#""C:\Users\Éva Kovács\AUM\agent-usage-monitor.exe""#
         );
-        assert_eq!(
-            startup_command(Path::new(r"C:\AUM\agent-usage-monitor.exe"), true),
-            r#""C:\AUM\agent-usage-monitor.exe" --enable-claude-bridge"#
+        assert!(
+            !startup_command(Path::new(r"C:\AUM\agent-usage-monitor.exe"))
+                .contains("--enable-claude-bridge")
         );
     }
 
@@ -613,6 +647,18 @@ mod tests {
             exe
         ));
         assert!(!command_matches_executable("not quoted", exe));
+        assert!(legacy_bridge_command_matches(
+            r#""C:\Portable AUM\agent-usage-monitor.exe" --enable-claude-bridge"#,
+            exe
+        ));
+        assert!(!legacy_bridge_command_matches(
+            r#""C:\Portable AUM\agent-usage-monitor.exe" --enable-claude-bridge --other"#,
+            exe
+        ));
+        assert!(!legacy_bridge_command_matches(
+            r#""C:\Other\agent-usage-monitor.exe" --enable-claude-bridge"#,
+            exe
+        ));
     }
 
     #[test]

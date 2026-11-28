@@ -38,10 +38,11 @@ pub struct AppSettings {
     pub codex_enabled: bool,
     pub claude_enabled: bool,
     pub claude_cli_refresh_enabled: bool,
-    /// MSIX / Store build only: listen for the Claude Code status-line bridge.
-    /// Packaged apps cannot receive `--enable-claude-bridge`, so the opt-in is
-    /// this explicit setting instead. Off by default; ignored when unpackaged.
+    /// MSIX / Store build only: independent listener opt-in, off by default.
     pub claude_bridge_listener_enabled: bool,
+    /// Explicit unpackaged EXE opt-in. `None` means no explicit choice has been
+    /// made yet (treated as OFF and available for the one-time v0.2 migration).
+    pub exe_claude_bridge_enabled: Option<bool>,
     /// Opt-in for public GitHub release checks; off by default for privacy.
     pub automatic_update_checks_enabled: bool,
     /// Unix time of the last successful release metadata check.
@@ -67,6 +68,7 @@ impl Default for AppSettings {
             claude_enabled: true,
             claude_cli_refresh_enabled: false,
             claude_bridge_listener_enabled: false,
+            exe_claude_bridge_enabled: None,
             automatic_update_checks_enabled: false,
             last_update_check_success_unix: None,
             last_automatic_update_check_attempt_unix: None,
@@ -305,6 +307,7 @@ pub fn sanitize_import(source: &AppSettings) -> AppSettings {
         claude_enabled: source.claude_enabled,
         claude_cli_refresh_enabled: false,
         claude_bridge_listener_enabled: false,
+        exe_claude_bridge_enabled: None,
         automatic_update_checks_enabled: false,
         last_update_check_success_unix: None,
         last_automatic_update_check_attempt_unix: None,
@@ -589,18 +592,28 @@ mod tests {
         assert!(loaded.claude_enabled);
         assert!(!loaded.claude_cli_refresh_enabled);
         assert!(!loaded.claude_bridge_listener_enabled);
+        assert_eq!(loaded.exe_claude_bridge_enabled, None);
         assert!(!loaded.automatic_update_checks_enabled);
         assert_eq!(loaded.last_update_check_success_unix, None);
         assert_eq!(loaded.last_automatic_update_check_attempt_unix, None);
         assert!(!loaded.launch_at_startup);
         assert_eq!(loaded.warning_threshold, 25);
-        // The Store-only bridge opt-in survives a save/load round trip.
+        // Distribution-specific bridge opt-ins survive a save/load round trip.
         let opted_in = AppSettings {
             claude_bridge_listener_enabled: true,
+            exe_claude_bridge_enabled: Some(false),
             ..Default::default()
         };
         save(&path, &opted_in).unwrap();
-        assert!(load(&path).unwrap().claude_bridge_listener_enabled);
+        let loaded = load(&path).unwrap();
+        assert!(loaded.claude_bridge_listener_enabled);
+        assert_eq!(loaded.exe_claude_bridge_enabled, Some(false));
+        let exe_opted_in = AppSettings {
+            exe_claude_bridge_enabled: Some(true),
+            ..Default::default()
+        };
+        save(&path, &exe_opted_in).unwrap();
+        assert_eq!(load(&path).unwrap().exe_claude_bridge_enabled, Some(true));
     }
 
     #[test]
@@ -784,6 +797,7 @@ mod tests {
             claude_enabled: true,
             claude_cli_refresh_enabled: true,
             claude_bridge_listener_enabled: true,
+            exe_claude_bridge_enabled: Some(true),
             launch_at_startup: true,
             alerts_enabled: false,
             warning_threshold: 40,
@@ -812,6 +826,7 @@ mod tests {
         // CLI stay off until the user opts in again in the Store build.
         assert!(!imported.launch_at_startup);
         assert!(!imported.claude_bridge_listener_enabled);
+        assert_eq!(imported.exe_claude_bridge_enabled, None);
         assert!(!imported.claude_cli_refresh_enabled);
         assert!(imported.validate().is_ok());
     }
