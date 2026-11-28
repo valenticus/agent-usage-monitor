@@ -50,12 +50,14 @@ fn same_path(left: &Path, right: &Path) -> bool {
 pub fn consume_pending(settings: &mut AppSettings, settings_path: &Path) -> Result<bool, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let installed_exe = is_installer_managed_executable(&executable);
-    let Some(marker) = read_marker()? else {
-        return migrate_legacy_portable_run(settings, settings_path, &executable);
-    };
     if !installed_exe {
-        return Ok(false);
+        // A Portable copy has independent legacy Run evidence. Never consult
+        // the install-wide marker: an installed copy may own a terminal Done.
+        return migrate_legacy_portable_run(settings, settings_path, &executable);
     }
+    let Some(marker) = read_marker()? else {
+        return Ok(false);
+    };
     match action_for(
         &marker,
         &executable,
@@ -445,6 +447,33 @@ mod tests {
     }
 
     #[test]
+    fn portable_migration_is_independent_of_an_installed_copies_done_marker() {
+        let source = include_str!("installer_migration.rs");
+        let consume = source_between(
+            source,
+            "pub fn consume_pending",
+            "fn migrate_legacy_portable_run",
+        );
+        let portable_branch = consume.find("if !installed_exe").expect("Portable branch");
+        let marker_read = consume.find("read_marker()").expect("marker lookup");
+        assert!(portable_branch < marker_read);
+        assert!(
+            consume[portable_branch..marker_read]
+                .contains("migrate_legacy_portable_run(settings, settings_path, &executable)")
+        );
+
+        let portable = source_between(
+            source,
+            "fn migrate_legacy_portable_run",
+            "fn migrate_legacy_run_choice",
+        );
+        assert!(portable.contains("PackageState::Unpackaged"));
+        assert!(portable.contains("settings.exe_claude_bridge_enabled.is_some()"));
+        assert!(portable.contains("has_legacy_bridge_opt_in(executable)"));
+        assert!(portable.contains("remove_legacy_bridge_flag(executable)"));
+    }
+
+    #[test]
     fn portable_run_flag_removal_failure_keeps_successfully_saved_opt_in() {
         let mut settings = AppSettings::default();
         let result = migrate_legacy_run_choice(
@@ -599,5 +628,32 @@ mod tests {
         );
         assert!(wait.contains("if not UninstallContext then WizardForm.Update"));
         assert!(INSTALLER_SCRIPT.contains("WaitForAumReservation(not UninstallSilent, True"));
+    }
+
+    #[test]
+    fn uninstall_uses_only_uninstall_specific_wait_and_failure_messages() {
+        let wait = source_between(
+            INSTALLER_SCRIPT,
+            "function WaitForAumReservation",
+            "function PrepareToInstall",
+        );
+        assert!(wait.contains("PromptText := CustomMessage('UninstallRunningWait')"));
+        assert!(wait.contains("PromptText := CustomMessage('UninstallStillBlocked')"));
+        let uninstall = source_between(
+            INSTALLER_SCRIPT,
+            "function InitializeUninstall()",
+            "function WriteCompletedMigrationMarker",
+        );
+        assert!(uninstall.contains("CustomMessage('UninstallMutexFailure')"));
+        assert!(uninstall.contains("CustomMessage('UninstallRunningBlocker')"));
+        assert!(!uninstall.contains("CustomMessage('MutexFailure')"));
+        assert!(!uninstall.contains("CustomMessage('RunningBlocker')"));
+        assert!(!uninstall.contains("CustomMessage('RunningStillBlocked')"));
+        for key in ["UninstallRunningWait", "UninstallStillBlocked"] {
+            assert!(INSTALLER_SCRIPT.contains(&format!("english.{key}=")));
+            assert!(INSTALLER_SCRIPT.contains(&format!("ukrainian.{key}=")));
+            assert!(INSTALLER_SCRIPT.contains(&format!("polish.{key}=")));
+            assert!(INSTALLER_SCRIPT.contains(&format!("russian.{key}=")));
+        }
     }
 }

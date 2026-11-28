@@ -119,6 +119,14 @@ ukrainian.UninstallRunningBlocker=Agent Usage Monitor усе ще працює. 
 english.UninstallRunningBlocker=Agent Usage Monitor is still running. Exit from its tray menu, then run uninstall again. The app will not be closed automatically.
 polish.UninstallRunningBlocker=Agent Usage Monitor nadal działa. Zakończ działanie z menu ikony w zasobniku i ponownie uruchom deinstalator. Aplikacja nie zostanie zamknięta automatycznie.
 russian.UninstallRunningBlocker=Agent Usage Monitor всё ещё работает. Выйдите через меню значка в трее и запустите удаление снова. Программа не будет закрыта автоматически.
+ukrainian.UninstallRunningWait=Запущено Agent Usage Monitor. Вийдіть через меню піктограми в треї; видалення продовжиться автоматично. Натисніть «Скасувати», щоб перервати видалення.
+english.UninstallRunningWait=Agent Usage Monitor is running. Exit from its tray menu; uninstall will continue automatically. Select Cancel to stop uninstalling.
+polish.UninstallRunningWait=Agent Usage Monitor jest uruchomiony. Zakończ działanie z menu ikony w zasobniku; deinstalacja będzie kontynuowana automatycznie. Wybierz Anuluj, aby przerwać.
+russian.UninstallRunningWait=Запущен Agent Usage Monitor. Выйдите через меню значка в трее; удаление продолжится автоматически. Нажмите «Отмена», чтобы прервать удаление.
+ukrainian.UninstallStillBlocked=Agent Usage Monitor усе ще працює. Вийдіть через меню піктограми в треї, щоб продовжити видалення, або скасуйте його.
+english.UninstallStillBlocked=Agent Usage Monitor is still running. Exit from its tray menu to continue uninstalling, or cancel uninstall.
+polish.UninstallStillBlocked=Agent Usage Monitor nadal działa. Zakończ działanie z menu ikony w zasobniku, aby kontynuować deinstalację, lub ją anuluj.
+russian.UninstallStillBlocked=Agent Usage Monitor всё ещё работает. Выйдите через меню значка в трее, чтобы продолжить удаление, или отмените его.
 ukrainian.UninstallMutexFailure=Не вдалося перевірити або зарезервувати екземпляр AUM. Видалення скасовано без змін.
 english.UninstallMutexFailure=The AUM instance could not be checked or reserved safely. Uninstall was canceled without changes.
 polish.UninstallMutexFailure=Nie można było bezpiecznie sprawdzić ani zarezerwować instancji AUM. Deinstalację anulowano bez zmian.
@@ -572,6 +580,7 @@ end;
 function WaitForAumReservation(AllowWait, UninstallContext: Boolean; var ErrorText: String): Boolean;
 var
   Asked, StillRunning: Boolean;
+  PromptText: String;
   WaitTicks: Integer;
 begin
   Result := False;
@@ -594,8 +603,15 @@ begin
       exit;
     end;
     if not Asked then begin
-      if MsgBox(CustomMessage('RunningBlocker'), mbConfirmation, MB_OKCANCEL) <> IDOK then begin
-        ErrorText := CustomMessage('RunningBlocker');
+      if UninstallContext then
+        PromptText := CustomMessage('UninstallRunningWait')
+      else
+        PromptText := CustomMessage('RunningBlocker');
+      if MsgBox(PromptText, mbConfirmation, MB_OKCANCEL) <> IDOK then begin
+        if UninstallContext then
+          ErrorText := CustomMessage('UninstallRunningBlocker')
+        else
+          ErrorText := CustomMessage('RunningBlocker');
         exit;
       end;
       Asked := True;
@@ -606,8 +622,15 @@ begin
     Sleep(500);
     WaitTicks := WaitTicks + 1;
     if WaitTicks >= 20 then begin
-      if MsgBox(CustomMessage('RunningStillBlocked'), mbConfirmation, MB_OKCANCEL) <> IDOK then begin
-        ErrorText := CustomMessage('RunningBlocker');
+      if UninstallContext then
+        PromptText := CustomMessage('UninstallStillBlocked')
+      else
+        PromptText := CustomMessage('RunningStillBlocked');
+      if MsgBox(PromptText, mbConfirmation, MB_OKCANCEL) <> IDOK then begin
+        if UninstallContext then
+          ErrorText := CustomMessage('UninstallRunningBlocker')
+        else
+          ErrorText := CustomMessage('RunningBlocker');
         exit;
       end;
       WaitTicks := 0;

@@ -29,4 +29,4 @@ Installer setup waits for the AUM mutex during its wizard preflight. Uninstall c
 
 ## Validation boundary
 
-Automated Rust tests and ISCC compilation do not exercise real registry state, shortcut property inspection, mutex contention, restart replacement or first-install/upgrade callbacks. Those require an isolated Windows runtime test. Do not treat compile-only checks as native installer QA.
+Automated Rust tests and ISCC compilation do not exercise real registry state, shortcut property inspection, mutex contention, locked-file retry behavior or first-install/upgrade callbacks. Those require an isolated Windows runtime test. Do not treat compile-only checks as native installer QA.

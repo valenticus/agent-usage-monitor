@@ -40,12 +40,12 @@ Only a confirmed unpackaged process may write the EXE builds' registry state or 
 | Data folder (settings, alert state, custom provider icons) | `%APPDATA%\Agent Usage Monitor` | the package's own `LocalState` (`ApplicationData.Current.LocalFolder`, `%LOCALAPPDATA%\Packages\ValentynFetisov.AgentUsageMonitor_sfbqfhxtgjc58\LocalState`); see "Settings isolation" |
 | Sign-in launch | HKCU `Run` value `AgentUsageMonitor`, rewritten at each launch so it follows the current EXE path | `windows.startupTask` `AgentUsageMonitorStartup` (declared off), see "Startup task" |
 | Notifications | own AUMID `Valenticus.AgentUsageMonitor`, registered under HKCU with an icon PNG | package AUMID `<PFN>!AgentUsageMonitor`; no registry writes, no explicit AUMID, default notifier; name and logo come from the manifest |
-| Claude status-line listener | Settings → General → Claude → **Live updates from Claude Code** persisted opt-in (off by default), or the process-scoped `--enable-claude-bridge` argument | The independent Settings toggle (`claude_bridge_listener_enabled`, off by default). Packaged apps normally cannot pass launch arguments on Windows 10 1809. |
+| Claude status-line listener | Settings → General → Claude → **Live updates from Claude Code** persisted opt-in (off by default), or the process-scoped `--enable-claude-bridge` argument | The independent Settings toggle (`claude_bridge_listener_enabled`, off by default). Store launches do not pass the EXE bridge argument. |
 | Bridge command for Claude Code | full path to `agent-usage-monitor-claude-bridge.exe` | App Execution Alias `agent-usage-monitor-claude-bridge.exe` (files in `WindowsApps` cannot be started by path from outside the package) |
 | Legacy `Agent Monitor` folder migration | automatic, unchanged | never; explicit import from the EXE build instead |
 | Updates | Inno upgrade over the same AppId | Store updates to a **higher** version; applied when AUM is not running (a sideloaded update while AUM runs is refused with `0x80073D02`). The startup task state, `LocalState`, the notification settings and the alias survive updates (tested 0.1.1.0 → 0.1.1.1). A lower version is not an update: going back needs `Add-AppxPackage -ForceUpdateFromAnyVersion` (sideload testing only) or, in the Store, publishing a new higher version. |
 
-Unchanged in both builds: tray icon and menu, sleep/resume and Explorer-restart recovery, flyout Z-order, background running when windows are closed, single-instance mutex `Local\AgentUsageMonitor.Singleton`, Codex `app-server` and Claude CLI child processes (timeouts, cancellation, process-tree cleanup), and the pipe security (current user only, remote clients rejected, one instance).
+Unchanged in both builds: tray icon and menu, sleep/resume and Explorer-restart recovery, flyout Z-order, background running when windows are closed, AUM runtime single-instance mutex `Local\AgentUsageMonitor.Singleton`, Codex `app-server` and Claude CLI child processes (timeouts, cancellation, process-tree cleanup), and the pipe security (current user only, remote clients rejected, one instance).
 
 ### Settings isolation
 
@@ -139,7 +139,8 @@ Process launch:
 - If both are installed and both launch at sign-in (Inno HKCU `Run` value and the Store startup task), whichever process creates the mutex first runs and the other exits silently. Which one wins is not predictable.
 - Settings no longer interfere: each build has its own data folder.
 - The mutex is taken first in `main()`, before AUMID registration, settings migration or the `Run` reconcile. A copy that loses therefore exits without writing anything: no settings folder, no `Run` value, no AUMID.
-- The Inno installer declares `AppMutex=Local\AgentUsageMonitor.Singleton`. A running **Store** AUM holds the same mutex, so Inno setup and uninstall treat it as "AgentUsageMonitor is running". Silent setup and uninstall exit with code 1 and change nothing; interactive setup asks to close it. **To install, update or uninstall the EXE build, first exit AUM from the tray (Exit), then retry.**
+- The Inno installer does **not** use the `AppMutex` directive. It uses a separate installer mutex to prevent concurrent setup runs, then checks AUM's runtime single-instance mutex without asking Windows to close the app. Interactive setup asks the user to exit AUM from its tray menu and continues automatically when the mutex clears; the user can cancel. The same wait/cancel behavior applies to interactive uninstall, with uninstall-specific messages. Neither setup nor uninstall sends `WM_CLOSE` or forcibly terminates AUM.
+- Silent setup that is blocked by a running AUM fails in `PrepareToInstall` before replacing files and returns Inno Setup exit code **7**. Silent uninstall also aborts before removing files when AUM is running. Interactive uninstall waits for manual tray Exit or cancellation. After successful uninstall, AUM asks whether to delete its known settings and alert-state files; **Keep** is the default. Silent uninstall keeps data. CLI installations, credentials and other external user data are not removed.
 - A fresh EXE install starts with "Launch at Windows sign-in" off (v0.1.1 default) and writes no `Run` value until the user enables it.
 - Recommendation for users: install only one build. When moving to the Store build, use the import, turn off "Launch at Windows sign-in" in the EXE build (or uninstall it).
 - Not changed: making one build defer to the other (for example the Store build exiting when the EXE build's `Run` value exists) would change installed EXE behaviour and needs a product decision.
@@ -147,7 +148,7 @@ Process launch:
   - whichever build runs first stays, and the other exits without writes, in both directions;
   - settings folders are isolated;
   - toast identities stay separate;
-  - Inno setup and uninstall are blocked by a running Store AUM;
+  - Inno v0.1.1 setup and uninstall were blocked by a running Store AUM under that installer version's `AppMutex` behavior;
   - clean Inno uninstall.
 - **Not tested:** the sign-in race when both builds are registered for sign-in.
 
