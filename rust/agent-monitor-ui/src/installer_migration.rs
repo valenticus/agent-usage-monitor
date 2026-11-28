@@ -577,7 +577,7 @@ mod tests {
         let run_update = source_between(
             INSTALLER_SCRIPT,
             "procedure RemoveMigratedRunFlag",
-            "function ShouldOfferUpgradeLaunch",
+            "function TryReserveAumMutex",
         );
         assert!(run_update.contains("LegacyRunOwned and MigrationMarkerReady"));
         assert!(run_update.contains("RegWriteStringValue(HKCU"));
@@ -617,6 +617,44 @@ mod tests {
         );
         assert!(post_install.contains("WriteCompletedMigrationMarker"));
         assert!(INSTALLER_SCRIPT.contains("function WriteCompletedMigrationMarker"));
+    }
+
+    #[test]
+    fn installer_uses_async_normal_wizard_transition_after_license_acceptance() {
+        let setup = source_between(INSTALLER_SCRIPT, "[Setup]", "[Languages]");
+        assert!(setup.contains("DisableWelcomePage=yes"));
+        assert!(setup.contains("DisableReadyPage=yes"));
+        assert!(setup.contains("DisableFinishedPage=yes"));
+        assert!(INSTALLER_SCRIPT.contains("LicenseFile=..\\..\\LICENSE"));
+        assert!(!INSTALLER_SCRIPT.contains("\n[Run]\n"));
+
+        let transition = source_between(
+            INSTALLER_SCRIPT,
+            "procedure AutoAdvanceTimerProc",
+            "procedure InitializeWizard",
+        );
+        assert!(transition.contains("SetTimer"));
+        assert!(transition.contains("PostMessageW(WizardForm.NextButton.Handle, BM_CLICK"));
+        assert!(transition.contains("WizardForm.LicenseAcceptedRadio.Checked"));
+        assert!(transition.contains("StopAutoAdvanceTimer"));
+        assert!(!transition.contains("NextButton.Click"));
+    }
+
+    #[test]
+    fn installer_launches_once_only_after_successful_interactive_completion() {
+        let completion = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurStepChanged",
+            "procedure CurUninstallStepChanged",
+        );
+        assert!(completion.contains("CurStep <> ssDone"));
+        assert!(completion.contains("WizardSilent"));
+        assert!(completion.contains("InstallLaunchAttempted"));
+        assert!(completion.contains("LaunchFailed"));
+        assert!(!INSTALLER_SCRIPT.contains("\n[Run]\n"));
+        assert!(
+            completion.contains("CurStep <> ssDone) or WizardSilent or InstallLaunchAttempted")
+        );
     }
 
     #[test]

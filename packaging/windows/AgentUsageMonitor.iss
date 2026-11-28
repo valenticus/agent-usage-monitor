@@ -61,6 +61,9 @@ DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableDirPage=auto
+DisableWelcomePage=yes
+DisableReadyPage=yes
+DisableFinishedPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Windows 10 1809 or later (toast AppUserModelID registration, DWM APIs).
@@ -139,6 +142,26 @@ ukrainian.MigrationPersistenceFailed=Не вдалося зберегти ста
 english.MigrationPersistenceFailed=The AUM migration state could not be saved. No files were changed; resolve the registry access issue and retry setup.
 polish.MigrationPersistenceFailed=Nie można zapisać stanu migracji AUM. Pliki nie zostały zmienione; usuń problem z dostępem do rejestru i ponów instalację.
 russian.MigrationPersistenceFailed=Не удалось сохранить состояние миграции AUM. Файлы не изменены; устраните проблему доступа к реестру и повторите установку.
+ukrainian.InstallAfterLicense=Встановлення AgentUsageMonitor почнеться автоматично після прийняття ліцензії.
+english.InstallAfterLicense=AgentUsageMonitor will install automatically after you accept the license.
+polish.InstallAfterLicense=Instalacja AgentUsageMonitor rozpocznie się automatycznie po zaakceptowaniu licencji.
+russian.InstallAfterLicense=Установка AgentUsageMonitor начнётся автоматически после принятия лицензии.
+ukrainian.RetryPreparation=Повторити
+english.RetryPreparation=Retry
+polish.RetryPreparation=Ponów
+russian.RetryPreparation=Повторить
+ukrainian.InstallNow=Встановити
+english.InstallNow=Install now
+polish.InstallNow=Zainstaluj
+russian.InstallNow=Установить
+ukrainian.AutoStartUnavailable=Не вдалося автоматично продовжити встановлення. Натисніть «Встановити», щоб продовжити вручну.
+english.AutoStartUnavailable=Setup could not continue automatically. Select “Install now” to continue manually.
+polish.AutoStartUnavailable=Instalator nie mógł kontynuować automatycznie. Wybierz „Zainstaluj”, aby kontynuować ręcznie.
+russian.AutoStartUnavailable=Не удалось автоматически продолжить установку. Нажмите «Установить», чтобы продолжить вручную.
+ukrainian.LaunchFailed=AgentUsageMonitor встановлено, але програму не вдалося запустити (код Windows %1). Запустіть її з меню «Пуск».
+english.LaunchFailed=AgentUsageMonitor was installed, but could not be started (Windows error %1). Launch it from the Start menu.
+polish.LaunchFailed=AgentUsageMonitor został zainstalowany, ale nie można go uruchomić (błąd Windows %1). Uruchom go z menu Start.
+russian.LaunchFailed=AgentUsageMonitor установлено, но запустить программу не удалось (ошибка Windows %1). Запустите её из меню «Пуск».
 
 [Files]
 ; Replace the independently invoked helper first. If Claude locks it, setup
@@ -153,9 +176,6 @@ Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 ; Same AppUserModelID as the running app, so toasts and the taskbar group
 ; under the shortcut's name and icon.
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; AppUserModelID: "{#AppUserModelID}"; Check: ShouldCreateStartMenuShortcut
-
-[Run]
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent; Check: ShouldOfferUpgradeLaunch
 
 [Registry]
 ; AUM registers this per-user notification identity at runtime
@@ -172,6 +192,9 @@ Root: HKCU; Subkey: "{#MigrationKey}"; Flags: uninsdeletekey dontcreatekey
 Type: files; Name: "{userappdata}\Agent Usage Monitor\notification-icon.png"
 
 [Code]
+const
+  BM_CLICK = $00F5;
+
 var
   PreviousInstallFound: Boolean;
   PreviousInstallIsLegacy: Boolean;
@@ -187,6 +210,10 @@ var
   AppMutexHandle: THandle;
   MutexWin32Error: LongWord;
   MutexCheckFailed: Boolean;
+  AutoAdvanceTimer: LongWord;
+  AutoAdvancePageID: Integer;
+  AutoAdvanceActive: Boolean;
+  InstallLaunchAttempted: Boolean;
 
 function CreateMutexW(Attributes: LongWord; InitialOwner: Boolean; Name: String): THandle;
   external 'CreateMutexW@kernel32.dll stdcall';
@@ -196,6 +223,82 @@ procedure SetLastError(Error: LongWord);
   external 'SetLastError@kernel32.dll stdcall';
 function CloseHandle(Handle: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
+function SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc: LongWord): LongWord;
+  external 'SetTimer@user32.dll stdcall';
+function KillTimer(hWnd, nIDEvent: LongWord): Bool;
+  external 'KillTimer@user32.dll stdcall';
+function PostMessageW(hWnd: THandle; Msg: LongWord; wParam, lParam: THandle): Boolean;
+  external 'PostMessageW@user32.dll stdcall';
+
+procedure StopAutoAdvanceTimer;
+begin
+  AutoAdvanceActive := False;
+  if AutoAdvanceTimer <> 0 then begin
+    KillTimer(0, AutoAdvanceTimer);
+    AutoAdvanceTimer := 0;
+  end;
+end;
+
+procedure ShowManualInstallFallback;
+begin
+  StopAutoAdvanceTimer;
+  WizardForm.BackButton.Visible := False;
+  WizardForm.NextButton.Caption := CustomMessage('InstallNow');
+  WizardForm.NextButton.Visible := True;
+  MsgBox(CustomMessage('AutoStartUnavailable'), mbError, MB_OK);
+end;
+
+procedure AutoAdvanceTimerProc(Arg1, Arg2, Arg3, Arg4: LongWord);
+begin
+  if (WizardForm = nil) or not AutoAdvanceActive then exit;
+  if AutoAdvancePageID = wpLicense then
+    if not WizardForm.LicenseAcceptedRadio.Checked then exit;
+  if AutoAdvancePageID in [wpPreparing, wpInstalling, wpInfoAfter, wpFinished] then exit;
+
+  StopAutoAdvanceTimer;
+  if not PostMessageW(WizardForm.NextButton.Handle, BM_CLICK, 0, 0) then
+    ShowManualInstallFallback;
+end;
+
+procedure StartAutoAdvanceTimer(CurPageID: Integer);
+begin
+  StopAutoAdvanceTimer;
+  AutoAdvancePageID := CurPageID;
+  if WizardSilent or (CurPageID in [wpPreparing, wpInstalling, wpInfoAfter, wpFinished]) then exit;
+  AutoAdvanceActive := True;
+  AutoAdvanceTimer := SetTimer(0, 0, 150, CreateCallback(@AutoAdvanceTimerProc));
+  if AutoAdvanceTimer = 0 then
+    ShowManualInstallFallback;
+end;
+
+procedure InitializeWizard;
+begin
+  WizardForm.Caption := '{#AppName} Setup';
+  WizardForm.BackButton.Visible := False;
+  WizardForm.NextButton.Visible := False;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  WizardForm.BackButton.Visible := False;
+  WizardForm.NextButton.Visible := False;
+  WizardForm.CancelButton.Visible := True;
+
+  if CurPageID = wpLicense then
+    WizardForm.PageDescriptionLabel.Caption := CustomMessage('InstallAfterLicense');
+
+  if CurPageID = wpPreparing then begin
+    WizardForm.NextButton.Caption := CustomMessage('RetryPreparation');
+    WizardForm.NextButton.Visible := True;
+  end;
+
+  StartAutoAdvanceTimer(CurPageID);
+end;
+
+procedure DeinitializeSetup;
+begin
+  StopAutoAdvanceTimer;
+end;
 
 function ParseVersion(const S: String; var A, B, C: Integer): Boolean;
 var
@@ -555,11 +658,6 @@ begin
     Log('Could not remove the migrated Claude bridge argument from the AUM Run value.');
 end;
 
-function ShouldOfferUpgradeLaunch(): Boolean;
-begin
-  Result := PreviousInstallFound or ExistingLegacyPortable;
-end;
-
 function TryReserveAumMutex(): Boolean;
 begin
   Result := False;
@@ -717,22 +815,29 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
-  if CurStep <> ssPostInstall then exit;
-  { With no positive evidence, write terminal Done only after installation
-    completed. A failed or canceled setup can therefore retry migration. }
-  WriteCompletedMigrationMarker;
-  { Positive-evidence markers were persisted during PrepareToInstall. }
-  if MigrationMarkerReady then begin
-    RefreshOwnedStartMenuShortcut;
-    RemoveMigratedRunFlag;
+  if CurStep = ssPostInstall then begin
+    { With no positive evidence, write terminal Done only after installation
+      completed. A failed or canceled setup can therefore retry migration. }
+    WriteCompletedMigrationMarker;
+    { Positive-evidence markers were persisted during PrepareToInstall. }
+    if MigrationMarkerReady then begin
+      RefreshOwnedStartMenuShortcut;
+      RemoveMigratedRunFlag;
+    end;
+    { Files and registry are complete. Release the launch guard before ssDone. }
+    if AppMutexHandle <> 0 then begin
+      CloseHandle(AppMutexHandle);
+      AppMutexHandle := 0;
+    end;
+    exit;
   end;
-  { Files and registry are complete. Release the launch guard before any app start. }
-  if AppMutexHandle <> 0 then begin
-    CloseHandle(AppMutexHandle);
-    AppMutexHandle := 0;
-  end;
-  if not PreviousInstallFound and not ExistingLegacyPortable and not WizardSilent then
-    Exec(ExpandConstant('{app}\{#AppExe}'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ResultCode);
+  if (CurStep <> ssDone) or WizardSilent or InstallLaunchAttempted then exit;
+  { ssDone is emitted only after a successful install. There is no [Run]
+    postinstall entry, so this is the sole interactive launch point. }
+  InstallLaunchAttempted := True;
+  if not Exec(ExpandConstant('{app}\{#AppExe}'), '', ExpandConstant('{app}'),
+      SW_SHOWNORMAL, ewNoWait, ResultCode) then
+    MsgBox(FmtMessage(CustomMessage('LaunchFailed'), [IntToStr(ResultCode)]), mbError, MB_OK);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
