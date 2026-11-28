@@ -803,6 +803,39 @@ mod tests {
     }
 
     #[test]
+    fn preparation_failure_flag_clears_only_after_leaving_preparing() {
+        let page_change = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurPageChanged(CurPageID: Integer)",
+            "procedure DeinitializeSetup",
+        );
+        let preparing_branch = page_change
+            .find("if CurPageID = wpPreparing then begin")
+            .expect("Preparing state handled first");
+        let preparing_exit = page_change[preparing_branch..]
+            .find("    exit;\n  end;")
+            .map(|offset| preparing_branch + offset)
+            .expect("Preparing failure handling returns without clearing the flag");
+        let stale_flag_clear = page_change
+            .find("if CurrentWizardPageID = wpPreparing then\n    PrepareFailurePending := False;")
+            .expect("leaving Preparing clears stale failure state");
+        assert!(preparing_branch < preparing_exit);
+        assert!(preparing_exit < stale_flag_clear);
+        assert!(page_change[stale_flag_clear..].contains("CurrentWizardPageID := CurPageID;"));
+
+        let preparation = source_between(
+            INSTALLER_SCRIPT,
+            "function PrepareToInstall",
+            "function InitializeUninstall",
+        );
+        assert!(preparation.starts_with("function PrepareToInstall"));
+        assert!(
+            preparation.find("PrepareFailurePending := False;").unwrap()
+                < preparation.find("FailPreparation(").unwrap()
+        );
+    }
+
+    #[test]
     fn uninstall_wait_never_updates_setup_wizard_form() {
         let wait = source_between(
             INSTALLER_SCRIPT,

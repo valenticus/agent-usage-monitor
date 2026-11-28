@@ -342,12 +342,11 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  CurrentWizardPageID := CurPageID;
-
   { Inno calls this again after PrepareToInstall returns an error. On that
     interactive failure, replace its disabled Next control with Retry. Silent
     runs have no wizard recovery UI and must never show the custom button. }
   if CurPageID = wpPreparing then begin
+    CurrentWizardPageID := CurPageID;
     if PrepareFailurePending and not WizardSilent then begin
       WizardForm.NextButton.Visible := False;
       RetryButton.Enabled := True;
@@ -355,6 +354,12 @@ begin
     end;
     exit;
   end;
+
+  { Native Back can leave a failed Preparing page without using Retry. Clear
+    that failure before processing the destination page's generic UI state. }
+  if CurrentWizardPageID = wpPreparing then
+    PrepareFailurePending := False;
+  CurrentWizardPageID := CurPageID;
 
   RetryButton.Visible := False;
   RetryButton.Enabled := False;
