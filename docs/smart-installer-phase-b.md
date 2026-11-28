@@ -27,11 +27,18 @@ validation and invoke `PrepareToInstall` before copying files.
 
 If `PrepareToInstall` returns an error, Inno 6.7.3 remains on the Preparing
 page, displays the error, disables its Next control and focuses Cancel. The
-installer adds a separate keyboard-accessible Retry control only after the
-preparation callback returns an error. Retry navigates Back through Inno's
+installer adds a separate keyboard-accessible Retry control from the shared
+failure callback, so it appears whether the failed attempt followed automatic
+advancement or a manual Install action. Retry navigates Back through Inno's
 normal page action; the automatic transition then re-enters the normal Next
-path and calls `PrepareToInstall` again. Errors requiring a different install
-directory need Setup to be canceled and relaunched with `/DIR`.
+path and calls `PrepareToInstall` again. Destination errors explain that Setup
+must be canceled and relaunched with the correct `/DIR` parameter.
+
+Inno retains its native controls on Preparing and Finished pages. This keeps
+the standard restart-required preflight action available; the installer does
+not hide its Finish/restart control. An explicit `InstallCompleted` guard is
+set only at `ssPostInstall`, so a preflight restart, failure or cancellation
+cannot launch AUM at `ssDone`.
 
 Automatic page advancement uses a one-shot timer and sends `BM_CLICK` only to
 Inno's visible, enabled Next button. It checks the page ID immediately after
@@ -42,8 +49,8 @@ automatic clicks. The standard Cancel action remains available.
 The standard Installing page shows Inno's actual file progress. README.md stays
 packaged and installed, without the `isreadme` flag that would offer to open it.
 After successful interactive setup, `ssDone` launches AUM once with
-`ExecAsOriginalUser`; silent setup, failure, cancellation and uninstall do not
-launch it. If Setup is explicitly started with **Run as administrator**, Inno
+`ExecAsOriginalUser`; silent setup, failure, cancellation, restart-required
+preflight and uninstall do not launch it. If Setup is explicitly started with **Run as administrator**, Inno
 cannot always recover the original unelevated token; normal per-user launch
 does not require elevation.
 

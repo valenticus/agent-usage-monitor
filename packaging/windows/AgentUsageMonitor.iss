@@ -103,14 +103,14 @@ ukrainian.VersionCheckFailed=Не вдалося безпечно перевір
 english.VersionCheckFailed=The installed version could not be safely verified. No files were changed.
 polish.VersionCheckFailed=Nie można bezpiecznie zweryfikować zainstalowanej wersji. Pliki nie zostały zmienione.
 russian.VersionCheckFailed=Не удалось безопасно проверить установленную версию. Файлы не изменены.
-ukrainian.InstallPathMismatch=Вибрана папка не відповідає наявному встановленню AgentUsageMonitor. Файли не змінено.
-english.InstallPathMismatch=The selected folder does not match the existing AgentUsageMonitor installation. No files were changed.
-polish.InstallPathMismatch=Wybrany folder nie odpowiada istniejącej instalacji AgentUsageMonitor. Pliki nie zostały zmienione.
-russian.InstallPathMismatch=Выбранная папка не соответствует существующей установке AgentUsageMonitor. Файлы не изменены.
-ukrainian.InstallPathOccupied=У вибраній папці є виконуваний файл AUM, але його версію не можна безпечно перевірити. Виберіть іншу папку або використайте сумісний інсталятор.
-english.InstallPathOccupied=The selected folder contains an AUM executable whose version cannot be safely verified. Choose another folder or use a compatible installer.
-polish.InstallPathOccupied=Wybrany folder zawiera plik AUM, którego wersji nie można bezpiecznie zweryfikować. Wybierz inny folder lub użyj zgodnego instalatora.
-russian.InstallPathOccupied=В выбранной папке находится исполняемый файл AUM, версию которого нельзя безопасно проверить. Выберите другую папку или используйте совместимый установщик.
+ukrainian.InstallPathMismatch=Шлях не відповідає наявному встановленню AgentUsageMonitor. Скасуйте встановлення та запустіть Setup знову з параметром /DIR="правильний шлях". Файли не змінено.
+english.InstallPathMismatch=This path does not match the existing AgentUsageMonitor installation. Cancel Setup, then restart it with /DIR="correct path". No files were changed.
+polish.InstallPathMismatch=Ta ścieżka nie odpowiada istniejącej instalacji AgentUsageMonitor. Anuluj instalację, a następnie uruchom Setup ponownie z parametrem /DIR="właściwa ścieżka". Pliki nie zostały zmienione.
+russian.InstallPathMismatch=Этот путь не соответствует существующей установке AgentUsageMonitor. Отмените установку и запустите Setup снова с параметром /DIR="правильный путь". Файлы не изменены.
+ukrainian.InstallPathOccupied=У цій папці є виконуваний файл AUM, версію якого не можна безпечно перевірити. Скасуйте встановлення та запустіть Setup знову з параметром /DIR="інший шлях". Файли не змінено.
+english.InstallPathOccupied=This folder contains an AUM executable whose version cannot be verified safely. Cancel Setup and restart it with /DIR="another path". No files were changed.
+polish.InstallPathOccupied=Ten folder zawiera plik AUM, którego wersji nie można bezpiecznie sprawdzić. Anuluj instalację i uruchom Setup ponownie z parametrem /DIR="inna ścieżka". Pliki nie zostały zmienione.
+russian.InstallPathOccupied=В этой папке находится исполняемый файл AUM, версию которого нельзя безопасно проверить. Отмените установку и запустите Setup снова с параметром /DIR="другой путь". Файлы не изменены.
 ukrainian.DowngradeBlocked=Встановлена версія %1 новіша за цю версію %2. Пониження версії заблоковано.
 english.DowngradeBlocked=Installed version %1 is newer than this version %2. Downgrades are blocked.
 polish.DowngradeBlocked=Zainstalowana wersja %1 jest nowsza niż wersja %2. Obniżenie wersji zablokowano.
@@ -225,6 +225,7 @@ var
   CurrentWizardPageID: Integer;
   AutoAdvanceActive: Boolean;
   PrepareFailurePending: Boolean;
+  InstallCompleted: Boolean;
   InstallLaunchAttempted: Boolean;
   RetryButton: TNewButton;
 
@@ -285,11 +286,7 @@ begin
     focusable. This runs the normal VCL event path synchronously from the
     asynchronous timer callback, never recursively from CurPageChanged. }
   SendMessageW(WizardForm.NextButton.Handle, BM_CLICK, 0, 0);
-  if PrepareFailurePending then begin
-    RetryButton.Enabled := True;
-    RetryButton.Visible := True;
-    WizardForm.CancelButton.Enabled := True;
-  end else if CurrentWizardPageID = PreviousPageID then
+  if not PrepareFailurePending and (CurrentWizardPageID = PreviousPageID) then
     ShowManualInstallFallback;
 end;
 
@@ -348,6 +345,12 @@ begin
   CurrentWizardPageID := CurPageID;
   RetryButton.Visible := False;
   RetryButton.Enabled := False;
+
+  { Inno owns the Preparing/Finished controls. In particular, a restart-
+    required preflight must retain its native Finish/restart action. }
+  if CurPageID in [wpPreparing, wpFinished] then
+    exit;
+
   WizardForm.BackButton.Visible := False;
   WizardForm.NextButton.Visible := False;
   WizardForm.CancelButton.Visible := True;
@@ -802,6 +805,10 @@ end;
 function FailPreparation(const ErrorText: String): String;
 begin
   PrepareFailurePending := True;
+  { This common callback runs whether automatic advancement or a user clicked
+    the visible manual Install fallback. Keep recovery available in both. }
+  RetryButton.Enabled := True;
+  RetryButton.Visible := True;
   Result := ErrorText;
 end;
 
@@ -886,6 +893,7 @@ var
   ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then begin
+    InstallCompleted := True;
     { With no positive evidence, write terminal Done only after installation
       completed. A failed or canceled setup can therefore retry migration. }
     WriteCompletedMigrationMarker;
@@ -901,7 +909,7 @@ begin
     end;
     exit;
   end;
-  if (CurStep <> ssDone) or WizardSilent or InstallLaunchAttempted then exit;
+  if (CurStep <> ssDone) or not InstallCompleted or WizardSilent or InstallLaunchAttempted then exit;
   { ssDone is emitted only after a successful install. There is no [Run]
     postinstall entry, so this is the sole interactive launch point. }
   InstallLaunchAttempted := True;

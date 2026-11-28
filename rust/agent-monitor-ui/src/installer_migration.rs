@@ -682,6 +682,8 @@ mod tests {
             "function InitializeUninstall",
         );
         assert!(preparation.contains("PrepareFailurePending := True"));
+        assert!(preparation.contains("RetryButton.Enabled := True"));
+        assert!(preparation.contains("RetryButton.Visible := True"));
         assert!(preparation.contains("FailPreparation(CustomMessage('InstallPathMismatch'))"));
         assert!(preparation.contains("FailPreparation(CustomMessage('InstallPathOccupied'))"));
         assert!(preparation.contains("FailPreparation(ErrorText)"));
@@ -690,6 +692,27 @@ mod tests {
         );
         assert!(preparation.contains("FileExists(AppExePath)"));
         assert!(preparation.contains("SamePath(PreviousInstallPath, ExpandConstant('{app}')"));
+    }
+
+    #[test]
+    fn destination_errors_explain_cancel_and_dir_restart_in_every_language() {
+        for language in ["ukrainian", "english", "polish", "russian"] {
+            for key in ["InstallPathMismatch", "InstallPathOccupied"] {
+                let line = INSTALLER_SCRIPT
+                    .lines()
+                    .find(|line| line.starts_with(&format!("{language}.{key}=")))
+                    .expect("localized destination error");
+                assert!(line.contains("/DIR"), "{language}.{key}: {line}");
+                assert!(
+                    line.to_lowercase().contains("setup")
+                        || line.contains("Setup")
+                        || line.contains("instal")
+                        || line.contains("установ")
+                        || line.contains("інстал"),
+                    "{language}.{key}: {line}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -728,11 +751,34 @@ mod tests {
         assert!(completion.contains("CurStep <> ssDone"));
         assert!(completion.contains("WizardSilent"));
         assert!(completion.contains("InstallLaunchAttempted"));
+        assert!(completion.contains("InstallCompleted"));
+        assert!(completion.contains("InstallCompleted := True"));
         assert!(completion.contains("LaunchFailed"));
         assert!(!INSTALLER_SCRIPT.contains("\n[Run]\n"));
-        assert!(
-            completion.contains("CurStep <> ssDone) or WizardSilent or InstallLaunchAttempted")
+        assert!(completion.contains(
+            "CurStep <> ssDone) or not InstallCompleted or WizardSilent or InstallLaunchAttempted"
+        ));
+    }
+
+    #[test]
+    fn restart_required_preflight_keeps_inno_controls_and_cannot_launch() {
+        let page_change = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurPageChanged(CurPageID: Integer)",
+            "procedure DeinitializeSetup",
         );
+        assert!(page_change.contains("if CurPageID in [wpPreparing, wpFinished] then\n    exit"));
+        let completion = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurStepChanged",
+            "procedure CurUninstallStepChanged",
+        );
+        let post_install = completion.find("InstallCompleted := True").unwrap();
+        let launch_guard = completion
+            .find("not InstallCompleted")
+            .expect("launch is gated by completed install");
+        assert!(post_install < launch_guard);
+        assert!(completion.contains("if CurStep = ssPostInstall then begin"));
     }
 
     #[test]
