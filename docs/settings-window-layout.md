@@ -28,7 +28,11 @@ retained. Closing Settings does not record anything, so an automatically sized
 window is measured again on every reopen: language or content growth and a
 different monitor's work area are applied. A maximized size is never
 recorded as the user's size; any earlier user-selected restored size is kept.
-The tracker only stores numbers; it never resizes the window.
+The tracker only stores numbers; it never resizes the window. It updates the
+shared layout state with `try_lock`, so it can never deadlock; an event is
+dropped only if the lock is held while a size-loop message arrives. Keep every
+lock scope free of Win32 calls and message pumping to preserve that guarantee.
+Aero Snap and Win+Arrow placements are intentionally not user-selected sizes.
 
 Because native font/text metrics can settle after the hidden-window
 measurement, Windows performs one additional common-page measurement 150 ms
