@@ -7,7 +7,7 @@
 ;
 ; Policy for this release:
 ; - Per-user install under %LOCALAPPDATA%\Programs; no administrator rights.
-; - Start menu shortcut; desktop shortcut only when chosen.
+; - Start Menu shortcut only; no desktop shortcut.
 ; - Optional per-user Windows sign-in launch, disabled by default; no automatic update installation or telemetry.
 ; - Provider (Codex/Claude) marks are embedded inside agent-usage-monitor.exe
 ;   by build.rs from the tracked original SVGs in
@@ -20,6 +20,10 @@
 ; - The Claude Code status-line bridge stays opt-in and is managed in AUM Settings.
 ; - Installer version parsing supports strict major.minor.patch versions only;
 ;   suffixes are rejected safely.
+
+#if Ver < EncodeVer(6, 7, 3)
+  #error This installer requires Inno Setup 6.7.3 or newer.
+#endif
 
 #ifndef AppVersion
   #define AppVersion "0.3.0"
@@ -60,7 +64,8 @@ PrivilegesRequired=lowest
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-DisableDirPage=auto
+DisableDirPage=yes
+UsePreviousAppDir=yes
 DisableWelcomePage=yes
 DisableReadyPage=yes
 DisableFinishedPage=yes
@@ -150,6 +155,14 @@ ukrainian.RetryPreparation=Повторити
 english.RetryPreparation=Retry
 polish.RetryPreparation=Ponów
 russian.RetryPreparation=Повторить
+ukrainian.RetryBackFallback=Не вдалося повернутися до попереднього кроку. Натисніть «Назад», щоб повернутися; перевірку буде повторено автоматично.
+english.RetryBackFallback=Setup could not return to the previous step. Select Back to return; the checks will run again automatically.
+polish.RetryBackFallback=Instalator nie mógł wrócić do poprzedniego kroku. Wybierz Wstecz; sprawdzanie uruchomi się ponownie automatycznie.
+russian.RetryBackFallback=Не удалось вернуться к предыдущему шагу. Нажмите «Назад»; проверка запустится автоматически повторно.
+ukrainian.AutoStartUnavailable=Не вдалося автоматично перейти до наступного кроку. Скористайтеся доступною кнопкою, щоб продовжити.
+english.AutoStartUnavailable=Setup could not advance automatically. Use the visible button to continue.
+polish.AutoStartUnavailable=Instalator nie mógł przejść dalej automatycznie. Użyj widocznego przycisku, aby kontynuować.
+russian.AutoStartUnavailable=Не удалось автоматически перейти к следующему шагу. Используйте доступную кнопку, чтобы продолжить.
 ukrainian.InstallNow=Встановити
 english.InstallNow=Install now
 polish.InstallNow=Zainstaluj
@@ -170,7 +183,7 @@ russian.LaunchFailed=AgentUsageMonitor установлено, но запуст
 Source: "{#StageDir}\{#BridgeExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Same AppUserModelID as the running app, so toasts and the taskbar group
@@ -192,9 +205,6 @@ Root: HKCU; Subkey: "{#MigrationKey}"; Flags: uninsdeletekey dontcreatekey
 Type: files; Name: "{userappdata}\Agent Usage Monitor\notification-icon.png"
 
 [Code]
-const
-  BM_CLICK = $00F5;
-
 var
   PreviousInstallFound: Boolean;
   PreviousInstallIsLegacy: Boolean;
@@ -212,8 +222,11 @@ var
   MutexCheckFailed: Boolean;
   AutoAdvanceTimer: LongWord;
   AutoAdvancePageID: Integer;
+  CurrentWizardPageID: Integer;
   AutoAdvanceActive: Boolean;
+  PrepareFailurePending: Boolean;
   InstallLaunchAttempted: Boolean;
+  RetryButton: TNewButton;
 
 function CreateMutexW(Attributes: LongWord; InitialOwner: Boolean; Name: String): THandle;
   external 'CreateMutexW@kernel32.dll stdcall';
@@ -227,8 +240,11 @@ function SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc: LongWord): LongWord;
   external 'SetTimer@user32.dll stdcall';
 function KillTimer(hWnd, nIDEvent: LongWord): Bool;
   external 'KillTimer@user32.dll stdcall';
-function PostMessageW(hWnd: THandle; Msg: LongWord; wParam, lParam: THandle): Boolean;
-  external 'PostMessageW@user32.dll stdcall';
+function SendMessageW(hWnd: THandle; Msg: LongWord; wParam, lParam: THandle): THandle;
+  external 'SendMessageW@user32.dll stdcall';
+
+const
+  BM_CLICK = $00F5;
 
 procedure StopAutoAdvanceTimer;
 begin
@@ -249,15 +265,51 @@ begin
 end;
 
 procedure AutoAdvanceTimerProc(Arg1, Arg2, Arg3, Arg4: LongWord);
+var
+  PreviousPageID: Integer;
 begin
   if (WizardForm = nil) or not AutoAdvanceActive then exit;
   if AutoAdvancePageID = wpLicense then
     if not WizardForm.LicenseAcceptedRadio.Checked then exit;
   if AutoAdvancePageID in [wpPreparing, wpInstalling, wpInfoAfter, wpFinished] then exit;
 
+  PreviousPageID := CurrentWizardPageID;
   StopAutoAdvanceTimer;
-  if not PostMessageW(WizardForm.NextButton.Handle, BM_CLICK, 0, 0) then
+  WizardForm.NextButton.Visible := True;
+  if not WizardForm.NextButton.CanFocus then begin
     ShowManualInstallFallback;
+    exit;
+  end;
+
+  { Send the standard button message only while the control is visible and
+    focusable. This runs the normal VCL event path synchronously from the
+    asynchronous timer callback, never recursively from CurPageChanged. }
+  SendMessageW(WizardForm.NextButton.Handle, BM_CLICK, 0, 0);
+  if PrepareFailurePending then begin
+    RetryButton.Enabled := True;
+    RetryButton.Visible := True;
+    WizardForm.CancelButton.Enabled := True;
+  end else if CurrentWizardPageID = PreviousPageID then
+    ShowManualInstallFallback;
+end;
+
+procedure RetryPreparationClick(Sender: TObject);
+var
+  PreviousPageID: Integer;
+begin
+  if not PrepareFailurePending then exit;
+  PrepareFailurePending := False;
+  RetryButton.Enabled := False;
+  RetryButton.Visible := False;
+  PreviousPageID := CurrentWizardPageID;
+  { Re-enter the ordinary page flow. Inno will invoke PrepareToInstall again
+    when its normal Next action reaches the preparation phase. }
+  WizardForm.BackButton.Visible := True;
+  WizardForm.BackButton.Enabled := True;
+  if WizardForm.BackButton.CanFocus then
+    SendMessageW(WizardForm.BackButton.Handle, BM_CLICK, 0, 0);
+  if CurrentWizardPageID = PreviousPageID then
+    MsgBox(CustomMessage('RetryBackFallback'), mbInformation, MB_OK);
 end;
 
 procedure StartAutoAdvanceTimer(CurPageID: Integer);
@@ -276,21 +328,32 @@ begin
   WizardForm.Caption := '{#AppName} Setup';
   WizardForm.BackButton.Visible := False;
   WizardForm.NextButton.Visible := False;
+
+  RetryButton := TNewButton.Create(WizardForm);
+  RetryButton.Parent := WizardForm;
+  RetryButton.Left := WizardForm.NextButton.Left;
+  RetryButton.Top := WizardForm.NextButton.Top;
+  RetryButton.Width := WizardForm.NextButton.Width;
+  RetryButton.Height := WizardForm.NextButton.Height;
+  RetryButton.Anchors := WizardForm.NextButton.Anchors;
+  RetryButton.TabOrder := WizardForm.NextButton.TabOrder;
+  RetryButton.Caption := CustomMessage('RetryPreparation');
+  RetryButton.Visible := False;
+  RetryButton.Enabled := False;
+  RetryButton.OnClick := @RetryPreparationClick;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  CurrentWizardPageID := CurPageID;
+  RetryButton.Visible := False;
+  RetryButton.Enabled := False;
   WizardForm.BackButton.Visible := False;
   WizardForm.NextButton.Visible := False;
   WizardForm.CancelButton.Visible := True;
 
   if CurPageID = wpLicense then
     WizardForm.PageDescriptionLabel.Caption := CustomMessage('InstallAfterLicense');
-
-  if CurPageID = wpPreparing then begin
-    WizardForm.NextButton.Caption := CustomMessage('RetryPreparation');
-    WizardForm.NextButton.Visible := True;
-  end;
 
   StartAutoAdvanceTimer(CurPageID);
 end;
@@ -736,14 +799,21 @@ begin
   end;
 end;
 
+function FailPreparation(const ErrorText: String): String;
+begin
+  PrepareFailurePending := True;
+  Result := ErrorText;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ErrorText, AppExePath: String;
 begin
+  PrepareFailurePending := False;
   Result := '';
   if PreviousInstallFound and
      not SamePath(PreviousInstallPath, ExpandConstant('{app}')) then begin
-    Result := CustomMessage('InstallPathMismatch');
+    Result := FailPreparation(CustomMessage('InstallPathMismatch'));
     exit;
   end;
   AppExePath := ExpandConstant('{app}\{#AppExe}');
@@ -754,7 +824,7 @@ begin
         ExistingLegacyPortable := True;
         LegacyRunOwned := True;
       end else begin
-        Result := CustomMessage('InstallPathOccupied');
+        Result := FailPreparation(CustomMessage('InstallPathOccupied'));
         exit;
       end;
     end else begin
@@ -765,7 +835,7 @@ begin
     end;
   end;
   if not WaitForAumReservation(not WizardSilent, False, ErrorText) then begin
-    Result := ErrorText;
+    Result := FailPreparation(ErrorText);
     exit;
   end;
   if not WriteMigrationMarker then begin
@@ -773,7 +843,7 @@ begin
       CloseHandle(AppMutexHandle);
       AppMutexHandle := 0;
     end;
-    Result := CustomMessage('MigrationPersistenceFailed');
+    Result := FailPreparation(CustomMessage('MigrationPersistenceFailed'));
   end;
 end;
 
@@ -835,7 +905,7 @@ begin
   { ssDone is emitted only after a successful install. There is no [Run]
     postinstall entry, so this is the sole interactive launch point. }
   InstallLaunchAttempted := True;
-  if not Exec(ExpandConstant('{app}\{#AppExe}'), '', ExpandConstant('{app}'),
+  if not ExecAsOriginalUser(ExpandConstant('{app}\{#AppExe}'), '', ExpandConstant('{app}'),
       SW_SHOWNORMAL, ewNoWait, ResultCode) then
     MsgBox(FmtMessage(CustomMessage('LaunchFailed'), [IntToStr(ResultCode)]), mbError, MB_OK);
 end;
