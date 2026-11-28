@@ -7,7 +7,7 @@
 ;
 ; Policy for this release:
 ; - Per-user install under %LOCALAPPDATA%\Programs; no administrator rights.
-; - Start menu shortcut; desktop shortcut only when chosen.
+; - Start Menu shortcut only; no desktop shortcut.
 ; - Optional per-user Windows sign-in launch, disabled by default; no automatic update installation or telemetry.
 ; - Provider (Codex/Claude) marks are embedded inside agent-usage-monitor.exe
 ;   by build.rs from the tracked original SVGs in
@@ -20,6 +20,10 @@
 ; - The Claude Code status-line bridge stays opt-in and is managed in AUM Settings.
 ; - Installer version parsing supports strict major.minor.patch versions only;
 ;   suffixes are rejected safely.
+
+#if Ver < EncodeVer(6, 7, 3)
+  #error This installer requires Inno Setup 6.7.3 or newer.
+#endif
 
 #ifndef AppVersion
   #define AppVersion "0.3.0"
@@ -60,7 +64,11 @@ PrivilegesRequired=lowest
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-DisableDirPage=auto
+DisableDirPage=yes
+UsePreviousAppDir=yes
+DisableWelcomePage=yes
+DisableReadyPage=yes
+DisableFinishedPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Windows 10 1809 or later (toast AppUserModelID registration, DWM APIs).
@@ -95,14 +103,14 @@ ukrainian.VersionCheckFailed=Не вдалося безпечно перевір
 english.VersionCheckFailed=The installed version could not be safely verified. No files were changed.
 polish.VersionCheckFailed=Nie można bezpiecznie zweryfikować zainstalowanej wersji. Pliki nie zostały zmienione.
 russian.VersionCheckFailed=Не удалось безопасно проверить установленную версию. Файлы не изменены.
-ukrainian.InstallPathMismatch=Вибрана папка не відповідає наявному встановленню AgentUsageMonitor. Файли не змінено.
-english.InstallPathMismatch=The selected folder does not match the existing AgentUsageMonitor installation. No files were changed.
-polish.InstallPathMismatch=Wybrany folder nie odpowiada istniejącej instalacji AgentUsageMonitor. Pliki nie zostały zmienione.
-russian.InstallPathMismatch=Выбранная папка не соответствует существующей установке AgentUsageMonitor. Файлы не изменены.
-ukrainian.InstallPathOccupied=У вибраній папці є виконуваний файл AUM, але його версію не можна безпечно перевірити. Виберіть іншу папку або використайте сумісний інсталятор.
-english.InstallPathOccupied=The selected folder contains an AUM executable whose version cannot be safely verified. Choose another folder or use a compatible installer.
-polish.InstallPathOccupied=Wybrany folder zawiera plik AUM, którego wersji nie można bezpiecznie zweryfikować. Wybierz inny folder lub użyj zgodnego instalatora.
-russian.InstallPathOccupied=В выбранной папке находится исполняемый файл AUM, версию которого нельзя безопасно проверить. Выберите другую папку или используйте совместимый установщик.
+ukrainian.InstallPathMismatch=Шлях не відповідає наявному встановленню AgentUsageMonitor. Скасуйте встановлення та запустіть Setup знову з параметром /DIR="правильний шлях". Файли не змінено.
+english.InstallPathMismatch=This path does not match the existing AgentUsageMonitor installation. Cancel Setup, then restart it with /DIR="correct path". No files were changed.
+polish.InstallPathMismatch=Ta ścieżka nie odpowiada istniejącej instalacji AgentUsageMonitor. Anuluj instalację, a następnie uruchom Setup ponownie z parametrem /DIR="właściwa ścieżka". Pliki nie zostały zmienione.
+russian.InstallPathMismatch=Этот путь не соответствует существующей установке AgentUsageMonitor. Отмените установку и запустите Setup снова с параметром /DIR="правильный путь". Файлы не изменены.
+ukrainian.InstallPathOccupied=У цій папці є виконуваний файл AUM, версію якого не можна безпечно перевірити. Скасуйте встановлення та запустіть Setup знову з параметром /DIR="інший шлях". Файли не змінено.
+english.InstallPathOccupied=This folder contains an AUM executable whose version cannot be verified safely. Cancel Setup and restart it with /DIR="another path". No files were changed.
+polish.InstallPathOccupied=Ten folder zawiera plik AUM, którego wersji nie można bezpiecznie sprawdzić. Anuluj instalację i uruchom Setup ponownie z parametrem /DIR="inna ścieżka". Pliki nie zostały zmienione.
+russian.InstallPathOccupied=В этой папке находится исполняемый файл AUM, версию которого нельзя безопасно проверить. Отмените установку и запустите Setup снова с параметром /DIR="другой путь". Файлы не изменены.
 ukrainian.DowngradeBlocked=Встановлена версія %1 новіша за цю версію %2. Пониження версії заблоковано.
 english.DowngradeBlocked=Installed version %1 is newer than this version %2. Downgrades are blocked.
 polish.DowngradeBlocked=Zainstalowana wersja %1 jest nowsza niż wersja %2. Obniżenie wersji zablokowano.
@@ -139,6 +147,34 @@ ukrainian.MigrationPersistenceFailed=Не вдалося зберегти ста
 english.MigrationPersistenceFailed=The AUM migration state could not be saved. No files were changed; resolve the registry access issue and retry setup.
 polish.MigrationPersistenceFailed=Nie można zapisać stanu migracji AUM. Pliki nie zostały zmienione; usuń problem z dostępem do rejestru i ponów instalację.
 russian.MigrationPersistenceFailed=Не удалось сохранить состояние миграции AUM. Файлы не изменены; устраните проблему доступа к реестру и повторите установку.
+ukrainian.InstallAfterLicense=Встановлення AgentUsageMonitor почнеться автоматично після прийняття ліцензії.
+english.InstallAfterLicense=AgentUsageMonitor will install automatically after you accept the license.
+polish.InstallAfterLicense=Instalacja AgentUsageMonitor rozpocznie się automatycznie po zaakceptowaniu licencji.
+russian.InstallAfterLicense=Установка AgentUsageMonitor начнётся автоматически после принятия лицензии.
+ukrainian.RetryPreparation=Повторити
+english.RetryPreparation=Retry
+polish.RetryPreparation=Ponów
+russian.RetryPreparation=Повторить
+ukrainian.RetryBackFallback=Не вдалося повернутися до попереднього кроку. Натисніть «Назад», щоб повернутися; перевірку буде повторено автоматично.
+english.RetryBackFallback=Setup could not return to the previous step. Select Back to return; the checks will run again automatically.
+polish.RetryBackFallback=Instalator nie mógł wrócić do poprzedniego kroku. Wybierz Wstecz; sprawdzanie uruchomi się ponownie automatycznie.
+russian.RetryBackFallback=Не удалось вернуться к предыдущему шагу. Нажмите «Назад»; проверка запустится автоматически повторно.
+ukrainian.AutoStartUnavailable=Не вдалося автоматично перейти до наступного кроку. Скористайтеся доступною кнопкою, щоб продовжити.
+english.AutoStartUnavailable=Setup could not advance automatically. Use the visible button to continue.
+polish.AutoStartUnavailable=Instalator nie mógł przejść dalej automatycznie. Użyj widocznego przycisku, aby kontynuować.
+russian.AutoStartUnavailable=Не удалось автоматически перейти к следующему шагу. Используйте доступную кнопку, чтобы продолжить.
+ukrainian.InstallNow=Встановити
+english.InstallNow=Install now
+polish.InstallNow=Zainstaluj
+russian.InstallNow=Установить
+ukrainian.AutoStartUnavailable=Не вдалося автоматично продовжити встановлення. Натисніть «Встановити», щоб продовжити вручну.
+english.AutoStartUnavailable=Setup could not continue automatically. Select “Install now” to continue manually.
+polish.AutoStartUnavailable=Instalator nie mógł kontynuować automatycznie. Wybierz „Zainstaluj”, aby kontynuować ręcznie.
+russian.AutoStartUnavailable=Не удалось автоматически продолжить установку. Нажмите «Установить», чтобы продолжить вручную.
+ukrainian.LaunchFailed=AgentUsageMonitor встановлено, але програму не вдалося запустити (код Windows %1). Запустіть її з меню «Пуск».
+english.LaunchFailed=AgentUsageMonitor was installed, but could not be started (Windows error %1). Launch it from the Start menu.
+polish.LaunchFailed=AgentUsageMonitor został zainstalowany, ale nie można go uruchomić (błąd Windows %1). Uruchom go z menu Start.
+russian.LaunchFailed=AgentUsageMonitor установлено, но запустить программу не удалось (ошибка Windows %1). Запустите её из меню «Пуск».
 
 [Files]
 ; Replace the independently invoked helper first. If Claude locks it, setup
@@ -147,15 +183,12 @@ russian.MigrationPersistenceFailed=Не удалось сохранить сос
 Source: "{#StageDir}\{#BridgeExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Same AppUserModelID as the running app, so toasts and the taskbar group
 ; under the shortcut's name and icon.
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; AppUserModelID: "{#AppUserModelID}"; Check: ShouldCreateStartMenuShortcut
-
-[Run]
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent; Check: ShouldOfferUpgradeLaunch
 
 [Registry]
 ; AUM registers this per-user notification identity at runtime
@@ -187,6 +220,14 @@ var
   AppMutexHandle: THandle;
   MutexWin32Error: LongWord;
   MutexCheckFailed: Boolean;
+  AutoAdvanceTimer: LongWord;
+  AutoAdvancePageID: Integer;
+  CurrentWizardPageID: Integer;
+  AutoAdvanceActive: Boolean;
+  PrepareFailurePending: Boolean;
+  InstallCompleted: Boolean;
+  InstallLaunchAttempted: Boolean;
+  RetryButton: TNewButton;
 
 function CreateMutexW(Attributes: LongWord; InitialOwner: Boolean; Name: String): THandle;
   external 'CreateMutexW@kernel32.dll stdcall';
@@ -196,6 +237,152 @@ procedure SetLastError(Error: LongWord);
   external 'SetLastError@kernel32.dll stdcall';
 function CloseHandle(Handle: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
+function SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc: LongWord): LongWord;
+  external 'SetTimer@user32.dll stdcall';
+function KillTimer(hWnd, nIDEvent: LongWord): Bool;
+  external 'KillTimer@user32.dll stdcall';
+function SendMessageW(hWnd: THandle; Msg: LongWord; wParam, lParam: THandle): THandle;
+  external 'SendMessageW@user32.dll stdcall';
+
+const
+  BM_CLICK = $00F5;
+
+procedure StopAutoAdvanceTimer;
+begin
+  AutoAdvanceActive := False;
+  if AutoAdvanceTimer <> 0 then begin
+    KillTimer(0, AutoAdvanceTimer);
+    AutoAdvanceTimer := 0;
+  end;
+end;
+
+procedure ShowManualInstallFallback;
+begin
+  StopAutoAdvanceTimer;
+  WizardForm.BackButton.Visible := False;
+  WizardForm.NextButton.Caption := CustomMessage('InstallNow');
+  WizardForm.NextButton.Visible := True;
+  MsgBox(CustomMessage('AutoStartUnavailable'), mbError, MB_OK);
+end;
+
+procedure AutoAdvanceTimerProc(Arg1, Arg2, Arg3, Arg4: LongWord);
+var
+  PreviousPageID: Integer;
+begin
+  if (WizardForm = nil) or not AutoAdvanceActive then exit;
+  if AutoAdvancePageID = wpLicense then
+    if not WizardForm.LicenseAcceptedRadio.Checked then exit;
+  if AutoAdvancePageID in [wpPreparing, wpInstalling, wpInfoAfter, wpFinished] then exit;
+
+  PreviousPageID := CurrentWizardPageID;
+  StopAutoAdvanceTimer;
+  WizardForm.NextButton.Visible := True;
+  if not WizardForm.NextButton.CanFocus then begin
+    ShowManualInstallFallback;
+    exit;
+  end;
+
+  { Send the standard button message only while the control is visible and
+    focusable. This runs the normal VCL event path synchronously from the
+    asynchronous timer callback, never recursively from CurPageChanged. }
+  SendMessageW(WizardForm.NextButton.Handle, BM_CLICK, 0, 0);
+  if not PrepareFailurePending and (CurrentWizardPageID = PreviousPageID) then
+    ShowManualInstallFallback;
+end;
+
+procedure RetryPreparationClick(Sender: TObject);
+var
+  PreviousPageID: Integer;
+begin
+  if not PrepareFailurePending then exit;
+  PrepareFailurePending := False;
+  RetryButton.Enabled := False;
+  RetryButton.Visible := False;
+  PreviousPageID := CurrentWizardPageID;
+  { Re-enter the ordinary page flow. Inno will invoke PrepareToInstall again
+    when its normal Next action reaches the preparation phase. }
+  WizardForm.BackButton.Visible := True;
+  WizardForm.BackButton.Enabled := True;
+  if WizardForm.BackButton.CanFocus then
+    SendMessageW(WizardForm.BackButton.Handle, BM_CLICK, 0, 0);
+  if CurrentWizardPageID = PreviousPageID then
+    MsgBox(CustomMessage('RetryBackFallback'), mbInformation, MB_OK);
+end;
+
+procedure StartAutoAdvanceTimer(CurPageID: Integer);
+begin
+  StopAutoAdvanceTimer;
+  AutoAdvancePageID := CurPageID;
+  if WizardSilent or (CurPageID in [wpPreparing, wpInstalling, wpInfoAfter, wpFinished]) then exit;
+  AutoAdvanceActive := True;
+  AutoAdvanceTimer := SetTimer(0, 0, 150, CreateCallback(@AutoAdvanceTimerProc));
+  if AutoAdvanceTimer = 0 then
+    ShowManualInstallFallback;
+end;
+
+procedure InitializeWizard;
+begin
+  WizardForm.Caption := '{#AppName} Setup';
+  WizardForm.BackButton.Visible := False;
+  WizardForm.NextButton.Visible := False;
+
+  RetryButton := TNewButton.Create(WizardForm);
+  RetryButton.Parent := WizardForm;
+  RetryButton.Left := WizardForm.NextButton.Left;
+  RetryButton.Top := WizardForm.NextButton.Top;
+  RetryButton.Width := WizardForm.NextButton.Width;
+  RetryButton.Height := WizardForm.NextButton.Height;
+  RetryButton.Anchors := WizardForm.NextButton.Anchors;
+  RetryButton.TabOrder := WizardForm.NextButton.TabOrder;
+  RetryButton.Caption := CustomMessage('RetryPreparation');
+  RetryButton.Visible := False;
+  RetryButton.Enabled := False;
+  RetryButton.OnClick := @RetryPreparationClick;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  { Inno calls this again after PrepareToInstall returns an error. On that
+    interactive failure, replace its disabled Next control with Retry. Silent
+    runs have no wizard recovery UI and must never show the custom button. }
+  if CurPageID = wpPreparing then begin
+    CurrentWizardPageID := CurPageID;
+    if PrepareFailurePending and not WizardSilent then begin
+      WizardForm.NextButton.Visible := False;
+      RetryButton.Enabled := True;
+      RetryButton.Visible := True;
+    end;
+    exit;
+  end;
+
+  { Native Back can leave a failed Preparing page without using Retry. Clear
+    that failure before processing the destination page's generic UI state. }
+  if CurrentWizardPageID = wpPreparing then
+    PrepareFailurePending := False;
+  CurrentWizardPageID := CurPageID;
+
+  RetryButton.Visible := False;
+  RetryButton.Enabled := False;
+
+  { Inno owns the Preparing/Finished controls. In particular, a restart-
+    required preflight must retain its native Finish/restart action. }
+  if CurPageID = wpFinished then
+    exit;
+
+  WizardForm.BackButton.Visible := False;
+  WizardForm.NextButton.Visible := False;
+  WizardForm.CancelButton.Visible := True;
+
+  if CurPageID = wpLicense then
+    WizardForm.PageDescriptionLabel.Caption := CustomMessage('InstallAfterLicense');
+
+  StartAutoAdvanceTimer(CurPageID);
+end;
+
+procedure DeinitializeSetup;
+begin
+  StopAutoAdvanceTimer;
+end;
 
 function ParseVersion(const S: String; var A, B, C: Integer): Boolean;
 var
@@ -555,11 +742,6 @@ begin
     Log('Could not remove the migrated Claude bridge argument from the AUM Run value.');
 end;
 
-function ShouldOfferUpgradeLaunch(): Boolean;
-begin
-  Result := PreviousInstallFound or ExistingLegacyPortable;
-end;
-
 function TryReserveAumMutex(): Boolean;
 begin
   Result := False;
@@ -638,14 +820,21 @@ begin
   end;
 end;
 
+function FailPreparation(const ErrorText: String): String;
+begin
+  PrepareFailurePending := True;
+  Result := ErrorText;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ErrorText, AppExePath: String;
 begin
+  PrepareFailurePending := False;
   Result := '';
   if PreviousInstallFound and
      not SamePath(PreviousInstallPath, ExpandConstant('{app}')) then begin
-    Result := CustomMessage('InstallPathMismatch');
+    Result := FailPreparation(CustomMessage('InstallPathMismatch'));
     exit;
   end;
   AppExePath := ExpandConstant('{app}\{#AppExe}');
@@ -656,7 +845,7 @@ begin
         ExistingLegacyPortable := True;
         LegacyRunOwned := True;
       end else begin
-        Result := CustomMessage('InstallPathOccupied');
+        Result := FailPreparation(CustomMessage('InstallPathOccupied'));
         exit;
       end;
     end else begin
@@ -667,7 +856,7 @@ begin
     end;
   end;
   if not WaitForAumReservation(not WizardSilent, False, ErrorText) then begin
-    Result := ErrorText;
+    Result := FailPreparation(ErrorText);
     exit;
   end;
   if not WriteMigrationMarker then begin
@@ -675,7 +864,7 @@ begin
       CloseHandle(AppMutexHandle);
       AppMutexHandle := 0;
     end;
-    Result := CustomMessage('MigrationPersistenceFailed');
+    Result := FailPreparation(CustomMessage('MigrationPersistenceFailed'));
   end;
 end;
 
@@ -717,22 +906,30 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
-  if CurStep <> ssPostInstall then exit;
-  { With no positive evidence, write terminal Done only after installation
-    completed. A failed or canceled setup can therefore retry migration. }
-  WriteCompletedMigrationMarker;
-  { Positive-evidence markers were persisted during PrepareToInstall. }
-  if MigrationMarkerReady then begin
-    RefreshOwnedStartMenuShortcut;
-    RemoveMigratedRunFlag;
+  if CurStep = ssPostInstall then begin
+    InstallCompleted := True;
+    { With no positive evidence, write terminal Done only after installation
+      completed. A failed or canceled setup can therefore retry migration. }
+    WriteCompletedMigrationMarker;
+    { Positive-evidence markers were persisted during PrepareToInstall. }
+    if MigrationMarkerReady then begin
+      RefreshOwnedStartMenuShortcut;
+      RemoveMigratedRunFlag;
+    end;
+    { Files and registry are complete. Release the launch guard before ssDone. }
+    if AppMutexHandle <> 0 then begin
+      CloseHandle(AppMutexHandle);
+      AppMutexHandle := 0;
+    end;
+    exit;
   end;
-  { Files and registry are complete. Release the launch guard before any app start. }
-  if AppMutexHandle <> 0 then begin
-    CloseHandle(AppMutexHandle);
-    AppMutexHandle := 0;
-  end;
-  if not PreviousInstallFound and not ExistingLegacyPortable and not WizardSilent then
-    Exec(ExpandConstant('{app}\{#AppExe}'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ResultCode);
+  if (CurStep <> ssDone) or not InstallCompleted or WizardSilent or InstallLaunchAttempted then exit;
+  { ssDone is emitted only after a successful install. There is no [Run]
+    postinstall entry, so this is the sole interactive launch point. }
+  InstallLaunchAttempted := True;
+  if not ExecAsOriginalUser(ExpandConstant('{app}\{#AppExe}'), '', ExpandConstant('{app}'),
+      SW_SHOWNORMAL, ewNoWait, ResultCode) then
+    MsgBox(FmtMessage(CustomMessage('LaunchFailed'), [IntToStr(ResultCode)]), mbError, MB_OK);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

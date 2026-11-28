@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Builds the AgentUsageMonitor Windows x64 release candidate: release
-  binaries, a portable ZIP and (when Inno Setup 6 is available) the per-user
+  binaries, a portable ZIP and (when Inno Setup 6.7.3+ is available) the per-user
   installer. Nothing is installed, uninstalled or published.
 
 .EXAMPLE
@@ -12,7 +12,7 @@
 .NOTES
   Requires: Rust stable with the x86_64-pc-windows-msvc target and the MSVC
   build tools (the same as a normal `cargo build`).
-  Installer step requires Inno Setup 6 (ISCC.exe). Install it once with:
+  Installer step requires Inno Setup 6.7.3 or newer (ISCC.exe). Install it once with:
     winget install --id JRSoftware.InnoSetup -e
   or from https://jrsoftware.org/isdl.php. If ISCC.exe is missing, the script
   still produces the portable ZIP, prints this hint and exits with code 2.

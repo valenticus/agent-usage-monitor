@@ -577,7 +577,7 @@ mod tests {
         let run_update = source_between(
             INSTALLER_SCRIPT,
             "procedure RemoveMigratedRunFlag",
-            "function ShouldOfferUpgradeLaunch",
+            "function TryReserveAumMutex",
         );
         assert!(run_update.contains("LegacyRunOwned and MigrationMarkerReady"));
         assert!(run_update.contains("RegWriteStringValue(HKCU"));
@@ -617,6 +617,222 @@ mod tests {
         );
         assert!(post_install.contains("WriteCompletedMigrationMarker"));
         assert!(INSTALLER_SCRIPT.contains("function WriteCompletedMigrationMarker"));
+    }
+
+    #[test]
+    fn installer_uses_checked_normal_wizard_transition_after_license_acceptance() {
+        const PHASE_B_DOC: &str = include_str!("../../../docs/smart-installer-phase-b.md");
+        let setup = source_between(INSTALLER_SCRIPT, "[Setup]", "[Languages]");
+        assert!(setup.contains("DisableWelcomePage=yes"));
+        assert!(setup.contains("DisableReadyPage=yes"));
+        assert!(setup.contains("DisableFinishedPage=yes"));
+        assert!(setup.contains("DisableDirPage=yes"));
+        assert!(setup.contains("UsePreviousAppDir=yes"));
+        assert!(INSTALLER_SCRIPT.contains("LicenseFile=..\\..\\LICENSE"));
+        assert!(!INSTALLER_SCRIPT.contains("\n[Run]\n"));
+        assert!(PHASE_B_DOC.contains("`/DIR`"));
+        assert!(PHASE_B_DOC.contains("UsePreviousAppDir=yes"));
+        assert!(PHASE_B_DOC.contains("after acceptance"));
+
+        let transition = source_between(
+            INSTALLER_SCRIPT,
+            "procedure AutoAdvanceTimerProc",
+            "procedure RetryPreparationClick",
+        );
+        assert!(transition.contains("WizardForm.NextButton.Visible := True"));
+        assert!(transition.contains("WizardForm.NextButton.CanFocus"));
+        assert!(transition.contains("SendMessageW(WizardForm.NextButton.Handle, BM_CLICK"));
+        assert!(transition.contains("CurrentWizardPageID = PreviousPageID"));
+        assert!(transition.contains("WizardForm.LicenseAcceptedRadio.Checked"));
+        assert!(transition.contains("StopAutoAdvanceTimer"));
+        assert!(!transition.contains("PostMessageW"));
+
+        for language in ["ukrainian", "english", "polish", "russian"] {
+            assert!(INSTALLER_SCRIPT.contains(&format!("{language}.RetryPreparation=")));
+            assert!(INSTALLER_SCRIPT.contains(&format!("{language}.RetryBackFallback=")));
+            assert!(INSTALLER_SCRIPT.contains(&format!("{language}.AutoStartUnavailable=")));
+        }
+
+        let scheduler = source_between(
+            INSTALLER_SCRIPT,
+            "procedure StartAutoAdvanceTimer",
+            "procedure InitializeWizard",
+        );
+        assert!(scheduler.contains("SetTimer(0, 0, 150"));
+    }
+
+    #[test]
+    fn prepare_failure_exposes_retry_and_reenters_normal_page_flow() {
+        let retry = source_between(
+            INSTALLER_SCRIPT,
+            "procedure RetryPreparationClick",
+            "procedure InitializeWizard",
+        );
+        assert!(retry.contains("if not PrepareFailurePending then exit"));
+        assert!(retry.contains("WizardForm.BackButton.Visible := True"));
+        assert!(retry.contains("WizardForm.BackButton.CanFocus"));
+        assert!(retry.contains("SendMessageW(WizardForm.BackButton.Handle, BM_CLICK"));
+        assert!(retry.contains("CurrentWizardPageID = PreviousPageID"));
+        assert!(retry.contains("CustomMessage('RetryBackFallback')"));
+        assert!(!retry.contains("PrepareToInstall("));
+
+        let preparation = source_between(
+            INSTALLER_SCRIPT,
+            "function FailPreparation",
+            "function InitializeUninstall",
+        );
+        assert!(preparation.contains("PrepareFailurePending := True"));
+        assert!(!preparation.contains("RetryButton.Enabled := True"));
+        assert!(!preparation.contains("RetryButton.Visible := True"));
+        assert!(preparation.contains("FailPreparation(CustomMessage('InstallPathMismatch'))"));
+        assert!(preparation.contains("FailPreparation(CustomMessage('InstallPathOccupied'))"));
+        assert!(preparation.contains("FailPreparation(ErrorText)"));
+        assert!(
+            preparation.contains("FailPreparation(CustomMessage('MigrationPersistenceFailed'))")
+        );
+        assert!(preparation.contains("FileExists(AppExePath)"));
+        assert!(preparation.contains("SamePath(PreviousInstallPath, ExpandConstant('{app}')"));
+    }
+
+    #[test]
+    fn destination_errors_explain_cancel_and_dir_restart_in_every_language() {
+        for language in ["ukrainian", "english", "polish", "russian"] {
+            for key in ["InstallPathMismatch", "InstallPathOccupied"] {
+                let line = INSTALLER_SCRIPT
+                    .lines()
+                    .find(|line| line.starts_with(&format!("{language}.{key}=")))
+                    .expect("localized destination error");
+                assert!(line.contains("/DIR"), "{language}.{key}: {line}");
+                assert!(
+                    line.to_lowercase().contains("setup")
+                        || line.contains("Setup")
+                        || line.contains("instal")
+                        || line.contains("установ")
+                        || line.contains("інстал"),
+                    "{language}.{key}: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn readme_is_installed_without_auto_open_and_setup_requires_inno_673() {
+        let readme = INSTALLER_SCRIPT
+            .lines()
+            .find(|line| line.contains("README.md"))
+            .expect("README staging entry");
+        assert!(readme.contains("DestDir: \"{app}\""));
+        assert!(readme.contains("Flags: ignoreversion"));
+        assert!(!readme.contains("isreadme"));
+        assert!(INSTALLER_SCRIPT.contains("#if Ver < EncodeVer(6, 7, 3)"));
+        assert!(
+            INSTALLER_SCRIPT.contains("#error This installer requires Inno Setup 6.7.3 or newer.")
+        );
+    }
+
+    #[test]
+    fn install_launch_uses_original_user_context() {
+        let completion = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurStepChanged",
+            "procedure CurUninstallStepChanged",
+        );
+        assert!(completion.contains("ExecAsOriginalUser("));
+        assert!(!completion.contains("if not Exec("));
+    }
+
+    #[test]
+    fn installer_launches_once_only_after_successful_interactive_completion() {
+        let completion = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurStepChanged",
+            "procedure CurUninstallStepChanged",
+        );
+        assert!(completion.contains("CurStep <> ssDone"));
+        assert!(completion.contains("WizardSilent"));
+        assert!(completion.contains("InstallLaunchAttempted"));
+        assert!(completion.contains("InstallCompleted"));
+        assert!(completion.contains("InstallCompleted := True"));
+        assert!(completion.contains("LaunchFailed"));
+        assert!(!INSTALLER_SCRIPT.contains("\n[Run]\n"));
+        assert!(completion.contains(
+            "CurStep <> ssDone) or not InstallCompleted or WizardSilent or InstallLaunchAttempted"
+        ));
+    }
+
+    #[test]
+    fn restart_required_preflight_keeps_inno_controls_and_cannot_launch() {
+        let page_change = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurPageChanged(CurPageID: Integer)",
+            "procedure DeinitializeSetup",
+        );
+        let preparing_start = page_change
+            .find("if CurPageID = wpPreparing then begin")
+            .expect("Preparing page handled explicitly");
+        let retry_reset = page_change
+            .find("RetryButton.Visible := False;")
+            .expect("generic Retry reset exists");
+        assert!(preparing_start < retry_reset);
+        let preparing = &page_change[preparing_start..retry_reset];
+        assert!(preparing.contains("PrepareFailurePending and not WizardSilent"));
+        assert!(preparing.contains("WizardForm.NextButton.Visible := False"));
+        assert!(preparing.contains("RetryButton.Enabled := True"));
+        assert!(preparing.contains("RetryButton.Visible := True"));
+        assert!(!preparing.contains("CancelButton.Visible := False"));
+        assert!(page_change.contains("if CurPageID = wpFinished then\n    exit"));
+
+        let failure = source_between(
+            INSTALLER_SCRIPT,
+            "function FailPreparation",
+            "function PrepareToInstall",
+        );
+        assert!(failure.contains("PrepareFailurePending := True"));
+        assert!(!failure.contains("RetryButton.Visible := True"));
+        let completion = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurStepChanged",
+            "procedure CurUninstallStepChanged",
+        );
+        let post_install = completion.find("InstallCompleted := True").unwrap();
+        let launch_guard = completion
+            .find("not InstallCompleted")
+            .expect("launch is gated by completed install");
+        assert!(post_install < launch_guard);
+        assert!(completion.contains("if CurStep = ssPostInstall then begin"));
+    }
+
+    #[test]
+    fn preparation_failure_flag_clears_only_after_leaving_preparing() {
+        let page_change = source_between(
+            INSTALLER_SCRIPT,
+            "procedure CurPageChanged(CurPageID: Integer)",
+            "procedure DeinitializeSetup",
+        );
+        let preparing_branch = page_change
+            .find("if CurPageID = wpPreparing then begin")
+            .expect("Preparing state handled first");
+        let preparing_exit = page_change[preparing_branch..]
+            .find("    exit;\n  end;")
+            .map(|offset| preparing_branch + offset)
+            .expect("Preparing failure handling returns without clearing the flag");
+        let stale_flag_clear = page_change
+            .find("if CurrentWizardPageID = wpPreparing then\n    PrepareFailurePending := False;")
+            .expect("leaving Preparing clears stale failure state");
+        assert!(preparing_branch < preparing_exit);
+        assert!(preparing_exit < stale_flag_clear);
+        assert!(page_change[stale_flag_clear..].contains("CurrentWizardPageID := CurPageID;"));
+
+        let preparation = source_between(
+            INSTALLER_SCRIPT,
+            "function PrepareToInstall",
+            "function InitializeUninstall",
+        );
+        assert!(preparation.starts_with("function PrepareToInstall"));
+        assert!(
+            preparation.find("PrepareFailurePending := False;").unwrap()
+                < preparation.find("FailPreparation(").unwrap()
+        );
     }
 
     #[test]
