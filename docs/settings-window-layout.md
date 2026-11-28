@@ -15,12 +15,28 @@ artificially large. Only after that layout turn does the app read all three
 page preferred heights, choose their maximum, apply the work-area cap, and
 show the window at the final size. Thus the work area is an upper bound, not
 the desired height. Manual native resizing remains available and is retained
-in memory when Settings closes; reopening respects that size when it fits the
-work area, otherwise the existing work-area clamp applies. Because native
-font/text metrics can settle after the hidden-window measurement, Windows
-performs one additional common-page measurement 150 ms after first show. It
-applies that measured height only if no size had been retained and the user has
-not resized the window in the meantime. The same work-area clamp is applied.
+in memory for the rest of the session; reopening respects that size when it
+fits the work area, otherwise the existing work-area clamp applies.
+
+Only a genuine user-selected size is retained. The Settings HWND is subclassed
+to observe the native size loop: a `WM_ENTERSIZEMOVE` … `WM_EXITSIZEMOVE` loop
+that contains `WM_SIZING` (a border drag or keyboard sizing) records the final
+client size, converted with the window's DPI. App-requested resizes (Winit's
+asynchronous `SetWindowPos`), DPI changes when moving between monitors,
+caption-only moves, maximize and snap send no `WM_SIZING` and are never
+retained. Closing Settings does not record anything, so an automatically sized
+window is measured again on every reopen: language or content growth and a
+different monitor's work area are applied. A maximized size is never
+recorded as the user's size; any earlier user-selected restored size is kept.
+The tracker only stores numbers; it never resizes the window.
+
+Because native font/text metrics can settle after the hidden-window
+measurement, Windows performs one additional common-page measurement 150 ms
+after each automatic-size show. It applies that measured height only if no
+user size is retained and the user has not resized the window in the meantime.
+The same work-area clamp is applied, using the monitor that contains the
+visible Settings window, not the monitor under the cursor (the hidden window is
+opened on the cursor's monitor).
 "Not resized" means the current size is still one the app owns: the size the
 first fit requested, or the pre-fit size if the native resize has not landed
 yet. Winit applies `set_size` asynchronously on Windows, so `Window::size()`

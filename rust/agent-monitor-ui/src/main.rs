@@ -161,15 +161,90 @@ struct SettingsScreenSignature {
 #[derive(Debug, Clone, Copy, Default)]
 struct SettingsLayoutSnapshot {
     screen: Option<SettingsScreenSignature>,
-    retained_size: Option<(f32, f32)>,
+    size_ownership: SettingsSizeOwnership,
 }
 
 impl SettingsLayoutSnapshot {
     const fn new() -> Self {
         Self {
             screen: None,
-            retained_size: None,
+            size_ownership: SettingsSizeOwnership::new(),
         }
+    }
+}
+
+/// Tracks whether the Settings size was chosen by the user. Only a native
+/// modal size loop that contains `WM_SIZING` counts: Windows sends
+/// `WM_SIZING` solely while the user drags a border or sizes the window from
+/// the keyboard. App-requested `SetWindowPos` resizes (including Winit's
+/// asynchronous `set_size`), DPI changes, maximize and snap never send it, so
+/// none of them turn an automatic size into a retained one.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct SettingsSizeOwnership {
+    in_size_move: bool,
+    user_sizing_seen: bool,
+    user_size: Option<(f32, f32)>,
+}
+
+impl SettingsSizeOwnership {
+    const fn new() -> Self {
+        Self {
+            in_size_move: false,
+            user_sizing_seen: false,
+            user_size: None,
+        }
+    }
+
+    /// `WM_ENTERSIZEMOVE`: a native move or size loop starts.
+    fn enter_size_move(&mut self) {
+        self.in_size_move = true;
+        self.user_sizing_seen = false;
+    }
+
+    /// `WM_SIZING`: the user is changing the size inside that loop.
+    fn user_sizing(&mut self) {
+        if self.in_size_move {
+            self.user_sizing_seen = true;
+        }
+    }
+
+    /// `WM_EXITSIZEMOVE` with the final logical client size. Returns the
+    /// size recorded as user-selected, if this loop resized the window.
+    fn exit_size_move(&mut self, client_logical: (f32, f32)) -> Option<(f32, f32)> {
+        let user_resized = self.in_size_move && self.user_sizing_seen;
+        self.in_size_move = false;
+        self.user_sizing_seen = false;
+        let valid = client_logical.0.is_finite()
+            && client_logical.1.is_finite()
+            && client_logical.0 > 0.0
+            && client_logical.1 > 0.0;
+        if user_resized && valid {
+            self.user_size = Some(client_logical);
+            return self.user_size;
+        }
+        None
+    }
+
+    fn user_size(&self) -> Option<(f32, f32)> {
+        self.user_size
+    }
+}
+
+/// Which monitor bounds a Settings geometry pass. A hidden window is opened
+/// on the monitor under the cursor; a visible window is fitted on the monitor
+/// that contains it, so a post-show remeasure cannot follow the mouse to
+/// another display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsMonitor {
+    Cursor,
+    Window,
+}
+
+fn settings_fit_monitor(window_visible: bool) -> SettingsMonitor {
+    if window_visible {
+        SettingsMonitor::Window
+    } else {
+        SettingsMonitor::Cursor
     }
 }
 
@@ -612,8 +687,9 @@ fn main() -> Result<(), slint::PlatformError> {
     settings_window.window().on_close_requested({
         let panel = settings_window.as_weak();
         move || {
+            // A user-selected size was already recorded when its native size
+            // loop ended; an automatic size is deliberately not retained.
             if let Some(panel) = panel.upgrade() {
-                remember_settings_window_size(&panel);
                 let _ = panel.hide();
             }
             slint::CloseRequestResponse::HideWindow
@@ -3143,8 +3219,12 @@ fn show_settings_measured(window: &SettingsWindow) {
     #[cfg(not(windows))]
     let _ = app_requested_size;
     #[cfg(windows)]
-    let first_open_without_retained_size = retained_settings_window_size().is_none();
+    let opened_with_automatic_size = retained_settings_window_size().is_none();
     let _ = window.show();
+    #[cfg(windows)]
+    if !install_settings_size_tracker(window.window()) {
+        retry_settings_size_tracker(window.as_weak(), 20);
+    }
     activate_window(window.window());
     let mode = match window.get_theme_kind() {
         1 => ThemeMode::BluishDark,
@@ -3154,9 +3234,10 @@ fn show_settings_measured(window: &SettingsWindow) {
     if !theme::apply_title_bar(window.window(), mode) {
         retry_title_bar(window.as_weak(), mode, 20);
     }
-    // Native text metrics can settle only after the window is shown. On a
-    // first open, remeasure once and apply the common page height if the user
-    // has not resized the window. A retained/manual size remains authoritative.
+    // Native text metrics can settle only after the window is shown. On every
+    // open with an automatic size (no user-selected size retained), remeasure
+    // once and apply the common page height if the user has not resized the
+    // window meanwhile. A user-selected size remains authoritative.
     //
     // On Windows, Winit applies `set_size` asynchronously: `Window::size()`
     // keeps the old value until `WindowEvent::Resized` arrives. A size read
@@ -3179,7 +3260,7 @@ fn show_settings_measured(window: &SettingsWindow) {
                 app_requested_size,
             );
             let fit_allowed = native_first_show_remeasure_allowed(
-                first_open_without_retained_size && retained_size.is_none() && visible,
+                opened_with_automatic_size && retained_size.is_none() && visible,
                 &app_owned_sizes,
                 (current.width, current.height),
                 resizing,
@@ -3187,8 +3268,8 @@ fn show_settings_measured(window: &SettingsWindow) {
             #[cfg(debug_assertions)]
             if QA_GEOMETRY.load(Ordering::Acquire) {
                 eprintln!(
-                    "QA_GEOMETRY_POST_SHOW visible={visible} first_open={} retained={retained_size:?} resizing={resizing} pre_fit={:.2}x{:.2} app_requested={app_requested_size:?} current={:.2}x{:.2} scale={scale:.4} fit_allowed={fit_allowed}",
-                    first_open_without_retained_size,
+                    "QA_GEOMETRY_POST_SHOW visible={visible} auto_size={} retained={retained_size:?} resizing={resizing} pre_fit={:.2}x{:.2} app_requested={app_requested_size:?} current={:.2}x{:.2} scale={scale:.4} fit_allowed={fit_allowed}",
+                    opened_with_automatic_size,
                     pre_fit_logical_size.width,
                     pre_fit_logical_size.height,
                     current.width,
@@ -3231,16 +3312,121 @@ fn native_first_show_app_owned_sizes(
 /// one the app owns; any other size means the user resized it.
 #[cfg(any(windows, test))]
 fn native_first_show_remeasure_allowed(
-    first_open_without_retained_size: bool,
+    opened_with_automatic_size: bool,
     app_owned_sizes: &[(f32, f32)],
     current_size: (f32, f32),
     user_is_resizing: bool,
 ) -> bool {
-    first_open_without_retained_size
+    opened_with_automatic_size
         && !user_is_resizing
         && app_owned_sizes.iter().any(|size| {
             (current_size.0 - size.0).abs() <= 0.5 && (current_size.1 - size.1).abs() <= 0.5
         })
+}
+
+#[cfg(windows)]
+const SETTINGS_SIZE_TRACKER_ID: usize = 0x4155_4d53; // "AUMS"
+
+/// Subclasses the Settings HWND to observe the native size loop. Installing
+/// the same proc/id again only updates it, so calling this on every show is
+/// safe. Returns false while the native window does not exist yet.
+#[cfg(windows)]
+fn install_settings_size_tracker(window: &slint::Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+    let handle = window.window_handle();
+    let Ok(handle) = handle.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+    unsafe {
+        SetWindowSubclass(
+            handle.hwnd.get() as _,
+            Some(settings_size_tracker_proc),
+            SETTINGS_SIZE_TRACKER_ID,
+            0,
+        ) != 0
+    }
+}
+
+#[cfg(windows)]
+fn retry_settings_size_tracker(window: slint::Weak<SettingsWindow>, attempts: u8) {
+    if attempts == 0 {
+        return;
+    }
+    slint::Timer::single_shot(Duration::from_millis(50), move || {
+        if let Some(panel) = window.upgrade()
+            && !install_settings_size_tracker(panel.window())
+        {
+            retry_settings_size_tracker(panel.as_weak(), attempts - 1);
+        }
+    });
+}
+
+/// Records only the size-loop facts; it never calls back into Slint or
+/// resizes the window, so it cannot start a resize loop. `try_lock` keeps a
+/// message dispatched while the layout lock is held from deadlocking.
+#[cfg(windows)]
+unsafe extern "system" fn settings_size_tracker_proc(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SIZING,
+    };
+    match message {
+        WM_ENTERSIZEMOVE => {
+            if let Ok(mut layout) = SETTINGS_LAYOUT.try_lock() {
+                layout.size_ownership.enter_size_move();
+            }
+        }
+        WM_SIZING => {
+            if let Ok(mut layout) = SETTINGS_LAYOUT.try_lock() {
+                layout.size_ownership.user_sizing();
+            }
+        }
+        WM_EXITSIZEMOVE => {
+            let mut client = RECT::default();
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            let scale = if dpi > 0 { dpi as f32 / 96.0 } else { 1.0 };
+            let logical = if unsafe { GetClientRect(hwnd, &mut client) } != 0 {
+                (
+                    (client.right - client.left) as f32 / scale,
+                    (client.bottom - client.top) as f32 / scale,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            if let Ok(mut layout) = SETTINGS_LAYOUT.try_lock() {
+                let _recorded = layout.size_ownership.exit_size_move(logical);
+                #[cfg(debug_assertions)]
+                if QA_GEOMETRY.load(Ordering::Acquire) {
+                    eprintln!(
+                        "QA_GEOMETRY_SIZE_LOOP_END client_logical={:.2}x{:.2} user_size_recorded={_recorded:?}",
+                        logical.0, logical.1
+                    );
+                }
+            }
+        }
+        WM_NCDESTROY => unsafe {
+            RemoveWindowSubclass(
+                hwnd,
+                Some(settings_size_tracker_proc),
+                SETTINGS_SIZE_TRACKER_ID,
+            );
+        },
+        _ => {}
+    }
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
 /// Requests ordinary foreground activation for a window opened by an explicit
@@ -3338,11 +3524,13 @@ fn recalculate_settings_layout(
         retained_settings_window_size(),
     );
     #[cfg(windows)]
-    let screen = settings_screen_signature(window, use_common_size);
+    let monitor = settings_fit_monitor(window.window().is_visible());
+    #[cfg(windows)]
+    let screen = settings_screen_signature(window, monitor == SettingsMonitor::Cursor);
     #[cfg(all(windows, debug_assertions))]
     if QA_GEOMETRY.load(Ordering::Acquire) && screen.is_none() {
         eprintln!(
-            "QA_GEOMETRY_NATIVE_FIT_SKIPPED reason=screen_lookup_failed common={use_common_size} required={required_height:.2}"
+            "QA_GEOMETRY_NATIVE_FIT_SKIPPED reason=screen_lookup_failed common={use_common_size} monitor={monitor:?} required={required_height:.2}"
         );
     }
     #[cfg(windows)]
@@ -3368,7 +3556,7 @@ fn recalculate_settings_layout(
         #[cfg(debug_assertions)]
         if QA_GEOMETRY.load(Ordering::Acquire) {
             eprintln!(
-                "QA_GEOMETRY_NATIVE_FIT required={required_height:.2} requested={requested_width:.2}x{requested_height:.2} work_area={}x{}@{},{} scale={:.4} clamped={:.2}x{:.2} current={:.2}x{:.2} set_size={will_resize}",
+                "QA_GEOMETRY_NATIVE_FIT monitor={monitor:?} required={required_height:.2} requested={requested_width:.2}x{requested_height:.2} work_area={}x{}@{},{} scale={:.4} clamped={:.2}x{:.2} current={:.2}x{:.2} set_size={will_resize}",
                 screen.work_area.right - screen.work_area.left,
                 screen.work_area.bottom - screen.work_area.top,
                 screen.work_area.left,
@@ -3430,22 +3618,7 @@ fn retained_settings_window_size() -> Option<(f32, f32)> {
     SETTINGS_LAYOUT
         .lock()
         .ok()
-        .and_then(|layout| layout.retained_size)
-}
-
-fn remember_settings_window_size(window: &SettingsWindow) {
-    let size = window
-        .window()
-        .size()
-        .to_logical(window.window().scale_factor().max(0.5));
-    if size.width.is_finite()
-        && size.height.is_finite()
-        && size.width > 0.0
-        && size.height > 0.0
-        && let Ok(mut layout) = SETTINGS_LAYOUT.lock()
-    {
-        layout.retained_size = Some((size.width, size.height));
-    }
+        .and_then(|layout| layout.size_ownership.user_size())
 }
 
 #[cfg(windows)]
@@ -4618,21 +4791,164 @@ mod tests {
         assert!(geometry.y + (geometry.height * 2.0).round() as i32 + 64 <= 600);
     }
 
+    /// Native message order for a user border drag.
+    fn user_resize(ownership: &mut SettingsSizeOwnership, size: (f32, f32)) -> Option<(f32, f32)> {
+        ownership.enter_size_move();
+        ownership.user_sizing();
+        ownership.user_sizing();
+        ownership.exit_size_move(size)
+    }
+
     #[test]
-    fn settings_reopen_preserves_a_user_sized_window_when_available() {
-        assert_eq!(settings_open_size(720.0, 764.0, None), (720.0, 764.0));
-        let window = SettingsWindow::new().unwrap();
-        window
-            .window()
-            .set_size(slint::LogicalSize::new(880.0, 680.0));
-        let previous = retained_settings_window_size();
-        remember_settings_window_size(&window);
-        let retained = retained_settings_window_size().unwrap();
-        assert_eq!(retained, (880.0, 680.0));
-        assert_eq!(settings_open_size(720.0, 764.0, Some(retained)), retained);
-        if let Ok(mut layout) = SETTINGS_LAYOUT.lock() {
-            layout.retained_size = previous;
-        }
+    fn auto_sized_settings_are_measured_again_after_close_and_reopen() {
+        let ownership = SettingsSizeOwnership::new();
+        // First open: the app sizes the window (no native size loop), the
+        // asynchronous resize lands, and the user closes Settings.
+        assert_eq!(
+            settings_open_size(720.0, 748.0, ownership.user_size()),
+            (720.0, 748.0)
+        );
+        assert_eq!(ownership.user_size(), None);
+        // Reopen: nothing was retained, so the post-show fit runs again.
+        assert!(native_first_show_remeasure_allowed(
+            ownership.user_size().is_none(),
+            &native_first_show_app_owned_sizes((720.0, 748.0), Some((720.0, 748.0))),
+            (720.0, 748.0),
+            false,
+        ));
+    }
+
+    #[test]
+    fn language_or_content_growth_between_opens_refits_an_automatic_size() {
+        let ownership = SettingsSizeOwnership::new();
+        // About grew between opens (e.g. a longer locale): 738 -> 764.
+        assert_eq!(
+            settings_open_size(720.0, 738.0, ownership.user_size()),
+            (720.0, 738.0)
+        );
+        assert_eq!(
+            settings_open_size(720.0, 764.0, ownership.user_size()),
+            (720.0, 764.0)
+        );
+        let roomy = SettingsScreenSignature {
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1032,
+            },
+            ..screen(1.0)
+        };
+        let fitted = settings_geometry(720.0, 764.0, roomy);
+        assert_eq!(fitted.height, 764.0);
+    }
+
+    #[test]
+    fn manual_resize_persists_across_close_and_reopen() {
+        let mut ownership = SettingsSizeOwnership::new();
+        assert_eq!(
+            user_resize(&mut ownership, (880.0, 680.0)),
+            Some((880.0, 680.0))
+        );
+        // Close does not change it; reopen uses it even when content grew.
+        let retained = ownership.user_size();
+        assert_eq!(retained, Some((880.0, 680.0)));
+        assert_eq!(settings_open_size(720.0, 764.0, retained), (880.0, 680.0));
+        // A retained user size blocks the automatic post-show fit.
+        assert!(!native_first_show_remeasure_allowed(
+            retained.is_none(),
+            &native_first_show_app_owned_sizes((880.0, 680.0), Some((880.0, 680.0))),
+            (880.0, 680.0),
+            false,
+        ));
+        // A later move-only loop keeps the user's size.
+        ownership.enter_size_move();
+        assert_eq!(ownership.exit_size_move((880.0, 680.0)), None);
+        assert_eq!(ownership.user_size(), Some((880.0, 680.0)));
+        // A second manual resize replaces it.
+        assert_eq!(
+            user_resize(&mut ownership, (760.0, 700.0)),
+            Some((760.0, 700.0))
+        );
+        assert_eq!(ownership.user_size(), Some((760.0, 700.0)));
+    }
+
+    #[test]
+    fn only_a_native_user_size_loop_marks_the_size_as_user_selected() {
+        let mut ownership = SettingsSizeOwnership::new();
+        // App/Winit `SetWindowPos`, DPI change, maximize and snap: no size
+        // loop with WM_SIZING, whatever the client size becomes.
+        assert_eq!(ownership.user_size(), None);
+        // Dragging the caption (move loop, no WM_SIZING), including moving to
+        // another monitor with a different DPI, is not a resize.
+        ownership.enter_size_move();
+        assert_eq!(ownership.exit_size_move((960.0, 1000.0)), None);
+        // A stray WM_SIZING outside a loop is ignored.
+        ownership.user_sizing();
+        assert_eq!(ownership.exit_size_move((960.0, 1000.0)), None);
+        // A loop that ends with an unusable size records nothing.
+        ownership.enter_size_move();
+        ownership.user_sizing();
+        assert_eq!(ownership.exit_size_move((0.0, 0.0)), None);
+        assert_eq!(ownership.user_size(), None);
+        // Flags reset after each loop.
+        ownership.enter_size_move();
+        assert_eq!(ownership.exit_size_move((720.0, 748.0)), None);
+        assert_eq!(ownership.user_size(), None);
+    }
+
+    #[test]
+    fn post_show_fit_uses_the_monitor_containing_settings() {
+        // Hidden: open on the cursor's monitor. Visible (the 150 ms post-show
+        // fit and monitor-change refresh): the window's own monitor.
+        assert_eq!(settings_fit_monitor(false), SettingsMonitor::Cursor);
+        assert_eq!(settings_fit_monitor(true), SettingsMonitor::Window);
+    }
+
+    #[test]
+    fn moving_settings_between_monitors_keeps_work_area_and_dpi_bounds() {
+        let large = SettingsScreenSignature {
+            monitor: 1,
+            work_area: PhysicalWorkArea {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1392,
+            },
+            scale_bits: 1.5f32.to_bits(),
+        };
+        let small = SettingsScreenSignature {
+            monitor: 2,
+            work_area: PhysicalWorkArea {
+                left: 2560,
+                top: 0,
+                right: 3926,
+                bottom: 728,
+            },
+            scale_bits: 1.0f32.to_bits(),
+        };
+        // An automatic size clamped on the small monitor is not retained, so
+        // a later open on the large monitor gets the full required height.
+        let ownership = SettingsSizeOwnership::new();
+        let on_small = settings_geometry(720.0, 748.0, small);
+        assert!(on_small.height < 748.0);
+        assert!(on_small.minimum_height <= on_small.height);
+        let (width, height) = settings_open_size(720.0, 748.0, ownership.user_size());
+        let on_large = settings_geometry(width, height, large);
+        assert_eq!((on_large.width, on_large.height), (720.0, 748.0));
+        assert!(on_large.x >= large.work_area.left && on_large.x < large.work_area.right);
+
+        // A user size from the large monitor is clamped on the small one and
+        // restored in full when the large monitor is used again.
+        let mut ownership = SettingsSizeOwnership::new();
+        user_resize(&mut ownership, (900.0, 820.0));
+        let (width, height) = settings_open_size(720.0, 748.0, ownership.user_size());
+        let clamped = settings_geometry(width, height, small);
+        assert_eq!(clamped.width, 900.0);
+        assert!(clamped.height < 820.0);
+        assert!(clamped.x >= small.work_area.left);
+        let restored = settings_geometry(width, height, large);
+        assert_eq!((restored.width, restored.height), (900.0, 820.0));
     }
 
     use super::*;
